@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-A live browser simulation of a meandering river: a Rust core compiled to WASM, drawn as SVG with parameter sliders. `PLAN.md` is the handoff document. It holds the current status, the numbered list of model options (1–13, referred to by number in commits), the tuning history, and the references. Read it before starting a new option, and update its checklist when one lands.
+A live browser simulation of a meandering river: a Rust core compiled to WASM, drawn as SVG with parameter sliders.
 
 ## Commands
 
@@ -33,4 +33,4 @@ With the `physics` flag on, every `Params::set` call re-derives `omega`, `gamma`
 
 - The hot path avoids `hypot`, `ln` and `cos`. They are software routines in WASM and made a step 3.6× slower than native. `Sim` keeps scratch buffers to avoid per-step allocation.
 - The validation tests in `meander-core/src/lib.rs` pin the model's behaviour. A sine perturbation must grow and drift downstream (this checks the sign convention). A local-only kernel must not drift. Noise runs must cut off, never self-intersect, and keep sinuosity bounded. Run `make test` after any change to the dynamics.
-- Commits use conventional prefixes and name the PLAN.md option where one applies, e.g. `feat: stochastic flood-driven cutoffs (option 10)`.
+- Commits use conventional prefixes, e.g. `feat: stochastic flood-driven cutoffs`.
