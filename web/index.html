@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Riverine</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<canvas id="view"></canvas>
+<aside id="panel">
+  <header>
+    <h1>Riverine</h1>
+    <button id="collapse" title="Hide controls">×</button>
+  </header>
+  <div class="buttons">
+    <button id="play" title="Space">Pause</button>
+    <button id="step" title="S">Step</button>
+    <button id="reset" title="R">Reset</button>
+  </div>
+  <div class="seed">
+    <label for="seed">Seed</label>
+    <input id="seed" type="number" value="1" min="0" step="1">
+    <button id="reseed" title="New random seed">Random</button>
+  </div>
+  <div id="sliders"></div>
+  <pre id="stats"></pre>
+</aside>
+<button id="expand" title="Show controls" hidden>☰</button>
+<script type="module" src="main.js"></script>
+</body>
+</html>

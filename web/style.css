@@ -1,0 +1,144 @@
+:root {
+  --panel-bg: rgba(250, 247, 238, 0.92);
+  --panel-fg: #2b2a26;
+  --muted: #6d6a60;
+  --accent: #2f6f8f;
+  --border: rgba(0, 0, 0, 0.12);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --panel-bg: rgba(28, 30, 32, 0.92);
+    --panel-fg: #e6e3da;
+    --muted: #9c998f;
+    --accent: #7fb7d4;
+    --border: rgba(255, 255, 255, 0.14);
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #cfc6a4;
+  font: 13px/1.4 system-ui, -apple-system, sans-serif;
+  color: var(--panel-fg);
+}
+
+#view {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+#panel {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  width: 280px;
+  max-height: calc(100% - 24px);
+  overflow-y: auto;
+  padding: 12px 14px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  backdrop-filter: blur(6px);
+}
+
+#panel header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+h2 {
+  margin: 14px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:hover { border-color: var(--accent); }
+
+#collapse, #expand {
+  border: none;
+  font-size: 16px;
+  padding: 2px 6px;
+}
+
+#expand {
+  position: fixed;
+  top: 12px;
+  right: 12px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+}
+
+.buttons, .seed {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+  align-items: center;
+}
+
+.buttons button { flex: 1; }
+
+.seed input {
+  width: 0;
+  flex: 1;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px 6px;
+}
+
+.slider {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  margin-top: 6px;
+}
+
+.slider label { color: var(--panel-fg); }
+
+.slider output {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.slider input {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 2px 0 0;
+  accent-color: var(--accent);
+}
+
+#stats {
+  margin: 14px 0 0;
+  font: 11px/1.5 ui-monospace, monospace;
+  color: var(--muted);
+  white-space: pre-wrap;
+}

@@ -1,0 +1,11 @@
+[package]
+name = "meander-wasm"
+edition.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+meander-core = { path = "../meander-core" }
+wasm-bindgen = "0.2"
