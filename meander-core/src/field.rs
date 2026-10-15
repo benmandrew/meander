@@ -22,6 +22,10 @@ pub fn fbm(seed: u64, x: f64, y: f64, octaves: u32) -> f64 {
 /// Seed offset of the fine layer of [`Erodibility::height`].
 const HEIGHT_SEED: u64 = 0x4E1F_7A2B;
 
+/// Depth of a fresh oxbow lake below fresh point-bar sand, in channel
+/// depths: the bed of the channel it was cut from.
+pub const LAKE_DEPTH: f64 = 1.0;
+
 /// Distance from the bank, in levee lengths, beyond which a flood lays no
 /// deposit; exp(−4) is under 2% of the deposit at the bank.
 const LEVEE_REACH: f64 = 4.0;
@@ -84,7 +88,8 @@ pub struct Erodibility {
     /// Time the channel last swept each cell, or minus infinity.
     pub swept_at: Vec<f64>,
     /// Height of overbank deposits above fresh point-bar sand, in channel
-    /// depths. The channel resets it to 0 where it sweeps.
+    /// depths. The channel resets it to 0 where it sweeps, and a cutoff
+    /// sets it to −`LAKE_DEPTH` over the oxbow footprint.
     pub deposit: Vec<f32>,
     /// Scratch: squared distance from each cell to the channel during a
     /// flood.
@@ -141,7 +146,8 @@ impl Erodibility {
 
     /// Multiplier at `p`: noise of strength `g.heterogeneity` around 1,
     /// times a factor for the ground's history. Inside an oxbow footprint it
-    /// moves linearly from `g.lake` to `g.clay` over `g.lake_life`; on a
+    /// moves linearly from `g.lake` to `g.clay` over `g.lake_life`, or
+    /// faster as floods silt the lake up (see [`Erodibility::silt_at`]); on a
     /// point bar, from `g.bar` to 1 over `g.vegetation`. A bank raised by
     /// overbank deposits of height h, in channel depths, holds 1 + h times
     /// the material of a bank at bar level, so it erodes 1 / (1 + h) as
@@ -149,14 +155,13 @@ impl Erodibility {
     pub fn at(&self, p: P, g: &Ground) -> f64 {
         let i = self.index(p);
         let n = 1.0 + g.heterogeneity * 2.0 * (self.noise[i] as f64 - 0.5);
-        let ramp = |from: f64, to: f64, since: f64, life: f64| {
-            from + (to - from) * ((g.time - since) / life.max(1e-9)).clamp(0.0, 1.0)
-        };
+        let since = |t: f64, life: f64| ((g.time - t) / life.max(1e-9)).clamp(0.0, 1.0);
         let (cut, swept) = (self.cut_at[i], self.swept_at[i]);
         let c = if cut.is_finite() {
-            ramp(g.lake, g.clay, cut, g.lake_life)
+            let silt = (1.0 + self.deposit[i] as f64 / LAKE_DEPTH).clamp(0.0, 1.0);
+            g.lake + (g.clay - g.lake) * since(cut, g.lake_life).max(silt)
         } else if swept.is_finite() {
-            ramp(g.bar, 1.0, swept, g.vegetation)
+            g.bar + (1.0 - g.bar) * since(swept, g.vegetation)
         } else {
             1.0
         };
@@ -168,11 +173,21 @@ impl Erodibility {
         self.deposit[self.index(p)] as f64
     }
 
+    /// Fraction of a fresh oxbow lake's depth that floods have filled with
+    /// silt at `p`, in [0, 1]: 1 once the bed reaches the level of fresh
+    /// point-bar sand.
+    pub fn silt_at(&self, p: P) -> f64 {
+        (1.0 + self.deposit_at(p) / LAKE_DEPTH).clamp(0.0, 1.0)
+    }
+
     /// Lay one flood's overbank deposit beside a channel of half-width
     /// `half` along the points. A cell at distance d from the bank gains
     /// `amount · exp(−d / length) · (1 − h / stage)`, so deposits thin away
     /// from the channel into natural levees and stop growing as the ground
-    /// nears the flood level `stage`. Cells under the channel gain nothing.
+    /// nears the flood level `stage`. The factor is the depth of flood water
+    /// over the ground, so a lake bed `LAKE_DEPTH` below fresh bar level
+    /// traps 1 + `LAKE_DEPTH / stage` times as much. Cells under the channel
+    /// gain nothing.
     pub fn flood(&mut self, pts: &[P], half: f64, amount: f64, length: f64, stage: f64) {
         if amount <= 0.0 || length <= 0.0 || stage <= 0.0 {
             return;
@@ -220,7 +235,8 @@ impl Erodibility {
         }
     }
 
-    /// Mark cells within `radius` of the points as cut off at `time`.
+    /// Mark cells within `radius` of the points as cut off at `time`, with
+    /// the bed `LAKE_DEPTH` below fresh bar level.
     pub fn stamp_oxbow(&mut self, pts: &[P], radius: f64, time: f64) {
         let c = self.cell;
         let r2 = radius * radius;
@@ -235,6 +251,7 @@ impl Erodibility {
                     let dx = (x as f64 + 0.5) * c - p[0];
                     if dx * dx + dy * dy <= r2 {
                         self.cut_at[y * self.cols + x] = time;
+                        self.deposit[y * self.cols + x] = -LAKE_DEPTH as f32;
                     }
                 }
             }
@@ -301,6 +318,25 @@ mod tests {
         assert!((at(&e, 21.25) - 1.0 / (1.0 + h(&e, 21.25))).abs() < 1e-9);
         e.sweep(&[[20.0, 21.25]], 0.0);
         assert_eq!(h(&e, 21.25), 0.0, "the channel clears the levee it crosses");
+    }
+
+    #[test]
+    fn floods_silt_up_lakes() {
+        let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
+        let channel: Vec<P> = (0..80).map(|k| [k as f64 * 0.5, 20.0]).collect();
+        e.stamp_oxbow(&[[20.0, 22.25]], 0.25, 0.0);
+        assert_eq!(e.silt_at([20.0, 22.25]), 0.0);
+        let at = |e: &Erodibility| e.at([20.0, 22.25], &ground(0.0));
+        assert!((at(&e) - 3.0).abs() < 1e-9, "open water");
+        e.flood(&channel, 1.0, 0.3, 2.0, 0.25);
+        let silt = e.silt_at([20.0, 22.25]);
+        assert!(silt > 0.3 && silt < 1.0, "silt {silt}");
+        assert!((at(&e) - (3.0 - 2.7 * silt)).abs() < 1e-6, "stiffens with the silt");
+        for _ in 0..50 {
+            e.flood(&channel, 1.0, 0.3, 2.0, 0.25);
+        }
+        assert_eq!(e.silt_at([20.0, 22.25]), 1.0);
+        assert!(e.deposit_at([20.0, 22.25]) <= 0.25, "fills no higher than the flood level");
     }
 
     #[test]

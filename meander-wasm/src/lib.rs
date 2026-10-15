@@ -26,14 +26,19 @@ pub struct River {
     oxbow_line: Vec<f32>,
     /// Start of each oxbow in `oxbow_line`, in points, plus an end marker.
     oxbow_offsets: Vec<u32>,
-    /// Age of each oxbow in simulation time.
-    oxbow_ages: Vec<f32>,
+    /// Fraction of each oxbow lake filled, in [0, 1].
+    oxbow_fills: Vec<f32>,
+    /// Time since each oxbow filled and became a scar, or 0 for a lake.
+    oxbow_scar_ages: Vec<f32>,
     /// Arc length of each oxbow when it was cut off.
     oxbow_lengths: Vec<f32>,
     /// Arc length along each oxbow as cut off to the start of its piece.
     oxbow_offsets_along: Vec<f32>,
     /// Land height at each oxbow point, in [0, 1], matching `oxbow_line`.
     oxbow_heights: Vec<f32>,
+    /// Fraction of the lake depth filled with flood silt at each oxbow
+    /// point, in [0, 1], matching `oxbow_line`.
+    oxbow_silts: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -47,10 +52,12 @@ impl River {
             line: Vec::new(),
             oxbow_line: Vec::new(),
             oxbow_offsets: Vec::new(),
-            oxbow_ages: Vec::new(),
+            oxbow_fills: Vec::new(),
+            oxbow_scar_ages: Vec::new(),
             oxbow_lengths: Vec::new(),
             oxbow_offsets_along: Vec::new(),
             oxbow_heights: Vec::new(),
+            oxbow_silts: Vec::new(),
         }
     }
 
@@ -85,23 +92,27 @@ impl River {
     }
 
     /// Copy the centreline and oxbow polylines into flat buffers, and the
-    /// oxbow ages, birth lengths, offsets along the original oxbow and the
-    /// land height at each oxbow point.
+    /// oxbow fills, scar ages, birth lengths, offsets along the original
+    /// oxbow, and the land height and silt at each oxbow point.
     pub fn sync(&mut self) {
         let sim = &self.sim;
         self.line.clear();
         self.line.extend(sim.centerline.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
         self.oxbow_line.clear();
         self.oxbow_offsets.clear();
-        self.oxbow_ages.clear();
+        self.oxbow_fills.clear();
+        self.oxbow_scar_ages.clear();
         self.oxbow_lengths.clear();
         self.oxbow_offsets_along.clear();
         self.oxbow_heights.clear();
+        self.oxbow_silts.clear();
         for o in &sim.oxbows {
             self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
             self.oxbow_line.extend(o.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
             self.oxbow_heights.extend(o.points.iter().map(|&p| sim.erodibility.height(p) as f32));
-            self.oxbow_ages.push((sim.time - o.born) as f32);
+            self.oxbow_silts.extend(o.points.iter().map(|&p| sim.erodibility.silt_at(p) as f32));
+            self.oxbow_fills.push(o.fill as f32);
+            self.oxbow_scar_ages.push(if o.is_lake() { 0.0 } else { (sim.time - o.filled_at) as f32 });
             self.oxbow_lengths.push(o.length as f32);
             self.oxbow_offsets_along.push(o.offset as f32);
         }
@@ -124,8 +135,11 @@ impl River {
     pub fn oxbow_offsets_ptr(&self) -> *const u32 {
         self.oxbow_offsets.as_ptr()
     }
-    pub fn oxbow_ages_ptr(&self) -> *const f32 {
-        self.oxbow_ages.as_ptr()
+    pub fn oxbow_fills_ptr(&self) -> *const f32 {
+        self.oxbow_fills.as_ptr()
+    }
+    pub fn oxbow_scar_ages_ptr(&self) -> *const f32 {
+        self.oxbow_scar_ages.as_ptr()
     }
     pub fn oxbow_lengths_ptr(&self) -> *const f32 {
         self.oxbow_lengths.as_ptr()
@@ -135,6 +149,9 @@ impl River {
     }
     pub fn oxbow_heights_ptr(&self) -> *const f32 {
         self.oxbow_heights.as_ptr()
+    }
+    pub fn oxbow_silts_ptr(&self) -> *const f32 {
+        self.oxbow_silts.as_ptr()
     }
     pub fn oxbow_count(&self) -> usize {
         self.sim.oxbows.len()

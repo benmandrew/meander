@@ -43,8 +43,14 @@ pub struct Params {
     pub cutoff_min_sep: usize,
     /// Per-step displacement limit, as a fraction of the point spacing.
     pub max_step: f64,
-    /// Simulation time an oxbow lake takes to fill.
+    /// Simulation time an oxbow lake takes to fill with no sediment from the
+    /// channel. Floods fill lakes near the channel faster.
     pub oxbow_lifetime: f64,
+    /// Fraction of a lake a flood of magnitude 1 fills with bedload through
+    /// an entrance still at the channel, at a diversion angle of 0. It
+    /// falls with the cosine of the angle and with the entrance's distance
+    /// from the channel over `levee_length`. 0 disables.
+    pub bedload_fill: f64,
     /// Simulation time a filled oxbow stays as a scar before it is dropped.
     pub scar_lifetime: f64,
     /// Random lateral perturbation added each step, in channel widths per
@@ -129,7 +135,8 @@ impl Default for Params {
             cutoff_dist: 1.0,
             cutoff_min_sep: 20,
             max_step: 0.15,
-            oxbow_lifetime: 400.0,
+            oxbow_lifetime: OXBOW_LIFETIME,
+            bedload_fill: BEDLOAD_FILL,
             scar_lifetime: 1600.0,
             jitter: 0.05,
             jitter_scale: 3.0,
@@ -172,6 +179,7 @@ impl Params {
         "cutoff_min_sep",
         "max_step",
         "oxbow_lifetime",
+        "bedload_fill",
         "scar_lifetime",
         "jitter",
         "jitter_scale",
@@ -210,6 +218,7 @@ impl Params {
             "cutoff_dist" => &mut self.cutoff_dist,
             "max_step" => &mut self.max_step,
             "oxbow_lifetime" => &mut self.oxbow_lifetime,
+            "bedload_fill" => &mut self.bedload_fill,
             "scar_lifetime" => &mut self.scar_lifetime,
             "jitter" => &mut self.jitter,
             "jitter_scale" => &mut self.jitter_scale,
@@ -276,6 +285,26 @@ pub struct Oxbow {
     /// Arc length from the first point of the oxbow as cut off to the
     /// first point of this piece, so only the original ends plug.
     pub offset: f64,
+    /// Fraction of the lake filled, in [0, 1].
+    pub fill: f64,
+    /// Time the lake filled and became a scar, or infinity.
+    pub filled_at: f64,
+    /// Cosine of the diversion angle between the new channel and the
+    /// oxbow's entrance at the cut, or 0 past a right angle. Bedload enters
+    /// a lake cut at a small angle (Constantine et al. 2010).
+    pub entry: f64,
+}
+
+impl Oxbow {
+    /// A fresh lake along the points, cut off at `born`.
+    pub fn lake(points: Vec<P>, born: f64, entry: f64) -> Self {
+        let length = geom::length(&points);
+        Self { points, born, length, offset: 0.0, fill: 0.0, filled_at: f64::INFINITY, entry }
+    }
+
+    pub fn is_lake(&self) -> bool {
+        self.filled_at.is_infinite()
+    }
 }
 
 pub struct Sim {
@@ -361,6 +390,8 @@ const FLOOD_RATE: f64 = 0.02;
 const BREACH_DIST: f64 = 2.5;
 const CHUTE_RATIO: f64 = 4.0;
 const OVERBANK: f64 = 0.3;
+const OXBOW_LIFETIME: f64 = 1200.0;
+const BEDLOAD_FILL: f64 = 0.2;
 const LEVEE_LENGTH: f64 = 2.0;
 const LEVEE_HEIGHT: f64 = 0.25;
 
@@ -494,13 +525,21 @@ impl Sim {
             }
             let p = &self.params;
             self.erodibility.flood(&self.centerline, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
+            self.fill_lakes(magnitude);
         }
         self.erodibility.sweep(&self.centerline, self.time);
         self.time += self.params.dt;
         self.steps += 1;
         self.rework_oxbows();
-        let (time, life) = (self.time, self.params.oxbow_lifetime + self.params.scar_lifetime);
-        self.oxbows.retain(|o| time - o.born < life);
+        let (time, rate) = (self.time, self.params.dt / self.params.oxbow_lifetime.max(1e-9));
+        for o in self.oxbows.iter_mut().filter(|o| o.is_lake()) {
+            o.fill = (o.fill + rate).min(1.0);
+            if o.fill >= 1.0 {
+                o.filled_at = time;
+            }
+        }
+        let scar = self.params.scar_lifetime;
+        self.oxbows.retain(|o| time - o.filled_at < scar);
         let steps = self.steps;
         self.recent_cuts.retain(|&(_, until)| until > steps);
     }
@@ -816,15 +855,44 @@ impl Sim {
         self.oxbows = kept;
     }
 
+    /// Fill each lake by one flood of magnitude `u`: bedload through an
+    /// entrance near the channel, by [`Params::bedload_fill`], and the silt
+    /// the flood laid on its bed, whichever fills it further.
+    fn fill_lakes(&mut self, u: f64) {
+        let p = &self.params;
+        let (half, length) = (0.5 * p.width, p.levee_length * p.width);
+        for o in self.oxbows.iter_mut().filter(|o| o.is_lake()) {
+            let m = o.points.len();
+            // Only the piece holding the original upstream end has the entrance.
+            let mut inflow = 0.0;
+            if o.offset == 0.0 && o.entry > 0.0 && length > 0.0 {
+                let gap = self.centerline.iter().map(|&c| geom::dist2(o.points[0], c)).fold(f64::INFINITY, f64::min);
+                inflow = u * p.bedload_fill * o.entry * (-(gap.sqrt() - half).max(0.0) / length).exp();
+            }
+            // The ends lie under the channel at a cut, so only the interior counts.
+            let inner = &o.points[1..m - 1];
+            let silt = inner.iter().map(|&q| self.erodibility.silt_at(q)).sum::<f64>() / inner.len().max(1) as f64;
+            o.fill = (o.fill + inflow).max(silt).min(1.0);
+            if o.fill >= 1.0 {
+                o.filled_at = self.time;
+            }
+        }
+    }
+
     /// Join point `i` to point `j` and abandon the reach between them as an
     /// oxbow.
     fn apply_cut(&mut self, i: usize, j: usize) {
         let loop_pts = self.centerline[i..=j].to_vec();
+        // Diversion angle at the upstream end, between the new channel,
+        // straight across to `j`, and the oxbow's first segment.
+        let (a, b, c) = (loop_pts[0], loop_pts[1], self.centerline[j]);
+        let (main, branch) = ([c[0] - a[0], c[1] - a[1]], [b[0] - a[0], b[1] - a[1]]);
+        let norms = (geom::dist2(a, c) * geom::dist2(a, b)).sqrt();
+        let entry = if norms > 0.0 { ((main[0] * branch[0] + main[1] * branch[1]) / norms).max(0.0) } else { 0.0 };
         let mid = geom::lerp(self.centerline[i], self.centerline[j], 0.5);
         self.centerline.drain(i + 1..j);
         self.erodibility.stamp_oxbow(&loop_pts, 0.5 * self.params.width, self.time);
-        let length = geom::length(&loop_pts);
-        self.oxbows.push(Oxbow { points: loop_pts, born: self.time, length, offset: 0.0 });
+        self.oxbows.push(Oxbow::lake(loop_pts, self.time, entry));
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));
         self.cutoffs += 1;
     }
@@ -1004,14 +1072,38 @@ mod tests {
     }
 
     #[test]
+    fn lakes_near_the_channel_fill_first() {
+        let mut sim = sine_sim(0.0, 40.0);
+        sim.params.flood_rate = 1.0;
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        // Straight lakes beside the channel, near and far, and one whose
+        // entrance lies on the channel at a small diversion angle.
+        let lake = |x0: f64, y: f64| -> Vec<P> { (0..30).map(|k| [(x0 + 0.5 * k as f64) * w, mid + y * w]).collect() };
+        for (pts, entry) in [(lake(100.0, 2.0), 0.0), (lake(150.0, 10.0), 0.0), (lake(200.0, 0.0), 0.9)] {
+            sim.erodibility.stamp_oxbow(&pts, 0.5 * w, 0.0);
+            sim.oxbows.push(Oxbow::lake(pts, 0.0, entry));
+        }
+        // The third lake runs along the channel; keep only its entrance there.
+        sim.oxbows[2].points.iter_mut().skip(1).for_each(|q| q[1] += 3.0 * w);
+        let fills = |sim: &Sim| sim.oxbows.iter().map(|o| o.fill).collect::<Vec<_>>();
+        sim.step_n(1000);
+        let f = fills(&sim);
+        eprintln!("fills after {} floods: {f:?}", sim.floods);
+        let quiet = sim.time / sim.params.oxbow_lifetime;
+        assert!((f[1] - quiet).abs() < 0.05, "a far lake fills only by the clock: {} against {quiet}", f[1]);
+        assert!(f[0] > f[1] + 0.2, "a near lake silts up faster");
+        assert!(f[2] > f[1] + 0.2, "a lake with an open entrance takes in bedload");
+    }
+
+    #[test]
     fn channel_reworks_oxbows_it_crosses() {
         let mut sim = sine_sim(0.0, 40.0);
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         // A vertical oxbow across the channel, and one well clear of it.
         let across: Vec<P> = (-20..=20).map(|k| [100.0 * w, mid + 0.5 * k as f64 * w]).collect();
         let clear: Vec<P> = (0..20).map(|k| [(150 + k) as f64 * w, mid + 20.0 * w]).collect();
-        sim.oxbows.push(Oxbow { points: across, born: 0.0, length: 20.0 * w, offset: 0.0 });
-        sim.oxbows.push(Oxbow { points: clear.clone(), born: 0.0, length: 9.5 * w, offset: 0.0 });
+        sim.oxbows.push(Oxbow::lake(across, 0.0, 0.0));
+        sim.oxbows.push(Oxbow::lake(clear.clone(), 0.0, 0.0));
         sim.step();
         assert_eq!(sim.oxbows.len(), 3, "the crossed oxbow splits in two");
         assert_eq!(sim.oxbows[2].points, clear);

@@ -21,7 +21,7 @@ fn svg(sim: &Sim, x0: f64, w: f64) -> String {
         d
     };
     for o in &sim.oxbows {
-        let age = ((sim.time - o.born) / sim.params.oxbow_lifetime).clamp(0.0, 1.0);
+        let age = o.fill;
         let _ = write!(
             s,
             "<path d='{}' fill='none' stroke='#5b8a9a' stroke-opacity='{:.2}' stroke-width='{:.2}' stroke-linejoin='round' stroke-linecap='round'/>",
@@ -70,6 +70,8 @@ fn main() {
     let view_w = 840.0;
     let mut sim = Sim::new(params, [up + view_w + down, 480.0], seed, 0.5);
     sim.pinches = vec![up, up + view_w];
+    // Time each lake took to fill, by its birth time and length.
+    let mut lake_lives: Vec<((u64, u64), f64)> = Vec::new();
     let t0 = std::time::Instant::now();
     for k in 0..=steps / every {
         if k > 0 {
@@ -88,6 +90,18 @@ fn main() {
             sim.oxbows.len()
         );
         std::fs::write(format!("{out}/step{:06}.svg", sim.steps), svg(&sim, up, view_w)).unwrap();
+        for o in sim.oxbows.iter().filter(|o| !o.is_lake()) {
+            let key = (o.born.to_bits(), o.length.to_bits());
+            if !lake_lives.iter().any(|l| l.0 == key) {
+                lake_lives.push((key, o.filled_at - o.born));
+            }
+        }
+    }
+    let mut lives: Vec<f64> = lake_lives.iter().map(|l| l.1).collect();
+    lives.sort_by(f64::total_cmp);
+    if !lives.is_empty() {
+        let q = |f: f64| lives[((lives.len() - 1) as f64 * f) as usize];
+        println!("{} lakes filled; time to fill: quartiles {:.0} {:.0} {:.0}", lives.len(), q(0.25), q(0.5), q(0.75));
     }
     println!("{:.2} ms/step", t0.elapsed().as_secs_f64() * 1e3 / steps as f64);
 }

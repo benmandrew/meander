@@ -114,17 +114,25 @@ function blobData(rand, cx, cy, rx, ry) {
 // covering arc lengths [from, to] along them. The bed is a parabola across
 // the old channel, so the lake's half-width is `half` × √depth, capped at
 // `half` by the old banks. The depth is `level` less the bed's rise, which
-// is `relief` × 4 × (height − 0.5) for the land heights in `heights`. Where
+// is `relief` × 4 × (height − 0.5) for the land heights in `heights`, plus
+// the flood silt in `silts` above its mean over the lake's interior points;
+// the mean is part of the fill that sets `level`. Where
 // the bed rises above the water the lake splits into pools, one subpath
 // each, and the parabola gives each pool a round tip there. A plugged end
 // is a round cap when young, lengthening with `age` in [0, 1] to a crescent
 // tip. An end cut by the channel stays a round cap, hidden under the water.
-function lakeData(pts, heights, start, end, from, to, half, level, relief, age) {
+function lakeData(pts, heights, silts, start, end, from, to, half, level, relief, age) {
   const m = end - start;
   if (m < 2 || level <= 0) return '';
   const s = new Float64Array(m), tx = new Float64Array(m), ty = new Float64Array(m);
   const depth = new Float64Array(m);
-  for (let k = 0; k < m; k++) depth[k] = level - 4 * relief * (heights[start + k] - 0.5);
+  let silt = 0;
+  for (let k = 1; k < m - 1; k++) silt += silts[start + k] / Math.max(1, m - 2);
+  // The end points lie under the channel at a cut, swept clear of silt.
+  for (let k = 0; k < m; k++) {
+    const extra = k > 0 && k < m - 1 ? silts[start + k] - silt : 0;
+    depth[k] = level - 4 * relief * (heights[start + k] - 0.5) - extra;
+  }
   for (let k = 1; k < m; k++) {
     const i = 2 * (start + k);
     s[k] = s[k - 1] + Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
@@ -443,12 +451,13 @@ class SvgRenderer {
     const line = new Float32Array(buf, river.line_ptr(), river.line_len());
     const oxPts = new Float32Array(buf, river.oxbow_line_ptr(), river.oxbow_line_len());
     const oxOff = new Uint32Array(buf, river.oxbow_offsets_ptr(), n + 1);
-    const oxAge = new Float32Array(buf, river.oxbow_ages_ptr(), n);
+    const oxFill = new Float32Array(buf, river.oxbow_fills_ptr(), n);
+    const oxScar = new Float32Array(buf, river.oxbow_scar_ages_ptr(), n);
     const oxLen = new Float32Array(buf, river.oxbow_lengths_ptr(), n);
     const oxAlong = new Float32Array(buf, river.oxbow_offsets_along_ptr(), n);
     const oxHeight = new Float32Array(buf, river.oxbow_heights_ptr(), oxPts.length / 2);
+    const oxSilt = new Float32Array(buf, river.oxbow_silts_ptr(), oxPts.length / 2);
     const w = river.get_param('width');
-    const life = Math.max(1e-6, river.get_param('oxbow_lifetime'));
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
     const d = pathData(line, 0, line.length / 2);
 
@@ -460,18 +469,19 @@ class SvgRenderer {
 
     // Oxbows: a lake that plugs from the ends, narrows far more slowly from
     // the banks and turns murky, fading only over the last fifth of its
-    // life, then a marshy scar that fades out. Both plugs and banks advance
-    // steadily with age, and the water drains first from where the land
-    // is high, splitting the lake into pools. The reed fringe grows
-    // inwards, so it does not hide the narrowing.
+    // fill, then a marshy scar that fades out. Both plugs and banks advance
+    // steadily as it fills, and the water drains first from where the land
+    // is high or floods have laid the most silt, splitting the lake into
+    // pools. The reed fringe grows inwards, so it does not hide the
+    // narrowing.
     resize(this.scars, n, this.scarLayer);
     resize(this.lakes, n, this.lakeLayer);
     this.scarLayer.setAttribute('stroke-width', w);
     for (let k = 0; k < n; k++) {
-      const age = oxAge[k] / life;
+      const age = oxFill[k];
       const scar = this.scars[k], lake = this.lakes[k];
       scar.setAttribute('d', pathData(oxPts, oxOff[k], oxOff[k + 1]));
-      const fade = 1 - smoothstep((oxAge[k] - life) / scarLife);
+      const fade = 1 - smoothstep(oxScar[k] / scarLife);
       scar.setAttribute('stroke-opacity', (0.45 * smoothstep(age) * fade).toFixed(2));
       if (age >= 1) {
         lake.setAttribute('d', '');
@@ -485,7 +495,7 @@ class SvgRenderer {
       const plug = PLUG * age * oxLen[k];
       const [from, to] = [plug - oxAlong[k], oxLen[k] - plug - oxAlong[k]];
       const level = hw > 0 ? (hw / (0.5 * w)) ** 2 : 0;
-      lake.setAttribute('d', lakeData(oxPts, oxHeight, oxOff[k], oxOff[k + 1], from, to,
+      lake.setAttribute('d', lakeData(oxPts, oxHeight, oxSilt, oxOff[k], oxOff[k + 1], from, to,
         0.5 * w, level, local.oxbowRelief, age));
       lake.setAttribute('fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
       lake.setAttribute('opacity', clamp01(5 * (1 - age)).toFixed(2));
