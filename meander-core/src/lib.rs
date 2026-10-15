@@ -59,6 +59,13 @@ pub struct Params {
     /// Width of the band along each domain edge over which erodibility
     /// tapers to zero, in channel widths.
     pub edge_margin: f64,
+    /// Valley width at each of [`Sim::pinches`], in channel widths. The
+    /// river crosses a pinch near the valley axis, so a renderer can put the
+    /// window edges there and no bend straddles them. 0 disables.
+    pub pinch_width: f64,
+    /// Distance either side of a pinch over which the valley widens back to
+    /// `valley_width`, in channel widths.
+    pub pinch_length: f64,
     /// Strength of the erodibility noise: 0 is uniform, 1 ranges from
     /// near zero to double.
     pub heterogeneity: f64,
@@ -108,6 +115,8 @@ impl Default for Params {
             jitter_scale: 3.0,
             valley_width: 45.0,
             edge_margin: 8.0,
+            pinch_width: 6.0,
+            pinch_length: 20.0,
             heterogeneity: 0.5,
             clay_factor: 0.35,
             flood_rate: FLOOD_RATE,
@@ -142,6 +151,8 @@ impl Params {
         "jitter_scale",
         "valley_width",
         "edge_margin",
+        "pinch_width",
+        "pinch_length",
         "heterogeneity",
         "clay_factor",
         "flood_rate",
@@ -172,6 +183,8 @@ impl Params {
             "jitter_scale" => &mut self.jitter_scale,
             "valley_width" => &mut self.valley_width,
             "edge_margin" => &mut self.edge_margin,
+            "pinch_width" => &mut self.pinch_width,
+            "pinch_length" => &mut self.pinch_length,
             "heterogeneity" => &mut self.heterogeneity,
             "clay_factor" => &mut self.clay_factor,
             "flood_rate" => &mut self.flood_rate,
@@ -224,6 +237,8 @@ pub struct Sim {
     pub params: Params,
     /// Domain is `[0, bounds[0]] × [0, bounds[1]]`.
     pub bounds: P,
+    /// Positions along x where the valley narrows to `pinch_width`.
+    pub pinches: Vec<f64>,
     pub centerline: Vec<P>,
     pub oxbows: Vec<Oxbow>,
     pub erodibility: Erodibility,
@@ -248,23 +263,33 @@ pub struct Sim {
     cell_of: Vec<u32>,
 }
 
+fn smoothstep(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Valley width at `x`: `valley` (the whole domain height when 0), narrowing
+/// smoothly to `pinch` at each of `pinches` over `length` either side.
+fn valley_at(x: f64, height: f64, valley: f64, pinches: &[f64], pinch: f64, length: f64) -> f64 {
+    let full = if valley > 0.0 { valley.min(height) } else { height };
+    if pinch <= 0.0 || pinch >= full || length <= 0.0 {
+        return full;
+    }
+    let d = pinches.iter().fold(f64::INFINITY, |d, &px| d.min((x - px).abs()));
+    pinch + (full - pinch) * smoothstep(d / length)
+}
+
 /// Erodibility multiplier that falls smoothly from 1 to 0 within `margin` of
-/// the domain edges, and within `margin` of the valley walls when
-/// `valley` (the valley width) is non-zero.
+/// the domain edges and of the valley walls, for a valley of width `valley`
+/// centred on the domain.
 fn edge_taper(p: P, bounds: P, margin: f64, valley: f64) -> f64 {
     if margin <= 0.0 {
         return 1.0;
     }
-    let ramp = |d: f64| {
-        let t = (d / margin).clamp(0.0, 1.0);
-        t * t * (3.0 - 2.0 * t)
-    };
-    let (mut y0, mut y1) = (0.0, bounds[1]);
-    if valley > 0.0 {
-        let mid = 0.5 * bounds[1];
-        y0 = (mid - 0.5 * valley).max(0.0);
-        y1 = (mid + 0.5 * valley).min(bounds[1]);
-    }
+    let ramp = |d: f64| smoothstep(d / margin);
+    let mid = 0.5 * bounds[1];
+    let y0 = (mid - 0.5 * valley).max(0.0);
+    let y1 = (mid + 0.5 * valley).min(bounds[1]);
     ramp(p[0]) * ramp(bounds[0] - p[0]) * ramp(p[1] - y0) * ramp(y1 - p[1])
 }
 
@@ -311,6 +336,7 @@ impl Sim {
         let mut sim = Self {
             params,
             bounds,
+            pinches: Vec::new(),
             centerline: Vec::new(),
             oxbows: Vec::new(),
             erodibility: Erodibility::new([1.0, 1.0], 1.0, 1.0, 0),
@@ -484,7 +510,15 @@ impl Sim {
         self.tmp.extend_from_slice(pts);
         for i in 1..n.saturating_sub(1) {
             let nrm = right_normal(pts, i);
-            let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width, p.valley_width * p.width)
+            let valley = valley_at(
+                pts[i][0],
+                self.bounds[1],
+                p.valley_width * p.width,
+                &self.pinches,
+                p.pinch_width * p.width,
+                p.pinch_length * p.width,
+            );
+            let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width, valley)
                 * self.erodibility.at(pts[i], p.heterogeneity, p.clay_factor);
             // Positive rate moves toward the outside of a left bend, i.e. to
             // the right, so bends grow.
@@ -828,6 +862,30 @@ mod tests {
             assert_eq!(calm_sim.flood_cutoffs, 0);
             assert!(sim.flood_cutoffs >= 3, "only {} flood cutoffs", sim.flood_cutoffs);
             assert!(s_storm < s_calm, "floods should keep the river straighter");
+        }
+    }
+
+    #[test]
+    fn pinches_hold_one_crossing_near_the_axis() {
+        let w = Params::default().width;
+        let (up, view) = (60.0 * w, 840.0);
+        for seed in [1, 2] {
+            let mut sim = Sim::new(Params::default(), [up + view + 20.0 * w, 480.0], seed, 0.5);
+            sim.pinches = vec![up, up + view];
+            for _ in 0..30 {
+                sim.step_n(1000);
+                for &px in &sim.pinches {
+                    let crossings: Vec<f64> = sim
+                        .centerline
+                        .windows(2)
+                        .filter(|s| (s[0][0] < px) != (s[1][0] < px))
+                        .map(|s| s[0][1])
+                        .collect();
+                    assert_eq!(crossings.len(), 1, "seed {seed}, step {}: crossings at x = {px}: {crossings:?}", sim.steps);
+                    let off = (crossings[0] - 240.0).abs();
+                    assert!(off < 0.5 * sim.params.pinch_width * w + w, "seed {seed}, step {}: crossing {off} off axis", sim.steps);
+                }
+            }
         }
     }
 

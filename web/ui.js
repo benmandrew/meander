@@ -28,6 +28,8 @@ const SIM_CONTROLS = [
   { key: 'width', label: 'Channel width w', min: 2, max: 20, step: 0.5 },
   { key: 'valley_width', label: 'Valley width (widths, 0 off)', min: 0, max: 60, step: 1 },
   { key: 'edge_margin', label: 'Edge margin (widths)', min: 0, max: 30, step: 1 },
+  { key: 'pinch_width', label: 'Valley at view edges (widths, 0 off)', min: 0, max: 60, step: 1 },
+  { key: 'pinch_length', label: 'Pinch length (widths)', min: 1, max: 60, step: 1 },
   { group: 'Cutoffs' },
   { key: 'cutoff_dist', label: 'Cutoff distance (widths)', min: 0.3, max: 3, step: 0.05 },
   { key: 'cutoff_min_sep', label: 'Min separation K (points)', min: 6, max: 100, step: 1 },

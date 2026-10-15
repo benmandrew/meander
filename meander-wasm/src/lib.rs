@@ -51,6 +51,8 @@ impl River {
         let w = self.sim.params.width;
         self.view_x = UPSTREAM * w;
         self.sim.bounds = [(UPSTREAM + DOWNSTREAM) * w + view_w, view_h];
+        // Pinch the valley at the window edges so no bend straddles them.
+        self.sim.pinches = vec![self.view_x, self.view_x + view_w];
         self.sim.reset(seed as u64, noise);
         self.advance(warmup);
     }

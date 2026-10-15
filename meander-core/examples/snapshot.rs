@@ -69,6 +69,7 @@ fn main() {
     let down = std::env::var("DOWN").map_or(0.0, |v| v.parse().unwrap()) * params.width;
     let view_w = 840.0;
     let mut sim = Sim::new(params, [up + view_w + down, 480.0], seed, 0.5);
+    sim.pinches = vec![up, up + view_w];
     let t0 = std::time::Instant::now();
     for k in 0..=steps / every {
         if k > 0 {

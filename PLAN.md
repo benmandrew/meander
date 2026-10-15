@@ -22,6 +22,7 @@ Deviations from the plan, found while tuning:
   - Kinks: per-step jitter is smoothed along the river over `jitter_scale` = 3 widths, at amplitude 0.05.
   - Direction: `valley_width` = 45 widths confines the belt, so the river reads as flowing down a valley.
   - Upstream straightening: bends grow only as they drift downstream, so the visible window is the middle of a longer river, with 60 widths hidden upstream and 20 downstream (set in `meander-wasm`).
+  - Window edges: loops drifting in from the hidden reach straddled the left and right edges and were cut in half. The valley now pinches to `pinch_width` = 6 widths at each window edge (`Sim::pinches`), widening back over `pinch_length` = 20 widths, so the river crosses each edge once, near the axis. Snapshots show bends just inside the left edge as developed as before.
 - Hard clamping to the domain pins the river along the walls. Erodibility tapers to zero within `edge_margin` of each edge; the clamp stays as a backstop.
 - `hypot`, `ln` and `cos` are software routines in WASM and made a step 3.6 times slower than native. The core avoids them on the hot path (0.095 ms per step in WASM for ~700 points). Warm-up is spread across frames behind a progress note.
 
