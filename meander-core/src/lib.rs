@@ -53,6 +53,13 @@ pub struct Params {
     pub bedload_fill: f64,
     /// Simulation time a filled oxbow stays as a scar before it is dropped.
     pub scar_lifetime: f64,
+    /// Chance that the largest flood breaches the levee at a sharp outer
+    /// bend and spreads a crevasse splay over the floodplain. It falls to 0
+    /// for floods of magnitude [`SPLAY_MIN_FLOOD`]. 0 disables splays.
+    pub splay_chance: f64,
+    /// Simulation time a splay takes to vegetate over, after which it is
+    /// dropped.
+    pub splay_lifetime: f64,
     /// Simulation time a scroll bar, the ridge a flood leaves along the
     /// inner bank, lasts before it is dropped. 0 disables scroll bars.
     pub scroll_lifetime: f64,
@@ -142,6 +149,8 @@ impl Default for Params {
             bedload_fill: BEDLOAD_FILL,
             scar_lifetime: 1600.0,
             scroll_lifetime: SCROLL_LIFETIME,
+            splay_chance: SPLAY_CHANCE,
+            splay_lifetime: SPLAY_LIFETIME,
             jitter: 0.05,
             jitter_scale: 3.0,
             valley_width: 45.0,
@@ -186,6 +195,8 @@ impl Params {
         "bedload_fill",
         "scar_lifetime",
         "scroll_lifetime",
+        "splay_chance",
+        "splay_lifetime",
         "jitter",
         "jitter_scale",
         "valley_width",
@@ -226,6 +237,8 @@ impl Params {
             "bedload_fill" => &mut self.bedload_fill,
             "scar_lifetime" => &mut self.scar_lifetime,
             "scroll_lifetime" => &mut self.scroll_lifetime,
+            "splay_chance" => &mut self.splay_chance,
+            "splay_lifetime" => &mut self.splay_lifetime,
             "jitter" => &mut self.jitter,
             "jitter_scale" => &mut self.jitter_scale,
             "valley_width" => &mut self.valley_width,
@@ -321,6 +334,16 @@ pub struct Scroll {
     pub born: f64,
 }
 
+/// A crevasse splay: a fan of sand a flood spreads through a breach in
+/// the levee, from `apex` on the outer bank along the unit vector `dir`.
+#[derive(Clone, Debug)]
+pub struct Splay {
+    pub apex: P,
+    pub dir: P,
+    pub length: f64,
+    pub born: f64,
+}
+
 pub struct Sim {
     pub params: Params,
     /// Domain is `[0, bounds[0]] × [0, bounds[1]]`.
@@ -332,6 +355,9 @@ pub struct Sim {
     pub scrolls: Vec<Scroll>,
     /// Counts changes to `scrolls`, so a renderer can skip redrawing them.
     pub scroll_version: u64,
+    pub splays: Vec<Splay>,
+    /// Crevasse splays so far.
+    pub crevasses: u64,
     pub erodibility: Erodibility,
     pub time: f64,
     pub steps: u64,
@@ -422,6 +448,27 @@ const SCROLL_MIN_RATE: f64 = 0.05;
 /// Scroll bars and pieces with fewer points than this are dropped.
 const MIN_SCROLL_POINTS: usize = 6;
 
+const SPLAY_CHANCE: f64 = 1.0;
+const SPLAY_LIFETIME: f64 = 2000.0;
+
+/// Smallest flood magnitude that can breach a levee.
+pub const SPLAY_MIN_FLOOD: f64 = 0.6;
+
+/// Random points tried for a breach; the sharpest bend among them wins.
+const SPLAY_TRIES: usize = 20;
+
+/// Gentlest bend, as curvature in inverse channel widths, that a flood
+/// can breach: a radius of 5 widths.
+const SPLAY_MIN_CURVATURE: f64 = 0.2;
+
+/// Length of a splay in channel widths: this much for the weakest flood
+/// that breaches, plus [`SPLAY_EXTRA`] times the magnitude.
+const SPLAY_BASE: f64 = 3.0;
+const SPLAY_EXTRA: f64 = 5.0;
+
+/// Spread of a splay across per unit along it: tan 35°.
+pub const SPLAY_SPREAD: f64 = 0.7;
+
 /// Steps between checks for scroll bars under the channel. They do not
 /// affect the dynamics, so the check need not run every step.
 const SCROLL_REWORK_EVERY: u64 = 10;
@@ -465,6 +512,8 @@ impl Sim {
             oxbows: Vec::new(),
             scrolls: Vec::new(),
             scroll_version: 0,
+            splays: Vec::new(),
+            crevasses: 0,
             erodibility: Erodibility::new([1.0, 1.0], 1.0, 1.0, 0),
             time: 0.0,
             steps: 0,
@@ -515,6 +564,8 @@ impl Sim {
         self.oxbows.clear();
         self.scrolls.clear();
         self.scroll_version += 1;
+        self.splays.clear();
+        self.crevasses = 0;
         self.recent_cuts.clear();
         self.time = 0.0;
         self.steps = 0;
@@ -564,6 +615,7 @@ impl Sim {
             self.erodibility.flood(&self.centerline, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
             self.fill_lakes(magnitude);
             self.add_scrolls();
+            self.crevasse(magnitude);
         }
         self.erodibility.sweep(&self.centerline, self.time);
         self.time += self.params.dt;
@@ -962,10 +1014,59 @@ impl Sim {
         }
     }
 
+    /// During a flood of magnitude `u`, perhaps breach the levee at the
+    /// sharpest of a few random bends and spread a splay of sand from the
+    /// outer bank, as deep as the flood level at its apex. Returns whether
+    /// a splay formed.
+    fn crevasse(&mut self, u: f64) -> bool {
+        let p = &self.params;
+        if p.splay_chance <= 0.0 || u <= SPLAY_MIN_FLOOD {
+            return false;
+        }
+        let chance = p.splay_chance * (u - SPLAY_MIN_FLOOD) / (1.0 - SPLAY_MIN_FLOOD);
+        let n = self.centerline.len();
+        if n < 3 || self.rng.uniform() >= chance {
+            return false;
+        }
+        curvature(&self.centerline, &mut self.curv);
+        let w = self.params.width;
+        let mut best = (0, 0.0f64);
+        for _ in 0..SPLAY_TRIES {
+            let i = (1 + (self.rng.uniform() * (n - 2) as f64) as usize).min(n - 2);
+            let c = self.curv[i] * w;
+            if c.abs() > best.1.abs() {
+                best = (i, c);
+            }
+        }
+        let (i, c) = best;
+        if c.abs() < SPLAY_MIN_CURVATURE {
+            return false;
+        }
+        // A left bend (positive curvature) has its outer bank on the right.
+        let nrm = right_normal(&self.centerline, i);
+        let s = c.signum();
+        let dir = [s * nrm[0], s * nrm[1]];
+        let q = self.centerline[i];
+        let apex = [q[0] + 0.5 * w * dir[0], q[1] + 0.5 * w * dir[1]];
+        let length = (SPLAY_BASE + SPLAY_EXTRA * u) * w;
+        let thickness = u * self.params.levee_height;
+        self.erodibility.stamp_splay(apex, dir, length, SPLAY_SPREAD, thickness, self.time);
+        self.splays.push(Splay { apex, dir, length, born: self.time });
+        self.crevasses += 1;
+        true
+    }
+
     /// Drop scroll bars past their lifetime and the parts of the rest
     /// within half a width of the channel, which has eroded them.
     fn rework_scrolls(&mut self) {
         let (time, life) = (self.time, self.params.scroll_lifetime);
+        // Splays go once vegetated, or once the channel reaches their middle.
+        let (w, splay_life) = (self.params.width, self.params.splay_lifetime);
+        let line = &self.centerline;
+        self.splays.retain(|s| {
+            let mid = [s.apex[0] + 0.5 * s.length * s.dir[0], s.apex[1] + 0.5 * s.length * s.dir[1]];
+            time - s.born < splay_life && line.iter().all(|&c| geom::dist2(c, mid) > w * w)
+        });
         let before = self.scrolls.len();
         self.scrolls.retain(|s| time - s.born < life);
         let mut changed = self.scrolls.len() != before;
@@ -1251,6 +1352,23 @@ mod tests {
         for sc in &sim.scrolls {
             assert!(sc.points.iter().all(|&q| gap(q) >= 0.5 * w));
         }
+    }
+
+    #[test]
+    fn a_big_flood_breaches_an_outer_bend() {
+        // Curvature peaks at 4·(2π/20)² ≈ 0.39 per width, over the 0.2 a breach needs.
+        let mut sim = sine_sim(4.0, 20.0);
+        sim.params.splay_chance = 1.0;
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        assert!(!sim.crevasse(SPLAY_MIN_FLOOD), "too small a flood");
+        assert!(sim.crevasse(1.0));
+        let s = &sim.splays[0];
+        assert!((s.length - 8.0 * w).abs() < 1e-9);
+        // The sharpest bends are the crests, so the splay runs away from the axis.
+        assert!((s.apex[1] - mid).abs() > 2.4 * w, "apex {:?}", s.apex);
+        assert!((s.apex[1] + s.dir[1] - mid).abs() > (s.apex[1] - mid).abs(), "dir {:?}", s.dir);
+        let inside = [s.apex[0] + 0.3 * s.length * s.dir[0], s.apex[1] + 0.3 * s.length * s.dir[1]];
+        assert!(sim.erodibility.deposit_at(inside) > 0.1 * sim.params.levee_height);
     }
 
     #[test]

@@ -46,6 +46,9 @@ pub struct River {
     scroll_offsets: Vec<u32>,
     /// Age of each scroll bar in simulation time.
     scroll_ages: Vec<f32>,
+    /// Each crevasse splay as apex x, y, direction x, y, length and birth
+    /// time.
+    splay_data: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -68,6 +71,7 @@ impl River {
             scroll_line: Vec::new(),
             scroll_offsets: Vec::new(),
             scroll_ages: Vec::new(),
+            splay_data: Vec::new(),
         }
     }
 
@@ -127,6 +131,21 @@ impl River {
             self.oxbow_offsets_along.push(o.offset as f32);
         }
         self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
+        self.splay_data.clear();
+        for s in &sim.splays {
+            self.splay_data.extend([s.apex[0], s.apex[1], s.dir[0], s.dir[1], s.length, s.born].map(|v| v as f32));
+        }
+    }
+
+    pub fn splay_data_ptr(&self) -> *const f32 {
+        self.splay_data.as_ptr()
+    }
+    pub fn splay_count(&self) -> usize {
+        self.sim.splays.len()
+    }
+    /// Crevasse splays so far, including those since dropped.
+    pub fn crevasses(&self) -> u32 {
+        self.sim.crevasses as u32
     }
 
     /// Copy the scroll bars into flat buffers. They change only at floods

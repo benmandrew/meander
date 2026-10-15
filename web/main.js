@@ -34,6 +34,12 @@ const LEVEE_REFRESH = 10;
 const RIDGE = [238, 230, 196];
 const OLD_RIDGE = [146, 158, 108];
 const SCROLL_BANDS = 6;
+// Crevasse splays: a lobe of sand that grasses over, crossed by small
+// distributary channels. The lobe spreads 35° either side of its axis.
+const SPLAY = [246, 236, 196];
+const SPLAY_RIM = [214, 198, 150];
+const SPLAY_RILL = [196, 182, 138];
+const SPLAY_HALF_ANGLE = Math.atan(0.7);
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -391,6 +397,9 @@ class SvgRenderer {
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
     this.leveeAt = null;
     this.soilLayer = el('g', {}, ground);
+    // Splays bury the soil and levees beneath them in sand.
+    this.splayLayer = el('g', round, ground);
+    this.splayAt = null;
     this.scarLayer = el('g', { ...round, stroke: MARSH }, svg);
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
@@ -417,6 +426,7 @@ class SvgRenderer {
     this.window = [x, w];
     this.leveeAt = null;
     this.scrollAt = null;
+    this.splayAt = null;
     this.drawSoils(river, x, w, h, seed);
   }
 
@@ -472,12 +482,16 @@ class SvgRenderer {
     const d = pathData(line, 0, line.length / 2);
 
     this.record(line, river.time(), w, local);
-    const layers = [[this.barLayer, local.showBars], [this.leveeLayer, local.showLevees], [this.scrollLayer, local.showScrolls]];
+    const layers = [
+      [this.barLayer, local.showBars], [this.leveeLayer, local.showLevees],
+      [this.scrollLayer, local.showScrolls], [this.splayLayer, local.showSplays],
+    ];
     for (const [layer, show] of layers) {
       if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
     }
     if (local.showLevees) this.drawLevees(river, buf);
     if (local.showScrolls) this.drawScrolls(river, memory, w);
+    if (local.showSplays) this.drawSplays(river, buf, w);
 
     // Oxbows: a lake that plugs from the ends, narrows far more slowly from
     // the banks and turns murky, fading only over the last fifth of its
@@ -573,6 +587,57 @@ class SvgRenderer {
     });
   }
 
+  // Draw each crevasse splay as a smooth lobe with a few distributary
+  // rills, seeded by its birth time, when splays come or go and every
+  // `LEVEE_REFRESH` of simulated time as they grass over.
+  drawSplays(river, buf, w) {
+    const t = river.time(), n = river.splay_count(), key = `${river.crevasses()}/${n}`;
+    const last = this.splayAt;
+    if (last && last.key === key && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    this.splayAt = { key, t };
+    const data = new Float32Array(buf, river.splay_data_ptr(), 6 * n);
+    const life = Math.max(1e-6, river.get_param('splay_lifetime'));
+    this.splayLayer.replaceChildren();
+    const f = (v) => v.toFixed(1);
+    for (let k = 0; k < n; k++) {
+      const [ax, ay, dx, dy, len, born] = data.subarray(6 * k, 6 * k + 6);
+      const age = clamp01((t - born) / life);
+      const rand = random(Math.round(born * 10) ^ 0x5b1a);
+      // Point at angle `a` off the axis and distance `r` from the apex.
+      const at = (a, r) => [ax + r * (dx * Math.cos(a) - dy * Math.sin(a)), ay + r * (dy * Math.cos(a) + dx * Math.sin(a))];
+      // Rim of the lobe, rounded at the front and pinched to the breach.
+      const rim = [at(0, -0.2 * w)];
+      const steps = 9;
+      for (let q = 0; q <= steps; q++) {
+        const a = SPLAY_HALF_ANGLE * (2 * q / steps - 1);
+        rim.push(at(a, len * (0.75 + 0.2 * rand()) * (1 - 0.25 * (a / SPLAY_HALF_ANGLE) ** 2)));
+      }
+      const m = rim.length;
+      let d = `M${f(rim[0][0])} ${f(rim[0][1])}`;
+      for (let q = 0; q < m; q++) {
+        const [p0, p1, p2, p3] = [-1, 0, 1, 2].map((j) => rim[(q + j + m) % m]);
+        d += `C${f(p1[0] + (p2[0] - p0[0]) / 6)} ${f(p1[1] + (p2[1] - p0[1]) / 6)} `
+          + `${f(p2[0] - (p3[0] - p1[0]) / 6)} ${f(p2[1] - (p3[1] - p1[1]) / 6)} ${f(p2[0])} ${f(p2[1])}`;
+      }
+      const fade = 1 - smoothstep((age - 0.6) / 0.4);
+      el('path', {
+        d: d + 'Z', fill: mix(SPLAY, OLD_BAR, smoothstep(1.5 * age)), 'fill-opacity': (0.9 * fade).toFixed(2),
+        stroke: `rgb(${SPLAY_RIM})`, 'stroke-width': (0.1 * w).toFixed(2), 'stroke-opacity': (0.7 * fade).toFixed(2),
+      }, this.splayLayer);
+      // Rills: curves from the breach that bend gently as they spread.
+      let rills = '';
+      for (let r = 0; r < 3; r++) {
+        const a = SPLAY_HALF_ANGLE * (0.8 * rand() - 0.4 + 0.3 * (r - 1));
+        const [c, e] = [at(a + 0.3 * (rand() - 0.5), 0.4 * len), at(a, (0.55 + 0.2 * rand()) * len)];
+        rills += `M${f(ax)} ${f(ay)}Q${f(c[0])} ${f(c[1])} ${f(e[0])} ${f(e[1])}`;
+      }
+      el('path', {
+        d: rills, fill: 'none', stroke: `rgb(${SPLAY_RILL})`, 'stroke-width': (0.12 * w).toFixed(2),
+        'stroke-opacity': (0.8 * fade * (1 - age)).toFixed(2),
+      }, this.splayLayer);
+    }
+  }
+
   // Record the centreline without drawing, during warm-up.
   capture(river, memory, { local }) {
     river.sync();
@@ -654,5 +719,6 @@ startApp({
     { key: 'showBars', label: 'Show point bars (past centrelines)', toggle: true, local: true },
     { key: 'showLevees', label: 'Show natural levees', toggle: true, local: true },
     { key: 'showScrolls', label: 'Show scroll bars', toggle: true, local: true },
+    { key: 'showSplays', label: 'Show crevasse splays', toggle: true, local: true },
   ],
 });

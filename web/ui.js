@@ -44,6 +44,8 @@ const SIM_CONTROLS = [
   { key: 'overbank', label: 'Overbank deposit (depths per flood, 0 off)', min: 0, max: 1, step: 0.05 },
   { key: 'levee_length', label: 'Levee length (widths)', min: 0.5, max: 6, step: 0.25 },
   { key: 'levee_height', label: 'Flood level (depths above bars)', min: 0, max: 1, step: 0.05 },
+  { key: 'splay_chance', label: 'Crevasse splay chance (0 off)', min: 0, max: 1, step: 0.05 },
+  { key: 'splay_lifetime', label: 'Splay lifetime', min: 100, max: 5000, step: 100 },
   { group: 'Physics (Ikeda–Parker–Sawai)' },
   { key: 'physics', label: 'Derive Ω, Γ, α from hydraulics', toggle: true },
   { key: 'friction', label: 'Friction coefficient Cf', min: 0.002, max: 0.03, step: 0.001 },
