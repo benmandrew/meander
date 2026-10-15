@@ -104,16 +104,21 @@ function blobData(rand, cx, cy, rx, ry) {
   return d + 'Z';
 }
 
-// Outline of an oxbow lake of half-width `hw` along points [start, end) of a
-// flat x, y array, covering arc lengths [from, to] along them. Each end is
-// half an ellipse sampled by angle, so it stays round wherever it falls
-// between points. A plugged end is a round cap when young, lengthening with
-// `age` in [0, 1] to a crescent tip. An end cut by the channel stays a round
-// cap, hidden under the water.
-function lakeData(pts, start, end, from, to, hw, age) {
+// Outline of an oxbow lake along points [start, end) of a flat x, y array,
+// covering arc lengths [from, to] along them. The bed is a parabola across
+// the old channel, so the lake's half-width is `half` × √depth, capped at
+// `half` by the old banks. The depth is `level` less the bed's rise, which
+// is `relief` × 4 × (height − 0.5) for the land heights in `heights`. Where
+// the bed rises above the water the lake splits into pools, one subpath
+// each, and the parabola gives each pool a round tip there. A plugged end
+// is a round cap when young, lengthening with `age` in [0, 1] to a crescent
+// tip. An end cut by the channel stays a round cap, hidden under the water.
+function lakeData(pts, heights, start, end, from, to, half, level, relief, age) {
   const m = end - start;
-  if (m < 2 || hw <= 0) return '';
+  if (m < 2 || level <= 0) return '';
   const s = new Float64Array(m), tx = new Float64Array(m), ty = new Float64Array(m);
+  const depth = new Float64Array(m);
+  for (let k = 0; k < m; k++) depth[k] = level - 4 * relief * (heights[start + k] - 0.5);
   for (let k = 1; k < m; k++) {
     const i = 2 * (start + k);
     s[k] = s[k - 1] + Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
@@ -128,35 +133,91 @@ function lakeData(pts, start, end, from, to, hw, age) {
     tx[k] = dx / l;
     ty[k] = dy / l;
   }
-  const tip = hw * (1 + 3 * age);
-  let [capA, capB] = [from > 0 ? tip : hw, to < s[m - 1] ? tip : hw];
-  const fit = Math.min(1, (b - a) / (capA + capB));
-  [capA, capB] = [capA * fit, capB * fit];
-  const left = [], right = [];
-  let j = 0;
-  // Bank points at arc length `at`, `h` either side of the centreline, with
-  // the position and normal interpolated along the segment.
-  const add = (at, h) => {
+  // Segment and fraction along it at arc length `at`, walking forwards from
+  // segment `j`.
+  const locate = (at, j) => {
     while (j < m - 2 && s[j + 1] < at) j++;
-    const u = (at - s[j]) / (s[j + 1] - s[j] || 1);
-    const i = 2 * (start + j);
-    const x = pts[i] + (pts[i + 2] - pts[i]) * u, y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * u;
-    const nx = -(ty[j] + (ty[j + 1] - ty[j]) * u), ny = tx[j] + (tx[j + 1] - tx[j]) * u;
-    const f = h / (Math.hypot(nx, ny) || 1);
-    left.push((x + nx * f).toFixed(1) + ' ' + (y + ny * f).toFixed(1));
-    right.push((x - nx * f).toFixed(1) + ' ' + (y - ny * f).toFixed(1));
+    return [j, (at - s[j]) / (s[j + 1] - s[j] || 1)];
   };
-  for (let q = 0; q <= CAP_STEPS; q++) {
-    const t = 0.5 * Math.PI * q / CAP_STEPS;
-    add(a + capA * (1 - Math.cos(t)), hw * Math.sin(t));
+  const depthAt = (j, u) => depth[j] + (depth[j + 1] - depth[j]) * u;
+  const width = (d) => half * Math.sqrt(Math.min(1, Math.max(0, d)));
+
+  // Wet runs [u, v] of [a, b]. The depth is linear between points, so each
+  // crossing is exact.
+  const runs = [];
+  let [j, u] = locate(a, 0);
+  let [prevS, prevD] = [a, depthAt(j, u)];
+  let wet = prevD > 0 ? a : null;
+  for (let k = 0; k <= m; k++) {
+    if (k < m && (s[k] <= a || s[k] >= b)) continue;
+    let [at, d] = [s[k], depth[k]];
+    if (k === m) {
+      [j, u] = locate(b, j);
+      [at, d] = [b, depthAt(j, u)];
+    }
+    if ((prevD > 0) !== (d > 0)) {
+      const x = prevS + (at - prevS) * prevD / (prevD - d);
+      if (wet === null) {
+        wet = x;
+      } else {
+        runs.push([wet, x]);
+        wet = null;
+      }
+    }
+    [prevS, prevD] = [at, d];
   }
-  for (let k = 0; k < m; k++) if (s[k] > a + capA && s[k] < b - capB) add(s[k], hw);
-  for (let q = CAP_STEPS; q >= 0; q--) {
-    const t = 0.5 * Math.PI * q / CAP_STEPS;
-    add(b - capB * (1 - Math.cos(t)), hw * Math.sin(t));
+  if (wet !== null) runs.push([wet, b]);
+
+  let path = '';
+  j = 0;
+  for (const [u0, v0] of runs) {
+    if (v0 - u0 < half) continue;
+    // Each end: a round cap of the local width at a plugged or cut end, or
+    // a parabolic tip where the bed rises above the water, sampled densely
+    // near the tip.
+    const end = (at, plugged) => {
+      if (at !== a && at !== b) return { len: half, cap: false };
+      const [jj, uu] = locate(at, 0);
+      const r = width(depthAt(jj, uu));
+      return { len: plugged ? r * (1 + 3 * age) : r, cap: true };
+    };
+    const [ea, eb] = [end(u0, from > 0), end(v0, to < s[m - 1])];
+    const fit = Math.min(1, (v0 - u0) / (ea.len + eb.len));
+    ea.len *= fit;
+    eb.len *= fit;
+    const left = [], right = [];
+    // Bank points at arc length `at`, `shape` × the local half-width either
+    // side of the centreline, with the position, normal and depth
+    // interpolated along the segment.
+    const add = (at, shape) => {
+      let f;
+      [j, f] = locate(at, j);
+      const i = 2 * (start + j);
+      const x = pts[i] + (pts[i + 2] - pts[i]) * f, y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * f;
+      const nx = -(ty[j] + (ty[j + 1] - ty[j]) * f), ny = tx[j] + (tx[j + 1] - tx[j]) * f;
+      const h = shape * width(depthAt(j, f)) / (Math.hypot(nx, ny) || 1);
+      left.push((x + nx * h).toFixed(1) + ' ' + (y + ny * h).toFixed(1));
+      right.push((x - nx * h).toFixed(1) + ' ' + (y - ny * h).toFixed(1));
+    };
+    // Offset into an end region, and the bank shape there, for step `q`.
+    const step = (e, q) => {
+      if (!e.cap) return [e.len * (q / CAP_STEPS) ** 2, 1];
+      const t = 0.5 * Math.PI * q / CAP_STEPS;
+      return [e.len * (1 - Math.cos(t)), Math.sin(t)];
+    };
+    for (let q = 0; q <= CAP_STEPS; q++) {
+      const [o, shape] = step(ea, q);
+      add(u0 + o, shape);
+    }
+    for (let k = 0; k < m; k++) if (s[k] > u0 + ea.len && s[k] < v0 - eb.len) add(s[k], 1);
+    for (let q = CAP_STEPS; q >= 0; q--) {
+      const [o, shape] = step(eb, q);
+      add(v0 - o, shape);
+    }
+    // Both banks meet at the tips; keep each tip once.
+    path += 'M' + left.join('L') + 'L' + right.reverse().slice(1, -1).join('L') + 'Z';
   }
-  // Both banks meet at the tips; keep each tip once.
-  return 'M' + left.join('L') + 'L' + right.reverse().slice(1, -1).join('L') + 'Z';
+  return path;
 }
 
 // Points of a flat x, y array with x in [x0, x1]: path data with one subpath
@@ -300,6 +361,7 @@ class SvgRenderer {
     const oxAge = new Float32Array(buf, river.oxbow_ages_ptr(), n);
     const oxLen = new Float32Array(buf, river.oxbow_lengths_ptr(), n);
     const oxAlong = new Float32Array(buf, river.oxbow_offsets_along_ptr(), n);
+    const oxHeight = new Float32Array(buf, river.oxbow_heights_ptr(), oxPts.length / 2);
     const w = river.get_param('width');
     const life = Math.max(1e-6, river.get_param('oxbow_lifetime'));
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
@@ -313,8 +375,9 @@ class SvgRenderer {
     // Oxbows: a lake that plugs from the ends, narrows far more slowly from
     // the banks and turns murky, fading only over the last fifth of its
     // life, then a marshy scar that fades out. Both plugs and banks advance
-    // steadily with age. The reed fringe grows inwards, so it does not hide
-    // the narrowing.
+    // steadily with age, and the water drains first from where the land
+    // is high, splitting the lake into pools. The reed fringe grows
+    // inwards, so it does not hide the narrowing.
     resize(this.scars, n, this.scarLayer);
     resize(this.lakes, n, this.lakeLayer);
     this.scarLayer.setAttribute('stroke-width', w);
@@ -329,12 +392,15 @@ class SvgRenderer {
         continue;
       }
       const reeds = 0.1 * w + 0.15 * w * age;
+      // Half-width where the bed is at its mean height.
       const hw = 0.5 * w * (1 - local.oxbowShrink * age) - 0.5 * reeds;
       // The plugs advance from the ends of the oxbow as cut off, which a
       // piece split off by the channel may lack.
       const plug = PLUG * age * oxLen[k];
       const [from, to] = [plug - oxAlong[k], oxLen[k] - plug - oxAlong[k]];
-      lake.setAttribute('d', lakeData(oxPts, oxOff[k], oxOff[k + 1], from, to, hw, age));
+      const level = hw > 0 ? (hw / (0.5 * w)) ** 2 : 0;
+      lake.setAttribute('d', lakeData(oxPts, oxHeight, oxOff[k], oxOff[k + 1], from, to,
+        0.5 * w, level, local.oxbowRelief, age));
       lake.setAttribute('fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
       lake.setAttribute('opacity', clamp01(5 * (1 - age)).toFixed(2));
       lake.setAttribute('stroke-width', reeds.toFixed(2));
@@ -421,6 +487,7 @@ startApp({
   renderer,
   display: [
     { key: 'oxbowShrink', label: 'Oxbow narrowing', min: 0, max: 0.95, step: 0.05, local: 0.6 },
+    { key: 'oxbowRelief', label: 'Oxbow bed relief', min: 0, max: 2, step: 0.05, local: 1 },
     { key: 'barMemory', label: 'Point bar memory (sim time)', min: 50, max: 5000, step: 50, local: 600 },
     { key: 'barOpacity', label: 'Point bar strength', min: 0.1, max: 1, step: 0.05, local: 0.75 },
     { key: 'showBars', label: 'Show point bars (past centrelines)', toggle: true, local: true },

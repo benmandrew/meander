@@ -1,5 +1,6 @@
 //! Spatially varying erodibility: smooth noise plus clay plugs left where
-//! oxbows fill in.
+//! oxbows fill in. The same noise, with a finer layer added, gives the
+//! height of the land.
 
 use crate::geom::P;
 
@@ -14,6 +15,9 @@ pub fn fbm(seed: u64, x: f64, y: f64, octaves: u32) -> f64 {
     }
     sum / norm
 }
+
+/// Seed offset of the fine layer of [`Erodibility::height`].
+const HEIGHT_SEED: u64 = 0x4E1F_7A2B;
 
 fn lattice(seed: u64, x: i64, y: i64) -> f64 {
     let mut h = seed ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
@@ -47,6 +51,8 @@ pub struct Erodibility {
     pub noise: Vec<f32>,
     /// Whether each cell is an oxbow fill.
     pub clay: Vec<bool>,
+    seed: u64,
+    scale: f64,
 }
 
 impl Erodibility {
@@ -61,7 +67,7 @@ impl Erodibility {
                 noise.push(fbm(seed, wx / scale, wy / scale, 4) as f32);
             }
         }
-        Self { cell, cols, rows, noise, clay: vec![false; cols * rows] }
+        Self { cell, cols, rows, noise, clay: vec![false; cols * rows], seed, scale }
     }
 
     fn index(&self, p: P) -> usize {
@@ -73,6 +79,14 @@ impl Erodibility {
     /// Noise at `p`, in [0, 1].
     pub fn noise_at(&self, p: P) -> f64 {
         self.noise[self.index(p)] as f64
+    }
+
+    /// Height of the land at `p`, in [0, 1] and near 0.5 on average. Low,
+    /// slow-eroding ground lies low, so clay hollows are deeper; a layer at
+    /// a quarter of the noise scale adds relief along a single oxbow.
+    pub fn height(&self, p: P) -> f64 {
+        let (x, y) = (p[0] / self.scale, p[1] / self.scale);
+        0.5 * fbm(self.seed, x, y, 4) + 0.5 * fbm(self.seed ^ HEIGHT_SEED, 4.0 * x, 4.0 * y, 3)
     }
 
     /// Multiplier at `p`: noise of strength `hetero` around 1, times
@@ -119,6 +133,15 @@ mod tests {
             assert_eq!(v, fbm(5, x, y, 4));
         }
         assert_ne!(fbm(1, 0.5, 0.5, 4), fbm(2, 0.5, 0.5, 4));
+    }
+
+    #[test]
+    fn height_is_bounded_and_varies_along_an_oxbow() {
+        let e = Erodibility::new([100.0, 100.0], 1.0, 25.0, 3);
+        let h: Vec<f64> = (0..400).map(|k| e.height([k as f64 * 0.25, 50.0])).collect();
+        assert!(h.iter().all(|v| (0.0..=1.0).contains(v)));
+        let (lo, hi) = h.iter().fold((1.0f64, 0.0f64), |(a, b), &v| (a.min(v), b.max(v)));
+        assert!(hi - lo > 0.1, "range {lo}..{hi}");
     }
 
     #[test]
