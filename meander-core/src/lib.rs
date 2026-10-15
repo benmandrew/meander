@@ -5,10 +5,14 @@
 //! its normal at a rate given by the Howard–Knutson (1984) upstream-weighted
 //! curvature kernel, smooths, and cuts off any loop whose neck has closed.
 
+pub mod field;
 pub mod geom;
+pub mod mesh;
 pub mod rng;
 
 use geom::{P, curvature, dist, resample, right_normal};
+use field::Erodibility;
+use mesh::AgeMap;
 use rng::Rng;
 
 /// Point spacing as a fraction of the channel width.
@@ -46,6 +50,11 @@ pub struct Params {
     /// Width of the band along each domain edge over which erodibility
     /// tapers to zero, in channel widths.
     pub edge_margin: f64,
+    /// Strength of the erodibility noise: 0 is uniform, 1 ranges from
+    /// near zero to double.
+    pub heterogeneity: f64,
+    /// Erodibility multiplier inside filled oxbows (clay plugs); 1 disables.
+    pub clay_factor: f64,
 }
 
 impl Default for Params {
@@ -64,6 +73,8 @@ impl Default for Params {
             oxbow_lifetime: 400.0,
             jitter: 0.15,
             edge_margin: 8.0,
+            heterogeneity: 0.5,
+            clay_factor: 0.35,
         }
     }
 }
@@ -84,6 +95,8 @@ impl Params {
         "oxbow_lifetime",
         "jitter",
         "edge_margin",
+        "heterogeneity",
+        "clay_factor",
     ];
 
     fn field(&mut self, name: &str) -> Option<&mut f64> {
@@ -100,6 +113,8 @@ impl Params {
             "oxbow_lifetime" => &mut self.oxbow_lifetime,
             "jitter" => &mut self.jitter,
             "edge_margin" => &mut self.edge_margin,
+            "heterogeneity" => &mut self.heterogeneity,
+            "clay_factor" => &mut self.clay_factor,
             _ => return None,
         })
     }
@@ -139,6 +154,9 @@ pub struct Sim {
     pub bounds: P,
     pub centerline: Vec<P>,
     pub oxbows: Vec<Oxbow>,
+    /// When each floodplain cell was last under the channel.
+    pub age_map: AgeMap,
+    pub erodibility: Erodibility,
     pub time: f64,
     pub steps: u64,
     pub cutoffs: u64,
@@ -169,6 +187,12 @@ fn edge_taper(p: P, bounds: P, margin: f64) -> f64 {
     ramp(p[0]) * ramp(bounds[0] - p[0]) * ramp(p[1]) * ramp(bounds[1] - p[1])
 }
 
+/// Feature size of the erodibility noise, in channel widths at reset.
+const NOISE_SCALE: f64 = 25.0;
+
+/// Age map cell size, in channel widths at reset.
+const AGE_CELL: f64 = 0.25;
+
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
 
@@ -179,6 +203,8 @@ impl Sim {
             bounds,
             centerline: Vec::new(),
             oxbows: Vec::new(),
+            age_map: AgeMap::new(bounds, 1.0),
+            erodibility: Erodibility::new([1.0, 1.0], 1.0, 1.0, 0),
             time: 0.0,
             steps: 0,
             cutoffs: 0,
@@ -220,6 +246,10 @@ impl Sim {
             p[1] += o;
         }
         self.centerline = pts;
+        let w = self.params.width;
+        self.age_map = AgeMap::new(self.bounds, AGE_CELL * w);
+        self.erodibility = Erodibility::new(self.bounds, w, NOISE_SCALE * w, seed);
+        self.age_map.stamp(&self.centerline, 0.5 * self.params.width, 0.0);
         self.oxbows.clear();
         self.recent_cuts.clear();
         self.time = 0.0;
@@ -256,6 +286,7 @@ impl Sim {
         }
         self.time += self.params.dt;
         self.steps += 1;
+        self.age_map.stamp(&self.centerline, 0.5 * self.params.width, self.time);
         let (time, life) = (self.time, self.params.oxbow_lifetime);
         self.oxbows.retain(|o| time - o.born < life);
         let steps = self.steps;
@@ -319,7 +350,8 @@ impl Sim {
         self.tmp.extend_from_slice(pts);
         for i in 1..n.saturating_sub(1) {
             let nrm = right_normal(pts, i);
-            let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width);
+            let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width)
+                * self.erodibility.at(pts[i], p.heterogeneity, p.clay_factor);
             // Positive rate moves toward the outside of a left bend, i.e. to
             // the right, so bends grow.
             let d = (e * (scale * self.rate[i] + self.noise[i])).clamp(-limit, limit);
@@ -428,6 +460,7 @@ impl Sim {
         let loop_pts = self.centerline[i..=j].to_vec();
         let mid = geom::lerp(self.centerline[i], self.centerline[j], 0.5);
         self.centerline.drain(i + 1..j);
+        self.erodibility.stamp_clay(&loop_pts, 0.5 * self.params.width);
         self.oxbows.push(Oxbow { points: loop_pts, born: self.time });
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));
         self.cutoffs += 1;
@@ -441,7 +474,7 @@ mod tests {
 
     /// Straight channel along x with a sine perturbation, cutoffs off.
     fn sine_sim(amp_w: f64, wavelength_w: f64) -> Sim {
-        let params = Params { cutoff_dist: 0.0, jitter: 0.0, ..Params::default() };
+        let params = Params { cutoff_dist: 0.0, jitter: 0.0, heterogeneity: 0.0, ..Params::default() };
         let w = params.width;
         let mut sim = Sim::new(params, [400.0 * w, 100.0 * w], 1, 0.0);
         let k = std::f64::consts::TAU / (wavelength_w * w);

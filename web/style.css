@@ -96,6 +96,14 @@ button:hover { border-color: var(--accent); }
   border: 1px solid var(--border);
 }
 
+.views {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.views a { color: var(--accent); }
+.views a[aria-current] { color: inherit; font-weight: 600; }
+
 .buttons, .seed {
   display: flex;
   gap: 6px;
@@ -103,7 +111,7 @@ button:hover { border-color: var(--accent); }
   align-items: center;
 }
 
-.buttons button { flex: 1; }
+.buttons button { flex: 1; padding-inline: 4px; }
 
 .seed input {
   width: 0;
@@ -135,6 +143,16 @@ button:hover { border-color: var(--accent); }
   margin: 2px 0 0;
   accent-color: var(--accent);
 }
+
+.toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  cursor: pointer;
+}
+
+.toggle input { accent-color: var(--accent); margin: 0; }
 
 #stats {
   margin: 14px 0 0;
