@@ -363,6 +363,9 @@ pub struct Sim {
     pub pinches: Vec<f64>,
     pub centerline: Vec<P>,
     pub oxbows: Vec<Oxbow>,
+    /// Counts changes to the oxbow polylines, but not to their fill, so a
+    /// renderer can skip rebuilding what depends only on their shape.
+    pub oxbow_version: u64,
     pub scrolls: Vec<Scroll>,
     /// Counts changes to `scrolls`, so a renderer can skip redrawing them.
     pub scroll_version: u64,
@@ -391,6 +394,11 @@ pub struct Sim {
     grid_items: Vec<u32>,
     grid_fill: Vec<u32>,
     cell_of: Vec<u32>,
+    /// Counts changes to the centreline within a step, so the grid built
+    /// for one pass can serve the next if the centreline has not moved.
+    line_version: u64,
+    /// The grid's layout, and the `line_version` it was built for.
+    grid_for: Option<(Cells, u64)>,
 }
 
 fn smoothstep(t: f64) -> f64 {
@@ -500,14 +508,25 @@ const MIN_OXBOW_POINTS: usize = 3;
 /// Most cutoffs a single flood can make.
 const MAX_FLOOD_CUTS: usize = 4;
 
-/// Grid cell of a point for a hashed grid of cell size `size`.
-fn grid_cell(p: P, size: f64) -> (i64, i64) {
-    ((p[0] / size).floor() as i64, (p[1] / size).floor() as i64)
+/// Layout of the hashed grid of centreline points: the cell size, the
+/// bucket mask, and the step in buckets from one row of cells to the next.
+#[derive(Clone, Copy)]
+struct Cells {
+    size: f64,
+    mask: usize,
+    stride: i64,
 }
 
-/// Bucket of a grid cell in a hash table of `mask + 1` buckets.
-fn grid_bucket(cx: i64, cy: i64, mask: usize) -> usize {
-    ((cx.wrapping_mul(73_856_093) ^ cy.wrapping_mul(19_349_663)) as usize) & mask
+impl Cells {
+    fn cell(&self, p: P) -> (i64, i64) {
+        ((p[0] / self.size).floor() as i64, (p[1] / self.size).floor() as i64)
+    }
+
+    /// Cells along a row hash to consecutive buckets, so the three cells
+    /// around a point in a row are one run of the table.
+    fn bucket(&self, cx: i64, cy: i64) -> usize {
+        cy.wrapping_mul(self.stride).wrapping_add(cx) as usize & self.mask
+    }
 }
 
 /// Whether segments `ab` and `cd` cross at a point interior to both.
@@ -526,6 +545,7 @@ impl Sim {
             pinches: Vec::new(),
             centerline: Vec::new(),
             oxbows: Vec::new(),
+            oxbow_version: 0,
             scrolls: Vec::new(),
             scroll_version: 0,
             splays: Vec::new(),
@@ -547,6 +567,8 @@ impl Sim {
             grid_items: Vec::new(),
             grid_fill: Vec::new(),
             cell_of: Vec::new(),
+            line_version: 0,
+            grid_for: None,
         };
         sim.reset(seed, noise);
         sim
@@ -579,6 +601,8 @@ impl Sim {
         let w = self.params.width;
         self.erodibility = Erodibility::new(self.bounds, FIELD_CELL * w, NOISE_SCALE * w, seed);
         self.oxbows.clear();
+        self.oxbow_version += 1;
+        self.line_version += 1;
         self.scrolls.clear();
         self.scroll_version += 1;
         self.splays.clear();
@@ -612,12 +636,13 @@ impl Sim {
 
     pub fn step(&mut self) {
         let ds = self.ds();
-        self.centerline = resample(&self.centerline, ds);
+        self.resample(ds);
         self.migrate();
         self.smooth();
         self.clamp_to_domain();
+        self.line_version += 1;
         if self.cutoff() {
-            self.centerline = resample(&self.centerline, ds);
+            self.resample(ds);
         }
         // Floods arrive as a Poisson process, approximated per step.
         if self.params.flood_rate > 0.0 && self.rng.uniform() < self.params.flood_rate * self.params.dt {
@@ -627,7 +652,7 @@ impl Sim {
                 if !self.flood_cutoff(magnitude) {
                     break;
                 }
-                self.centerline = resample(&self.centerline, ds);
+                self.resample(ds);
             }
             let p = &self.params;
             self.erodibility.flood(&self.centerline, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
@@ -646,14 +671,24 @@ impl Sim {
                 o.filled_at = time;
             }
         }
-        let scar = self.params.scar_lifetime;
+        let (scar, before) = (self.params.scar_lifetime, self.oxbows.len());
         self.oxbows.retain(|o| time - o.filled_at < scar);
+        if self.oxbows.len() != before {
+            self.oxbow_version += 1;
+        }
         if self.steps % SCROLL_REWORK_EVERY == 0 {
             self.rework_scrolls();
             self.erode_splays();
         }
         let steps = self.steps;
         self.recent_cuts.retain(|&(_, until)| until > steps);
+    }
+
+    /// Resample the centreline to spacing close to `ds`.
+    fn resample(&mut self, ds: f64) {
+        geom::resample_into(&self.centerline, ds, &mut self.tmp);
+        std::mem::swap(&mut self.centerline, &mut self.tmp);
+        self.line_version += 1;
     }
 
     /// Howard–Knutson migration rate at each point, in dimensionless units
@@ -782,20 +817,28 @@ impl Sim {
     }
 
     /// Fill the hashed grid with the centreline points, for cells of size
-    /// `size`. The table has about 2n buckets and is filled by counting
-    /// sort; collisions only add candidates, which callers reject by
-    /// distance. Returns the bucket mask.
-    fn build_grid(&mut self, size: f64) -> usize {
+    /// `size`, unless it already holds them. The table has about 4n buckets
+    /// and is filled by counting sort, so each bucket lists its points in
+    /// increasing order; collisions only add candidates, which callers
+    /// reject by distance.
+    fn build_grid(&mut self, size: f64) -> Cells {
+        if let Some((g, v)) = self.grid_for
+            && g.size == size
+            && v == self.line_version
+        {
+            return g;
+        }
         let pts = &self.centerline;
         let n = pts.len();
-        let buckets = (2 * n).next_power_of_two();
+        let buckets = (4 * n).next_power_of_two();
         let mask = buckets - 1;
+        let g = Cells { size, mask, stride: (self.bounds[0] / size).ceil() as i64 + 3 };
         self.grid_start.clear();
         self.grid_start.resize(buckets + 1, 0);
         self.cell_of.clear();
         for &p in pts {
-            let (cx, cy) = grid_cell(p, size);
-            let b = grid_bucket(cx, cy, mask);
+            let (cx, cy) = g.cell(p);
+            let b = g.bucket(cx, cy);
             self.cell_of.push(b as u32);
             self.grid_start[b + 1] += 1;
         }
@@ -811,22 +854,42 @@ impl Sim {
             self.grid_items[*slot as usize] = i as u32;
             *slot += 1;
         }
-        mask
+        self.grid_for = Some((g, self.line_version));
+        g
     }
 
-    /// Call `f` with every point index in the 3 × 3 block of grid cells
-    /// around `p`, which covers all points within `size` of it.
-    fn for_neighbours(&self, p: P, size: f64, mask: usize, mut f: impl FnMut(usize)) {
-        let (cx, cy) = grid_cell(p, size);
+    /// Point indices in cells `cx − 1` to `cx + 1` of row `cy`, as one run
+    /// of buckets, split in two where it wraps round the table.
+    fn row(&self, g: Cells, cx: i64, cy: i64) -> [&[u32]; 2] {
+        let (b, buckets) = (g.bucket(cx - 1, cy), g.mask + 1);
+        let items = |a: usize, e: usize| &self.grid_items[self.grid_start[a] as usize..self.grid_start[e] as usize];
+        if b + 3 <= buckets { [items(b, b + 3), &[]] } else { [items(b, buckets), items(0, b + 3 - buckets)] }
+    }
+
+    /// Call `f` with every point index above `after` in the 3 × 3 block of
+    /// grid cells around `p`, which covers all points within the cell size
+    /// of it, row by row and cell by cell, in increasing order in each.
+    fn for_neighbours_after(&self, p: P, g: Cells, after: usize, mut f: impl FnMut(usize)) {
+        let (cx, cy) = g.cell(p);
         for y in cy - 1..=cy + 1 {
-            for x in cx - 1..=cx + 1 {
-                let b = grid_bucket(x, y, mask);
-                let (s, e) = (self.grid_start[b] as usize, self.grid_start[b + 1] as usize);
-                for &j in &self.grid_items[s..e] {
-                    f(j as usize);
+            for part in self.row(g, cx, y) {
+                for &j in part {
+                    if j as usize > after {
+                        f(j as usize);
+                    }
                 }
             }
         }
+    }
+
+    /// Whether any centreline point lies within `r`, at most the cell size,
+    /// of `p`.
+    fn near_channel(&self, p: P, r: f64, g: Cells) -> bool {
+        let (cx, cy) = g.cell(p);
+        let pts = &self.centerline;
+        (cy - 1..=cy + 1).any(|y| {
+            self.row(g, cx, y).iter().any(|part| part.iter().any(|&j| geom::dist2(p, pts[j as usize]) < r * r))
+        })
     }
 
     /// Whether a recent cut suppresses a cutoff at `p`.
@@ -843,15 +906,15 @@ impl Sim {
         if n < k_sep + 2 || d_cut <= 0.0 {
             return false;
         }
-        let mask = self.build_grid(d_cut);
+        let g = self.build_grid(d_cut);
         let d_cut2 = d_cut * d_cut;
         let pts = &self.centerline;
 
         // Smallest upstream index first, then the smallest loop from it.
         for i in 0..n {
             let mut best: Option<usize> = None;
-            self.for_neighbours(pts[i], d_cut, mask, |j| {
-                if j > i + k_sep && best.is_none_or(|b| j < b) && geom::dist2(pts[i], pts[j]) < d_cut2 {
+            self.for_neighbours_after(pts[i], g, i + k_sep, |j| {
+                if best.is_none_or(|b| j < b) && geom::dist2(pts[i], pts[j]) < d_cut2 {
                     best = Some(j);
                 }
             });
@@ -882,7 +945,7 @@ impl Sim {
             return false;
         }
         let ds = geom::length(&self.centerline) / (n - 1) as f64;
-        let mask = self.build_grid(reach);
+        let g = self.build_grid(reach);
         let (neck2, reach2) = (neck * neck, reach * reach);
         let pts = &self.centerline;
 
@@ -890,10 +953,7 @@ impl Sim {
         let mut found: Vec<(f64, usize, usize)> = Vec::new();
         for i in 0..n {
             let mut best: Option<(f64, usize)> = None;
-            self.for_neighbours(pts[i], reach, mask, |j| {
-                if j <= i + k_sep {
-                    return;
-                }
+            self.for_neighbours_after(pts[i], g, i + k_sep, |j| {
                 let d2 = geom::dist2(pts[i], pts[j]);
                 if d2 >= reach2 {
                     return;
@@ -936,23 +996,19 @@ impl Sim {
             return;
         }
         let w = self.params.width;
-        let mask = self.build_grid(w);
+        let g = self.build_grid(w);
         let oxbows = std::mem::take(&mut self.oxbows);
         let mut kept = Vec::with_capacity(oxbows.len());
-        let pts = &self.centerline;
         let mut hit = Vec::new();
+        let mut changed = false;
         for o in oxbows {
             hit.clear();
-            hit.extend(o.points.iter().map(|&q| {
-                let mut near = false;
-                self.for_neighbours(q, w, mask, |j| near |= geom::dist2(q, pts[j]) < 0.25 * w * w);
-                near
-            }));
+            hit.extend(o.points.iter().map(|&q| self.near_channel(q, 0.5 * w, g)));
             if !hit.contains(&true) {
                 kept.push(o);
                 continue;
             }
-            let (n, mut start) = (hit.len(), 0usize);
+            let (n, mut start, before) = (hit.len(), 0usize, kept.len());
             for k in 0..=n {
                 if k == n || hit[k] {
                     let (a, b) = (start.saturating_sub(1), (k + 1).min(n));
@@ -963,8 +1019,14 @@ impl Sim {
                     start = k + 1;
                 }
             }
+            // A hit only at an end, which lies under the channel at the
+            // cut, keeps the whole oxbow as it was.
+            changed |= kept.len() != before + 1 || kept[before].points.len() != n;
         }
         self.oxbows = kept;
+        if changed {
+            self.oxbow_version += 1;
+        }
     }
 
     /// Fill each lake by one flood of magnitude `u`: bedload through an
@@ -1126,16 +1188,11 @@ impl Sim {
         let mut changed = self.scrolls.len() != before;
         if !self.scrolls.is_empty() {
             let w = self.params.width;
-            let mask = self.build_grid(w);
-            let pts = &self.centerline;
+            let g = self.build_grid(w);
             let scrolls = std::mem::take(&mut self.scrolls);
             let mut kept = Vec::with_capacity(scrolls.len());
             for sc in scrolls {
-                let wet = |q: P| {
-                    let mut near = false;
-                    self.for_neighbours(q, w, mask, |j| near |= geom::dist2(q, pts[j]) < 0.25 * w * w);
-                    near
-                };
+                let wet = |q: P| self.near_channel(q, 0.5 * w, g);
                 if !sc.points.iter().any(|&q| wet(q)) {
                     kept.push(sc);
                     continue;
@@ -1166,6 +1223,8 @@ impl Sim {
         let entry = if norms > 0.0 { ((main[0] * branch[0] + main[1] * branch[1]) / norms).max(0.0) } else { 0.0 };
         let mid = geom::lerp(self.centerline[i], self.centerline[j], 0.5);
         self.centerline.drain(i + 1..j);
+        self.line_version += 1;
+        self.oxbow_version += 1;
         self.erodibility.stamp_oxbow(&loop_pts, 0.5 * self.params.width, self.time);
         self.oxbows.push(Oxbow::lake(loop_pts, self.time, entry));
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));

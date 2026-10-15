@@ -23,15 +23,24 @@ pub fn length(pts: &[P]) -> f64 {
 /// endpoints are kept exactly; the spacing is adjusted so the length divides
 /// evenly.
 pub fn resample(pts: &[P], ds: f64) -> Vec<P> {
+    let mut out = Vec::new();
+    resample_into(pts, ds, &mut out);
+    out
+}
+
+/// [`resample`] into `out`, reusing its allocation.
+pub fn resample_into(pts: &[P], ds: f64, out: &mut Vec<P>) {
+    out.clear();
     let n = pts.len();
     if n < 2 {
-        return pts.to_vec();
+        out.extend_from_slice(pts);
+        return;
     }
     let total = length(pts);
     let m = ((total / ds).round() as usize).max(1);
     let step = total / m as f64;
 
-    let mut out = Vec::with_capacity(m + 1);
+    out.reserve(m + 1);
     out.push(pts[0]);
     let mut seg = 0;
     let mut seg_start = 0.0;
@@ -51,7 +60,6 @@ pub fn resample(pts: &[P], ds: f64) -> Vec<P> {
         out.push(lerp(pts[seg], pts[seg + 1], t));
     }
     out.push(pts[n - 1]);
-    out
 }
 
 /// Signed Menger curvature at each point (positive = left turn). Endpoints
