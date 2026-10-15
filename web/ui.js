@@ -36,6 +36,7 @@ const SIM_CONTROLS = [
   { key: 'oxbow_lifetime', label: 'Lake fill time without floods', min: 10, max: 3000, step: 10 },
   { key: 'bedload_fill', label: 'Lake fill by bedload per flood', min: 0, max: 1, step: 0.05 },
   { key: 'scar_lifetime', label: 'Oxbow scar lifetime', min: 0, max: 5000, step: 50 },
+  { key: 'scroll_lifetime', label: 'Scroll bar lifetime (0 off)', min: 0, max: 5000, step: 50 },
   { group: 'Floods' },
   { key: 'flood_rate', label: 'Floods per unit time (0 off)', min: 0, max: 0.2, step: 0.005 },
   { key: 'breach_dist', label: 'Widest neck breached (widths)', min: 1, max: 5, step: 0.1 },

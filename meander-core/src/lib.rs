@@ -53,6 +53,9 @@ pub struct Params {
     pub bedload_fill: f64,
     /// Simulation time a filled oxbow stays as a scar before it is dropped.
     pub scar_lifetime: f64,
+    /// Simulation time a scroll bar, the ridge a flood leaves along the
+    /// inner bank, lasts before it is dropped. 0 disables scroll bars.
+    pub scroll_lifetime: f64,
     /// Random lateral perturbation added each step, in channel widths per
     /// square root of time. Bends drift downstream and leave the domain, so
     /// without this the river eventually straightens.
@@ -138,6 +141,7 @@ impl Default for Params {
             oxbow_lifetime: OXBOW_LIFETIME,
             bedload_fill: BEDLOAD_FILL,
             scar_lifetime: 1600.0,
+            scroll_lifetime: SCROLL_LIFETIME,
             jitter: 0.05,
             jitter_scale: 3.0,
             valley_width: 45.0,
@@ -181,6 +185,7 @@ impl Params {
         "oxbow_lifetime",
         "bedload_fill",
         "scar_lifetime",
+        "scroll_lifetime",
         "jitter",
         "jitter_scale",
         "valley_width",
@@ -220,6 +225,7 @@ impl Params {
             "oxbow_lifetime" => &mut self.oxbow_lifetime,
             "bedload_fill" => &mut self.bedload_fill,
             "scar_lifetime" => &mut self.scar_lifetime,
+            "scroll_lifetime" => &mut self.scroll_lifetime,
             "jitter" => &mut self.jitter,
             "jitter_scale" => &mut self.jitter_scale,
             "valley_width" => &mut self.valley_width,
@@ -307,6 +313,14 @@ impl Oxbow {
     }
 }
 
+/// A scroll bar: the ridge a flood leaves along the inner bank of a
+/// migrating bend, as a polyline.
+#[derive(Clone, Debug)]
+pub struct Scroll {
+    pub points: Vec<P>,
+    pub born: f64,
+}
+
 pub struct Sim {
     pub params: Params,
     /// Domain is `[0, bounds[0]] × [0, bounds[1]]`.
@@ -315,6 +329,9 @@ pub struct Sim {
     pub pinches: Vec<f64>,
     pub centerline: Vec<P>,
     pub oxbows: Vec<Oxbow>,
+    pub scrolls: Vec<Scroll>,
+    /// Counts changes to `scrolls`, so a renderer can skip redrawing them.
+    pub scroll_version: u64,
     pub erodibility: Erodibility,
     pub time: f64,
     pub steps: u64,
@@ -392,6 +409,22 @@ const CHUTE_RATIO: f64 = 4.0;
 const OVERBANK: f64 = 0.3;
 const OXBOW_LIFETIME: f64 = 1200.0;
 const BEDLOAD_FILL: f64 = 0.2;
+const SCROLL_LIFETIME: f64 = 1000.0;
+
+/// Distance of a scroll bar from the centreline, in channel widths: just
+/// inside the inner bank.
+const SCROLL_OFFSET: f64 = 0.6;
+
+/// Least migration rate, in the dimensionless units of
+/// [`Sim::migration_rate`], at which a bank counts as accreting a scroll bar.
+const SCROLL_MIN_RATE: f64 = 0.05;
+
+/// Scroll bars and pieces with fewer points than this are dropped.
+const MIN_SCROLL_POINTS: usize = 6;
+
+/// Steps between checks for scroll bars under the channel. They do not
+/// affect the dynamics, so the check need not run every step.
+const SCROLL_REWORK_EVERY: u64 = 10;
 const LEVEE_LENGTH: f64 = 2.0;
 const LEVEE_HEIGHT: f64 = 0.25;
 
@@ -430,6 +463,8 @@ impl Sim {
             pinches: Vec::new(),
             centerline: Vec::new(),
             oxbows: Vec::new(),
+            scrolls: Vec::new(),
+            scroll_version: 0,
             erodibility: Erodibility::new([1.0, 1.0], 1.0, 1.0, 0),
             time: 0.0,
             steps: 0,
@@ -478,6 +513,8 @@ impl Sim {
         let w = self.params.width;
         self.erodibility = Erodibility::new(self.bounds, FIELD_CELL * w, NOISE_SCALE * w, seed);
         self.oxbows.clear();
+        self.scrolls.clear();
+        self.scroll_version += 1;
         self.recent_cuts.clear();
         self.time = 0.0;
         self.steps = 0;
@@ -526,6 +563,7 @@ impl Sim {
             let p = &self.params;
             self.erodibility.flood(&self.centerline, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
             self.fill_lakes(magnitude);
+            self.add_scrolls();
         }
         self.erodibility.sweep(&self.centerline, self.time);
         self.time += self.params.dt;
@@ -540,6 +578,9 @@ impl Sim {
         }
         let scar = self.params.scar_lifetime;
         self.oxbows.retain(|o| time - o.filled_at < scar);
+        if self.steps % SCROLL_REWORK_EVERY == 0 {
+            self.rework_scrolls();
+        }
         let steps = self.steps;
         self.recent_cuts.retain(|&(_, until)| until > steps);
     }
@@ -879,6 +920,85 @@ impl Sim {
         }
     }
 
+    /// Leave a scroll bar along the inner bank of each run of points whose
+    /// bank is migrating, as a flood does on the point bar it builds.
+    fn add_scrolls(&mut self) {
+        if self.params.scroll_lifetime <= 0.0 {
+            return;
+        }
+        self.migration_rate();
+        let off = SCROLL_OFFSET * self.params.width;
+        let pts = &self.centerline;
+        let n = pts.len();
+        let mut run: Vec<P> = Vec::new();
+        let mut side = 0.0;
+        let mut added = Vec::new();
+        for i in 1..n {
+            let r = if i < n - 1 { self.rate[i] } else { 0.0 };
+            let s = if r > SCROLL_MIN_RATE {
+                1.0
+            } else if r < -SCROLL_MIN_RATE {
+                -1.0
+            } else {
+                0.0
+            };
+            if s != side {
+                if run.len() >= MIN_SCROLL_POINTS {
+                    added.push(Scroll { points: std::mem::take(&mut run), born: self.time });
+                }
+                run.clear();
+                side = s;
+            }
+            if s != 0.0 {
+                // A positive rate moves the point along its right normal,
+                // so the inner bank lies along the left.
+                let nrm = right_normal(pts, i);
+                run.push([pts[i][0] - s * off * nrm[0], pts[i][1] - s * off * nrm[1]]);
+            }
+        }
+        if !added.is_empty() {
+            self.scrolls.extend(added);
+            self.scroll_version += 1;
+        }
+    }
+
+    /// Drop scroll bars past their lifetime and the parts of the rest
+    /// within half a width of the channel, which has eroded them.
+    fn rework_scrolls(&mut self) {
+        let (time, life) = (self.time, self.params.scroll_lifetime);
+        let before = self.scrolls.len();
+        self.scrolls.retain(|s| time - s.born < life);
+        let mut changed = self.scrolls.len() != before;
+        if !self.scrolls.is_empty() {
+            let w = self.params.width;
+            let mask = self.build_grid(w);
+            let pts = &self.centerline;
+            let scrolls = std::mem::take(&mut self.scrolls);
+            let mut kept = Vec::with_capacity(scrolls.len());
+            for sc in scrolls {
+                let wet = |q: P| {
+                    let mut near = false;
+                    self.for_neighbours(q, w, mask, |j| near |= geom::dist2(q, pts[j]) < 0.25 * w * w);
+                    near
+                };
+                if !sc.points.iter().any(|&q| wet(q)) {
+                    kept.push(sc);
+                    continue;
+                }
+                changed = true;
+                for piece in sc.points.split(|&q| wet(q)) {
+                    if piece.len() >= MIN_SCROLL_POINTS {
+                        kept.push(Scroll { points: piece.to_vec(), born: sc.born });
+                    }
+                }
+            }
+            self.scrolls = kept;
+        }
+        if changed {
+            self.scroll_version += 1;
+        }
+    }
+
     /// Join point `i` to point `j` and abandon the reach between them as an
     /// oxbow.
     fn apply_cut(&mut self, i: usize, j: usize) {
@@ -1093,6 +1213,44 @@ mod tests {
         assert!((f[1] - quiet).abs() < 0.05, "a far lake fills only by the clock: {} against {quiet}", f[1]);
         assert!(f[0] > f[1] + 0.2, "a near lake silts up faster");
         assert!(f[2] > f[1] + 0.2, "a lake with an open entrance takes in bedload");
+    }
+
+    #[test]
+    fn floods_leave_scroll_bars_inside_migrating_bends() {
+        let mut sim = sine_sim(2.0, 30.0);
+        sim.params.flood_rate = 0.0;
+        sim.step_n(50);
+        sim.add_scrolls();
+        assert!(!sim.scrolls.is_empty());
+        let w = sim.params.width;
+        let mid = sim.bounds[1] / 2.0;
+        let line = sim.centerline.clone();
+        let gap = |q: P| line.iter().map(|&c| dist(q, c)).fold(f64::INFINITY, f64::min);
+        let mut bends = 0;
+        for sc in &sim.scrolls {
+            assert!(sc.points.len() >= MIN_SCROLL_POINTS);
+            for &q in &sc.points {
+                assert!(gap(q) > 0.5 * w && gap(q) < 0.7 * w, "a ridge lies just off the bank");
+            }
+            // Bends grow outwards, so the ridge at a bend lies on its axis
+            // side: inside the bend.
+            let k = sc.points.len() / 2;
+            let c = line.iter().min_by(|a, b| dist(**a, sc.points[k]).total_cmp(&dist(**b, sc.points[k]))).unwrap();
+            if (c[1] - mid).abs() > 1.5 * w {
+                bends += 1;
+                assert!((sc.points[k][1] - mid).abs() < (c[1] - mid).abs(), "ridge at {:?}, channel at {c:?}", sc.points[k]);
+            }
+        }
+        assert!(bends >= 4, "only {bends} ridges at bends");
+        // The channel erodes a ridge it crosses.
+        let v = sim.scroll_version;
+        let across: Vec<P> = (-10..=10).map(|k| [100.0 * w, mid + 0.5 * k as f64 * w]).collect();
+        sim.scrolls = vec![Scroll { points: across, born: sim.time }];
+        sim.rework_scrolls();
+        assert!(sim.scroll_version > v);
+        for sc in &sim.scrolls {
+            assert!(sc.points.iter().all(|&q| gap(q) >= 0.5 * w));
+        }
     }
 
     #[test]

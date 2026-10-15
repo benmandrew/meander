@@ -28,6 +28,12 @@ const LEVEE = [216, 210, 166];
 const LEVEE_LEVELS = [0.3, 0.7];
 // Simulated time between levee redraws when no flood has come.
 const LEVEE_REFRESH = 10;
+// Scroll bars: ridges of fresh sand that vegetation colonises first, so
+// they darken against the bar as they age. They are kept in this many age
+// bands, each one path element.
+const RIDGE = [238, 230, 196];
+const OLD_RIDGE = [146, 158, 108];
+const SCROLL_BANDS = 6;
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -377,6 +383,9 @@ class SvgRenderer {
     // fade to the background colour, and the translucent soil patches lie
     // over them.
     this.barLayer = el('g', round, ground);
+    this.scrollLayer = el('g', round, ground);
+    this.scrollBands = Array.from({ length: SCROLL_BANDS }, () => el('path', {}, this.scrollLayer));
+    this.scrollAt = null;
     // Natural levees: nested translucent silt regions, higher ground inside.
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
@@ -407,6 +416,7 @@ class SvgRenderer {
     this.lastBar = null;
     this.window = [x, w];
     this.leveeAt = null;
+    this.scrollAt = null;
     this.drawSoils(river, x, w, h, seed);
   }
 
@@ -462,10 +472,12 @@ class SvgRenderer {
     const d = pathData(line, 0, line.length / 2);
 
     this.record(line, river.time(), w, local);
-    for (const [layer, show] of [[this.barLayer, local.showBars], [this.leveeLayer, local.showLevees]]) {
+    const layers = [[this.barLayer, local.showBars], [this.leveeLayer, local.showLevees], [this.scrollLayer, local.showScrolls]];
+    for (const [layer, show] of layers) {
       if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
     }
     if (local.showLevees) this.drawLevees(river, buf);
+    if (local.showScrolls) this.drawScrolls(river, memory, w);
 
     // Oxbows: a lake that plugs from the ends, narrows far more slowly from
     // the banks and turns murky, fading only over the last fifth of its
@@ -523,6 +535,41 @@ class SvgRenderer {
     const top = river.get_param('levee_height');
     LEVEE_LEVELS.forEach((f, k) => {
       this.levees[k].setAttribute('d', top > 0 ? contourData(deposit, cols, rows, cell, c0, c1, f * top) : '');
+    });
+  }
+
+  // Draw the scroll bars in age bands when they change, and every
+  // `LEVEE_REFRESH` of simulated time as they age. A band's ridges darken
+  // as vegetation takes them, and fade over the last quarter of their life.
+  drawScrolls(river, memory, w) {
+    const t = river.time(), version = river.scroll_version();
+    const last = this.scrollAt;
+    if (last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    this.scrollAt = { version, t };
+    river.sync_scrolls();
+    // Views must be built after syncing: it can grow memory.
+    const buf = memory.buffer;
+    const n = river.scroll_count();
+    const pts = new Float32Array(buf, river.scroll_line_ptr(), river.scroll_line_len());
+    const off = new Uint32Array(buf, river.scroll_offsets_ptr(), n + 1);
+    const ages = new Float32Array(buf, river.scroll_ages_ptr(), n);
+    const life = Math.max(1e-6, river.get_param('scroll_lifetime'));
+    const [x, vw] = this.window;
+    const d = this.scrollBands.map(() => []);
+    for (let k = 0; k < n; k++) {
+      // Skip ridges wholly outside the window.
+      let inside = false;
+      for (let i = off[k]; i < off[k + 1] && !inside; i++) inside = pts[2 * i] >= x - w && pts[2 * i] <= x + vw + w;
+      if (!inside) continue;
+      const band = Math.min(SCROLL_BANDS - 1, Math.floor(SCROLL_BANDS * ages[k] / life));
+      d[band].push(pathData(pts, off[k], off[k + 1]));
+    }
+    this.scrollLayer.setAttribute('stroke-width', (0.15 * w).toFixed(2));
+    this.scrollBands.forEach((path, b) => {
+      const age = (b + 0.5) / SCROLL_BANDS;
+      path.setAttribute('d', d[b].join(''));
+      path.setAttribute('stroke', mix(RIDGE, OLD_RIDGE, smoothstep(2 * age)));
+      path.setAttribute('stroke-opacity', (0.7 * (1 - smoothstep((age - 0.75) / 0.25))).toFixed(2));
     });
   }
 
@@ -606,5 +653,6 @@ startApp({
     { key: 'barOpacity', label: 'Point bar strength', min: 0.1, max: 1, step: 0.05, local: 0.75 },
     { key: 'showBars', label: 'Show point bars (past centrelines)', toggle: true, local: true },
     { key: 'showLevees', label: 'Show natural levees', toggle: true, local: true },
+    { key: 'showScrolls', label: 'Show scroll bars', toggle: true, local: true },
   ],
 });

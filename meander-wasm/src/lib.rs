@@ -39,6 +39,13 @@ pub struct River {
     /// Fraction of the lake depth filled with flood silt at each oxbow
     /// point, in [0, 1], matching `oxbow_line`.
     oxbow_silts: Vec<f32>,
+    /// All scroll bar polylines, back to back, as flat x, y pairs.
+    scroll_line: Vec<f32>,
+    /// Start of each scroll bar in `scroll_line`, in points, plus an end
+    /// marker.
+    scroll_offsets: Vec<u32>,
+    /// Age of each scroll bar in simulation time.
+    scroll_ages: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -58,6 +65,9 @@ impl River {
             oxbow_offsets_along: Vec::new(),
             oxbow_heights: Vec::new(),
             oxbow_silts: Vec::new(),
+            scroll_line: Vec::new(),
+            scroll_offsets: Vec::new(),
+            scroll_ages: Vec::new(),
         }
     }
 
@@ -117,6 +127,41 @@ impl River {
             self.oxbow_offsets_along.push(o.offset as f32);
         }
         self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
+    }
+
+    /// Copy the scroll bars into flat buffers. They change only at floods
+    /// and when the channel crosses them; see `scroll_version`.
+    pub fn sync_scrolls(&mut self) {
+        let sim = &self.sim;
+        self.scroll_line.clear();
+        self.scroll_offsets.clear();
+        self.scroll_ages.clear();
+        for s in &sim.scrolls {
+            self.scroll_offsets.push((self.scroll_line.len() / 2) as u32);
+            self.scroll_line.extend(s.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
+            self.scroll_ages.push((sim.time - s.born) as f32);
+        }
+        self.scroll_offsets.push((self.scroll_line.len() / 2) as u32);
+    }
+
+    pub fn scroll_line_ptr(&self) -> *const f32 {
+        self.scroll_line.as_ptr()
+    }
+    pub fn scroll_line_len(&self) -> usize {
+        self.scroll_line.len()
+    }
+    pub fn scroll_offsets_ptr(&self) -> *const u32 {
+        self.scroll_offsets.as_ptr()
+    }
+    pub fn scroll_ages_ptr(&self) -> *const f32 {
+        self.scroll_ages.as_ptr()
+    }
+    pub fn scroll_count(&self) -> usize {
+        self.scroll_ages.len()
+    }
+    /// Changes whenever the scroll bars do.
+    pub fn scroll_version(&self) -> f64 {
+        self.sim.scroll_version as f64
     }
 
     pub fn line_ptr(&self) -> *const f32 {
