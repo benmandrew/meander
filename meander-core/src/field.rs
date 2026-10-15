@@ -180,6 +180,27 @@ impl Erodibility {
         (1.0 + self.deposit_at(p) / LAKE_DEPTH).clamp(0.0, 1.0)
     }
 
+    /// [`Erodibility::silt_at`] where `p` lies in a lake footprint, or
+    /// `None` where the channel has swept the cell since the cutoff. Its
+    /// cells are half a width across, so the channel sweeps cells under
+    /// lake points beside it, and their silt is that of fresh bar sand.
+    pub fn lake_silt_at(&self, p: P) -> Option<f64> {
+        self.cut_at[self.index(p)].is_finite().then(|| self.silt_at(p))
+    }
+
+    /// Mean of [`Erodibility::lake_silt_at`] over the interior points of an
+    /// oxbow, whose ends lie under the channel at a cut, or 0 if the
+    /// channel has swept them all.
+    pub fn lake_silt(&self, pts: &[P]) -> f64 {
+        let m = pts.len();
+        let inner = if m > 2 { &pts[1..m - 1] } else { pts };
+        let (sum, count) = inner
+            .iter()
+            .filter_map(|&q| self.lake_silt_at(q))
+            .fold((0.0, 0usize), |(s, c), x| (s + x, c + 1));
+        if count > 0 { sum / count as f64 } else { 0.0 }
+    }
+
     /// Lay one flood's overbank deposit beside a channel of half-width
     /// `half` along the points. A cell at distance d from the bank gains
     /// `amount · exp(−d / length) · (1 − h / stage)`, so deposits thin away

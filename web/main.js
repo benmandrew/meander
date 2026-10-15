@@ -619,7 +619,11 @@ class SvgRenderer {
       const fade = 1 - smoothstep(oxScar[k] / scarLife);
       set(scar, 'stroke-opacity', (0.45 * smoothstep(age) * fade).toFixed(2));
       if (age >= 1) {
+        // Elements are matched to oxbows by index, so a lake can come back
+        // to this element when the channel splits or drops an oxbow before
+        // it. Forget its inputs, or it would stay blank.
         set(lake, 'd', '');
+        lake.inputs = null;
         continue;
       }
       const reeds = 0.1 * w + 0.15 * w * age;

@@ -11,6 +11,14 @@ pub fn dist2(a: P, b: P) -> f64 {
     dx * dx + dy * dy
 }
 
+/// Squared distance from `p` to the segment `ab`.
+pub fn seg_dist2(p: P, a: P, b: P) -> f64 {
+    let (ab, ap) = ([b[0] - a[0], b[1] - a[1]], [p[0] - a[0], p[1] - a[1]]);
+    let len2 = ab[0] * ab[0] + ab[1] * ab[1];
+    let t = if len2 > 0.0 { ((ap[0] * ab[0] + ap[1] * ab[1]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    dist2(p, lerp(a, b, t))
+}
+
 pub fn lerp(a: P, b: P, t: f64) -> P {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
 }

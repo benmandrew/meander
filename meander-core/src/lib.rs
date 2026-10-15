@@ -505,6 +505,15 @@ pub const CHUTE_CHORD: f64 = 5.0;
 /// Oxbow pieces with fewer points than this are dropped.
 const MIN_OXBOW_POINTS: usize = 3;
 
+/// Distance from the channel centreline, in channel widths, within which
+/// the channel removes an oxbow point. The lakes lie under the water, so a
+/// point nearer than half a width is already hidden on the channel side; a
+/// smaller radius lets a channel that runs alongside a lake cover it a
+/// little at a time, not a whole reach at once. It is above half the
+/// largest step, `max_step` × `SPACING` = 0.075, so a channel moving across
+/// a point comes within it.
+const REWORK_RADIUS: f64 = 0.1;
+
 /// Most cutoffs a single flood can make.
 const MAX_FLOOD_CUTS: usize = 4;
 
@@ -892,6 +901,23 @@ impl Sim {
         })
     }
 
+    /// Call `f` with each centreline segment that has an end among the
+    /// points in the 3 × 3 block of grid cells around `p`, until it returns
+    /// true; returns whether it did. A segment may be passed twice.
+    fn any_segment_near(&self, p: P, g: Cells, mut f: impl FnMut(P, P) -> bool) -> bool {
+        let (cx, cy) = g.cell(p);
+        let pts = &self.centerline;
+        let n = pts.len();
+        (cy - 1..=cy + 1).any(|y| {
+            self.row(g, cx, y).iter().any(|part| {
+                part.iter().any(|&j| {
+                    let j = j as usize;
+                    (j > 0 && f(pts[j - 1], pts[j])) || (j + 1 < n && f(pts[j], pts[j + 1]))
+                })
+            })
+        })
+    }
+
     /// Whether a recent cut suppresses a cutoff at `p`.
     fn near_recent(&self, p: P) -> bool {
         let r = 0.5 * self.params.cutoff_min_sep as f64 * self.ds();
@@ -986,42 +1012,76 @@ impl Sim {
         false
     }
 
-    /// Remove the parts of oxbows under the channel, splitting an oxbow
-    /// where the channel crosses it, and drop pieces too short to draw. A
-    /// piece keeps its parent's birth time and length. At a cut it keeps
-    /// one point under the water, so the lake runs in beneath the channel
-    /// and the cut end stays hidden as the channel advances.
+    /// Remove the parts of oxbows the channel has reached, splitting an
+    /// oxbow where the channel crosses it, and drop pieces too short to
+    /// draw. The channel cuts an oxbow where its centreline crosses one of
+    /// the oxbow's segments, or comes within `REWORK_RADIUS` of one of its
+    /// points. A point it comes that close to ends the pieces on both sides
+    /// of it, and the two points of a crossed segment each end the piece on
+    /// their side, so the lake runs in beneath the channel and the cut end
+    /// stays hidden as the channel advances. A piece keeps its parent's
+    /// birth time and length.
     fn rework_oxbows(&mut self) {
         if self.oxbows.is_empty() {
             return;
         }
         let w = self.params.width;
+        let r2 = (REWORK_RADIUS * w).powi(2);
         let g = self.build_grid(w);
         let oxbows = std::mem::take(&mut self.oxbows);
         let mut kept = Vec::with_capacity(oxbows.len());
-        let mut hit = Vec::new();
+        // Pieces of the current oxbow, as ranges of point indices.
+        let mut pieces: Vec<(usize, usize)> = Vec::new();
+        let (mut near, mut hit) = (Vec::new(), Vec::new());
         let mut changed = false;
         for o in oxbows {
-            hit.clear();
-            hit.extend(o.points.iter().map(|&q| self.near_channel(q, 0.5 * w, g)));
-            if !hit.contains(&true) {
+            let pts = &o.points;
+            let n = pts.len();
+            // Points spaced half a width apart, so a segment within reach of
+            // a point, or crossing a segment, has an end within a width.
+            near.clear();
+            near.extend(pts.iter().map(|&q| self.near_channel(q, w, g)));
+            if !near.contains(&true) {
                 kept.push(o);
                 continue;
             }
-            let (n, mut start, before) = (hit.len(), 0usize, kept.len());
-            for k in 0..=n {
-                if k == n || hit[k] {
-                    let (a, b) = (start.saturating_sub(1), (k + 1).min(n));
-                    if k > start && b - a >= MIN_OXBOW_POINTS {
-                        let offset = o.offset + geom::length(&o.points[..=a]);
-                        kept.push(Oxbow { points: o.points[a..b].to_vec(), offset, ..o });
-                    }
+            hit.clear();
+            hit.extend(pts.iter().zip(&near).map(|(&q, &close)| {
+                close && self.any_segment_near(q, g, |a, b| geom::seg_dist2(q, a, b) < r2)
+            }));
+            // A channel point on the segment, as well as a crossing, cuts it.
+            let crossed = |k: usize| {
+                let (p, q) = (pts[k], pts[k + 1]);
+                self.any_segment_near(geom::lerp(p, q, 0.5), g, |a, b| {
+                    segments_cross(p, q, a, b) || geom::seg_dist2(a, p, q) < r2 || geom::seg_dist2(b, p, q) < r2
+                })
+            };
+            pieces.clear();
+            let mut start = 0;
+            for k in 0..n - 1 {
+                // A hit point already ends the pieces either side of it.
+                if (near[k] || near[k + 1]) && !hit[k] && !hit[k + 1] && crossed(k) {
+                    pieces.push((start, k + 1));
+                    start = k + 1;
+                }
+                if hit[k + 1] {
+                    pieces.push((start, k + 2));
                     start = k + 1;
                 }
             }
+            pieces.push((start, n));
             // A hit only at an end, which lies under the channel at the
             // cut, keeps the whole oxbow as it was.
-            changed |= kept.len() != before + 1 || kept[before].points.len() != n;
+            pieces.retain(|&(a, b)| b - a >= MIN_OXBOW_POINTS);
+            if pieces[..] == [(0, n)] {
+                kept.push(o);
+                continue;
+            }
+            changed = true;
+            for &(a, b) in &pieces {
+                let offset = o.offset + geom::length(&pts[..=a]);
+                kept.push(Oxbow { points: pts[a..b].to_vec(), offset, ..o });
+            }
         }
         self.oxbows = kept;
         if changed {
@@ -1036,16 +1096,13 @@ impl Sim {
         let p = &self.params;
         let (half, length) = (0.5 * p.width, p.levee_length * p.width);
         for o in self.oxbows.iter_mut().filter(|o| o.is_lake()) {
-            let m = o.points.len();
             // Only the piece holding the original upstream end has the entrance.
             let mut inflow = 0.0;
             if o.offset == 0.0 && o.entry > 0.0 && length > 0.0 {
                 let gap = self.centerline.iter().map(|&c| geom::dist2(o.points[0], c)).fold(f64::INFINITY, f64::min);
                 inflow = u * p.bedload_fill * o.entry * (-(gap.sqrt() - half).max(0.0) / length).exp();
             }
-            // The ends lie under the channel at a cut, so only the interior counts.
-            let inner = &o.points[1..m - 1];
-            let silt = inner.iter().map(|&q| self.erodibility.silt_at(q)).sum::<f64>() / inner.len().max(1) as f64;
+            let silt = self.erodibility.lake_silt(&o.points);
             o.fill = (o.fill + inflow).max(silt).min(1.0);
             if o.fill >= 1.0 {
                 o.filled_at = self.time;
@@ -1541,5 +1598,29 @@ mod tests {
         }
         assert!(gap(a.points[a.points.len() - 1]) < 0.5 * w && gap(b.points[0]) < 0.5 * w);
         assert!((b.offset - dist(b.points[0], [100.0 * w, mid - 10.0 * w])).abs() < 1e-9);
+    }
+
+    #[test]
+    fn channel_splits_an_oxbow_between_its_points() {
+        let mut sim = sine_sim(0.0, 40.0);
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        // The channel runs between two points a quarter width either side.
+        let across: Vec<P> = (-20..20).map(|k| [100.0 * w, mid + (0.5 * k as f64 + 0.25) * w]).collect();
+        sim.oxbows.push(Oxbow::lake(across, 0.0, 0.0));
+        sim.step();
+        assert_eq!(sim.oxbows.len(), 2, "the crossed oxbow splits in two");
+        assert_eq!(sim.oxbows[0].points.len() + sim.oxbows[1].points.len(), 40);
+    }
+
+    #[test]
+    fn channel_alongside_an_oxbow_leaves_it_whole() {
+        let mut sim = sine_sim(0.0, 40.0);
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        // Under the water on the channel side, but clear of the centreline.
+        let beside: Vec<P> = (0..20).map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 0.3 * w]).collect();
+        sim.oxbows.push(Oxbow::lake(beside.clone(), 0.0, 0.0));
+        sim.step();
+        assert_eq!(sim.oxbows.len(), 1);
+        assert_eq!(sim.oxbows[0].points, beside);
     }
 }

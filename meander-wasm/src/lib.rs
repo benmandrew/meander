@@ -144,7 +144,10 @@ impl River {
         self.oxbow_scar_ages.clear();
         self.oxbow_silts.clear();
         for o in &sim.oxbows {
-            self.oxbow_silts.extend(o.points.iter().map(|&p| sim.erodibility.silt_at(p) as f32));
+            // A point beside the channel whose cell it has swept takes the
+            // lake's mean, so the drawn lake does not dry out there.
+            let (field, mean) = (&sim.erodibility, sim.erodibility.lake_silt(&o.points));
+            self.oxbow_silts.extend(o.points.iter().map(|&p| field.lake_silt_at(p).unwrap_or(mean) as f32));
             self.oxbow_fills.push(o.fill as f32);
             self.oxbow_scar_ages.push(if o.is_lake() { 0.0 } else { (sim.time - o.filled_at) as f32 });
         }
