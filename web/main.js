@@ -293,8 +293,10 @@ class SvgRenderer {
     this.barLayer = el('g', round, ground);
     this.soilLayer = el('g', {}, ground);
     this.scarLayer = el('g', { ...round, stroke: MARSH }, svg);
-    this.lakeLayer = el('g', { 'stroke-linejoin': 'round', stroke: REEDS }, svg);
+    // The bank lies under the lakes, so a lake that meets the channel joins
+    // its water with no strip of bank between them.
     this.bank = el('path', { ...round, stroke: '#b8a678' }, svg);
+    this.lakeLayer = el('g', { 'stroke-linejoin': 'round', stroke: REEDS }, svg);
     this.water = el('path', { ...round, stroke: `rgb(${WATER})` }, svg);
     this.lakes = [];
     this.scars = [];
