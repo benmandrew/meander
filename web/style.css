@@ -27,12 +27,17 @@ html, body {
   color: var(--panel-fg);
 }
 
-#view {
+#ground, #view {
   position: fixed;
   inset: 0;
   width: 100%;
   height: 100%;
   display: block;
+}
+
+/* Its own compositing layer, so redrawing the channel does not repaint it. */
+#ground {
+  will-change: transform;
 }
 
 #overlay {

@@ -1,5 +1,7 @@
-// SVG view: soil patches as smooth filled outlines, past centrelines as
-// point-bar sand, oxbow lakes and their scars, and the channel.
+// SVG view in two stacked layers. The ground layer holds past centrelines
+// as point-bar sand under the soil patches, and changes only when a
+// centreline is kept, so the browser can cache it. The top layer holds the
+// oxbow lakes, their scars and the channel, redrawn every frame.
 
 import { startApp } from './ui.js';
 
@@ -23,6 +25,11 @@ const SOIL = {
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
+// Point bars are kept in this many age bands, each one path element.
+const BANDS = 24;
+// A centreline is kept once some part of it has moved this many widths from
+// the last kept one, so the swept area has no gaps.
+const BAR_STEP = 0.5;
 
 function el(name, attrs, parent) {
   const e = document.createElementNS(NS, name);
@@ -41,8 +48,12 @@ function pathData(pts, start, end) {
   return 'M' + parts[0] + 'L' + parts.slice(1).join(' ');
 }
 
+function mixRgb(a, b, t) {
+  return a.map((x, i) => x + (b[i] - x) * t);
+}
+
 function mix(a, b, t) {
-  return `rgb(${a.map((x, i) => Math.round(x + (b[i] - x) * t))})`;
+  return `rgb(${mixRgb(a, b, t).map(Math.round)})`;
 }
 
 function clamp01(t) {
@@ -126,6 +137,58 @@ function lakeData(pts, start, end, w, age, shrink) {
   return 'M' + left.join('L') + 'L' + right.reverse().join('L') + 'Z';
 }
 
+// Points of a flat x, y array with x in [x0, x1]: path data with one subpath
+// per run inside the range, and the points themselves.
+function cropped(line, x0, x1) {
+  const runs = [], kept = [];
+  let run = [];
+  for (let i = 0; i < line.length; i += 2) {
+    const x = line[i], y = line[i + 1];
+    if (x < x0 || x > x1) {
+      if (run.length > 1) runs.push(run);
+      run = [];
+      continue;
+    }
+    run.push(x.toFixed(1) + ' ' + y.toFixed(1));
+    kept.push(x, y);
+  }
+  if (run.length > 1) runs.push(run);
+  return { d: runs.map((r) => 'M' + r[0] + 'L' + r.slice(1).join(' ')).join(''), pts: kept };
+}
+
+// Points of a flat x, y array hashed into square cells of side `size`.
+class Grid {
+  constructor(pts, size) {
+    this.pts = pts;
+    this.size = size;
+    this.cells = new Map();
+    for (let i = 0; i < pts.length; i += 2) {
+      const k = this.key(Math.floor(pts[i] / size), Math.floor(pts[i + 1] / size));
+      const cell = this.cells.get(k);
+      if (cell) cell.push(i);
+      else this.cells.set(k, [i]);
+    }
+  }
+
+  key(cx, cy) {
+    return cx * 65536 + cy;
+  }
+
+  // Whether any point lies within `r` (at most `size`) of (x, y).
+  near(x, y, r) {
+    const cx = Math.floor(x / this.size), cy = Math.floor(y / this.size);
+    for (let i = -1; i <= 1; i++) {
+      for (let j = -1; j <= 1; j++) {
+        for (const k of this.cells.get(this.key(cx + i, cy + j)) ?? []) {
+          const dx = this.pts[k] - x, dy = this.pts[k + 1] - y;
+          if (dx * dx + dy * dy <= r * r) return true;
+        }
+      }
+    }
+    return false;
+  }
+}
+
 // Reuse `n` path elements from `list` under `parent`, adding or removing
 // elements as needed.
 function resize(list, n, parent) {
@@ -134,33 +197,40 @@ function resize(list, n, parent) {
 }
 
 class SvgRenderer {
-  constructor(svg) {
+  constructor(ground, svg) {
+    this.ground = ground;
     this.svg = svg;
-    svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    for (const s of [ground, svg]) s.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     const round = { fill: 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' };
-    this.background = el('rect', { y: 0, fill: `rgb(${SOIL.loam})` }, svg);
-    this.soilLayer = el('g', {}, svg);
-    this.historyLayer = el('g', round, svg);
+    this.background = el('rect', { y: 0, fill: `rgb(${SOIL.loam})` }, ground);
+    // Point bars: each age band is one opaque path, newest on top, so each
+    // spot shows the newest band over it and bands never build up. Old bands
+    // fade to the background colour, and the translucent soil patches lie
+    // over them.
+    this.barLayer = el('g', round, ground);
+    this.soilLayer = el('g', {}, ground);
     this.scarLayer = el('g', { ...round, stroke: MARSH }, svg);
     this.lakeLayer = el('g', { 'stroke-linejoin': 'round', stroke: REEDS }, svg);
     this.bank = el('path', { ...round, stroke: '#b8a678' }, svg);
     this.water = el('path', { ...round, stroke: `rgb(${WATER})` }, svg);
     this.lakes = [];
     this.scars = [];
-    this.history = [];
-    this.lastCapture = 0;
+    this.bands = [];
+    this.lastBar = null;
+    this.window = [0, 0];
   }
 
   // Show only the visible window; the hidden reaches fall outside it.
   reset(river, [w, h], seed) {
     const x = river.view_x();
-    this.svg.setAttribute('viewBox', `${x} 0 ${w} ${h}`);
+    for (const s of [this.ground, this.svg]) s.setAttribute('viewBox', `${x} 0 ${w} ${h}`);
     this.background.setAttribute('x', x);
     this.background.setAttribute('width', w);
     this.background.setAttribute('height', h);
-    this.historyLayer.replaceChildren();
-    this.history = [];
-    this.lastCapture = -Infinity;
+    this.barLayer.replaceChildren();
+    this.bands = [];
+    this.lastBar = null;
+    this.window = [x, w];
     this.drawSoils(river, x, w, h, seed);
   }
 
@@ -211,9 +281,10 @@ class SvgRenderer {
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
     const d = pathData(line, 0, line.length / 2);
 
-    this.historyLayer.style.display = local.showHistory ? '' : 'none';
-    this.historyLayer.setAttribute('stroke-width', w);
-    this.record(d, river.time(), local);
+    this.record(line, river.time(), w, local);
+    if (this.barLayer.style.display !== (local.showBars ? '' : 'none')) {
+      this.barLayer.style.display = local.showBars ? '' : 'none';
+    }
 
     // Oxbows: a lake that plugs from the ends and turns murky, fading only
     // over the last fifth of its life, then a marshy scar that fades out.
@@ -246,28 +317,57 @@ class SvgRenderer {
   capture(river, memory, { local }) {
     river.sync();
     const line = new Float32Array(memory.buffer, river.line_ptr(), river.line_len());
-    this.record(pathData(line, 0, line.length / 2), river.time(), local);
+    this.record(line, river.time(), river.get_param('width'), local);
   }
 
-  // Past centrelines, kept every `historyEvery` units of simulated time in a
-  // ring of `historyLength` paths. They read as point-bar sand, bare for the
-  // newest and grassed over and fainter for older ones.
-  record(d, t, local) {
-    if (t - this.lastCapture < local.historyEvery) return;
-    this.lastCapture = t;
-    this.history.push(el('path', { d }, this.historyLayer));
-    while (this.history.length > local.historyLength) this.history.shift().remove();
-    const k = this.history.length;
-    this.history.forEach((p, i) => {
-      const fresh = (i + 1) / k;
-      p.setAttribute('stroke', mix(OLD_BAR, BAR, fresh * fresh));
-      p.setAttribute('stroke-opacity', (0.04 + 0.4 * fresh ** 3).toFixed(2));
-    });
+  // Keep the visible part of the centreline as point-bar sand once it has
+  // moved `BAR_STEP` widths from the last kept one, into the newest band.
+  // A band spans `barMemory / BANDS` of simulated time, and is dropped once
+  // all its centrelines are older than `barMemory`.
+  record(line, t, w, local) {
+    const [x, vw] = this.window;
+    const [x0, x1] = [x - w, x + vw + w];
+    const last = this.lastBar;
+    // Kept points are half a width apart, so a point further than this from
+    // all of them is at least `BAR_STEP` widths from the line through them.
+    const r = w * Math.hypot(BAR_STEP, 0.25);
+    if (last && last.size === w) {
+      let moved = false;
+      for (let i = 0; i < line.length && !moved; i += 2) {
+        moved = line[i] >= x0 && line[i] <= x1 && !last.near(line[i], line[i + 1], r);
+      }
+      if (!moved) return;
+    }
+    const { d, pts } = cropped(line, x0, x1);
+    this.lastBar = new Grid(pts, w);
+    let band = this.bands.at(-1);
+    if (!band || t - band.t0 >= local.barMemory / BANDS) {
+      band = { t0: t, t1: t, d: '', path: el('path', {}, this.barLayer) };
+      this.bands.push(band);
+    }
+    band.t1 = t;
+    band.d += d;
+    band.path.setAttribute('d', band.d);
+    while (this.bands.length && t - this.bands[0].t1 > local.barMemory) this.bands.shift().path.remove();
+    this.shadeBars(t, w, local);
   }
 
-  // Serialise the current frame as a standalone SVG file.
+  // Shade each band by its age: bare sand when new, then grassed over and
+  // fading into the background as it nears `barMemory`. This runs only when
+  // a centreline is kept, so the ground layer stays cached in between.
+  shadeBars(t, w, local) {
+    this.barLayer.setAttribute('stroke-width', w);
+    for (const b of this.bands) {
+      const fresh = clamp01(1 - (t - 0.5 * (b.t0 + b.t1)) / local.barMemory);
+      const sand = mixRgb(OLD_BAR, BAR, fresh * fresh);
+      b.path.setAttribute('stroke', mix(SOIL.loam, sand, local.barOpacity * fresh));
+    }
+  }
+
+  // Serialise the current frame, both layers, as a standalone SVG file.
   save() {
     const copy = this.svg.cloneNode(true);
+    copy.prepend(...[...this.ground.childNodes].map((n) => n.cloneNode(true)));
     copy.setAttribute('xmlns', NS);
     copy.removeAttribute('id');
     const blob = new Blob([new XMLSerializer().serializeToString(copy)], { type: 'image/svg+xml' });
@@ -280,7 +380,7 @@ class SvgRenderer {
 }
 
 const svg = document.getElementById('view');
-const renderer = new SvgRenderer(svg);
+const renderer = new SvgRenderer(document.getElementById('ground'), svg);
 document.getElementById('save').addEventListener('click', () => renderer.save());
 
 startApp({
@@ -288,8 +388,8 @@ startApp({
   renderer,
   display: [
     { key: 'oxbowShrink', label: 'Oxbow narrowing', min: 0, max: 0.95, step: 0.05, local: 0.6 },
-    { key: 'historyEvery', label: 'Point bar interval (sim time)', min: 2, max: 200, step: 2, local: 20 },
-    { key: 'historyLength', label: 'Point bars kept (paths)', min: 1, max: 200, step: 1, local: 60 },
-    { key: 'showHistory', label: 'Show point bars (past centrelines)', toggle: true, local: true },
+    { key: 'barMemory', label: 'Point bar memory (sim time)', min: 50, max: 5000, step: 50, local: 600 },
+    { key: 'barOpacity', label: 'Point bar strength', min: 0.1, max: 1, step: 0.05, local: 0.75 },
+    { key: 'showBars', label: 'Show point bars (past centrelines)', toggle: true, local: true },
   ],
 });
