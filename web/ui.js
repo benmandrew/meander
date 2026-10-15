@@ -30,6 +30,10 @@ const SIM_CONTROLS = [
   { key: 'cutoff_dist', label: 'Cutoff distance (widths)', min: 0.3, max: 3, step: 0.05 },
   { key: 'cutoff_min_sep', label: 'Min separation K (points)', min: 6, max: 100, step: 1 },
   { key: 'oxbow_lifetime', label: 'Oxbow lifetime', min: 0, max: 2000, step: 10 },
+  { group: 'Floods' },
+  { key: 'flood_rate', label: 'Floods per unit time (0 off)', min: 0, max: 0.2, step: 0.005 },
+  { key: 'breach_dist', label: 'Widest neck breached (widths)', min: 1, max: 5, step: 0.1 },
+  { key: 'chute_ratio', label: 'Chute arc / chord (0 off)', min: 0, max: 10, step: 0.5 },
   { group: 'Noise' },
   { key: 'jitter', label: 'Jitter', min: 0, max: 0.3, step: 0.01 },
   { key: 'jitter_scale', label: 'Jitter length (widths)', min: 0.5, max: 10, step: 0.5 },
@@ -141,6 +145,7 @@ export async function startApp({ view, renderer, display }) {
     $('stats').textContent =
       `t ${river.time().toFixed(1)}   sinuosity ${river.sinuosity().toFixed(2)}\n` +
       `points ${river.point_count()}   cutoffs ${river.cutoffs()}   oxbows ${river.oxbow_count()}\n` +
+      `floods ${river.floods()}, which made ${river.flood_cutoffs()} cutoffs\n` +
       `${frameMs.toFixed(1)} ms/frame (sim)`;
     requestAnimationFrame(frame);
   }

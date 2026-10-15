@@ -10,7 +10,7 @@ The frontend is SVG only (`web/index.html`, `web/main.js` for drawing, `web/ui.j
 - [x] Validation tests: sine grows and drifts downstream; local-only kernel does not drift; noise run cuts off, never self-intersects, and sinuosity stays bounded.
 - [x] SVG view: stroked channel and oxbow paths (options 1 and 2), faded past centrelines tracing the meander belt, Save SVG.
 - [x] Heterogeneous erodibility (option 9): fBm noise field, and oxbow footprints become clay plugs.
-- [ ] Stochastic cutoffs (option 10).
+- [x] Stochastic cutoffs (option 10): floods arrive at `flood_rate` per unit time, each with a magnitude u in [0, 1). A flood breaches necks narrower than `cutoff_dist + u·(breach_dist − cutoff_dist)` and cuts chutes where the arc is at least `chute_ratio / u` times a chord of up to 5 widths that does not cross the channel. Up to four cuts per flood; the hard cutoff at `cutoff_dist` stays as a backstop. Over the second half of a 30,000-step run, mean sinuosity falls from about 1.8 to 1.6 at `flood_rate` 0.1 and `chute_ratio` 3 (seeds 3 and 11).
 - [ ] Ikeda–Parker–Sawai coefficients from physical inputs (option 11).
 
 Deviations from the plan, found while tuning:

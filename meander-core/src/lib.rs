@@ -61,6 +61,17 @@ pub struct Params {
     pub heterogeneity: f64,
     /// Erodibility multiplier inside filled oxbows (clay plugs); 1 disables.
     pub clay_factor: f64,
+    /// Expected floods per unit time. A flood can breach necks wider than
+    /// `cutoff_dist` and cut chutes across point bars. 0 disables floods.
+    pub flood_rate: f64,
+    /// Widest neck, in channel widths, that the largest flood can breach.
+    /// A flood of magnitude `u` in [0, 1) breaches necks narrower than
+    /// `cutoff_dist + u·(breach_dist − cutoff_dist)`.
+    pub breach_dist: f64,
+    /// A flood of magnitude `u` cuts a chute across a bend whose arc length
+    /// is at least `chute_ratio / u` times the chord, for chords up to
+    /// [`CHUTE_CHORD`] widths. 0 disables chute cutoffs.
+    pub chute_ratio: f64,
 }
 
 impl Default for Params {
@@ -84,6 +95,9 @@ impl Default for Params {
             edge_margin: 8.0,
             heterogeneity: 0.5,
             clay_factor: 0.35,
+            flood_rate: FLOOD_RATE,
+            breach_dist: BREACH_DIST,
+            chute_ratio: CHUTE_RATIO,
         }
     }
 }
@@ -109,6 +123,9 @@ impl Params {
         "edge_margin",
         "heterogeneity",
         "clay_factor",
+        "flood_rate",
+        "breach_dist",
+        "chute_ratio",
     ];
 
     fn field(&mut self, name: &str) -> Option<&mut f64> {
@@ -130,6 +147,9 @@ impl Params {
             "edge_margin" => &mut self.edge_margin,
             "heterogeneity" => &mut self.heterogeneity,
             "clay_factor" => &mut self.clay_factor,
+            "flood_rate" => &mut self.flood_rate,
+            "breach_dist" => &mut self.breach_dist,
+            "chute_ratio" => &mut self.chute_ratio,
             _ => return None,
         })
     }
@@ -173,6 +193,9 @@ pub struct Sim {
     pub time: f64,
     pub steps: u64,
     pub cutoffs: u64,
+    /// Floods so far, and the cutoffs they made (included in `cutoffs`).
+    pub floods: u64,
+    pub flood_cutoffs: u64,
     rng: Rng,
     /// Recent cut points and the step count until which they suppress new
     /// cutoffs nearby.
@@ -214,6 +237,35 @@ const NOISE_SCALE: f64 = 25.0;
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
 
+/// Default flood parameters; see [`Params`].
+const FLOOD_RATE: f64 = 0.02;
+const BREACH_DIST: f64 = 2.5;
+const CHUTE_RATIO: f64 = 4.0;
+
+/// Longest chute a flood can cut, in channel widths.
+pub const CHUTE_CHORD: f64 = 5.0;
+
+/// Most cutoffs a single flood can make.
+const MAX_FLOOD_CUTS: usize = 4;
+
+/// Grid cell of a point for a hashed grid of cell size `size`.
+fn grid_cell(p: P, size: f64) -> (i64, i64) {
+    ((p[0] / size).floor() as i64, (p[1] / size).floor() as i64)
+}
+
+/// Bucket of a grid cell in a hash table of `mask + 1` buckets.
+fn grid_bucket(cx: i64, cy: i64, mask: usize) -> usize {
+    ((cx.wrapping_mul(73_856_093) ^ cy.wrapping_mul(19_349_663)) as usize) & mask
+}
+
+/// Whether segments `ab` and `cd` cross at a point interior to both.
+fn segments_cross(a: P, b: P, c: P, d: P) -> bool {
+    fn orient(a: P, b: P, c: P) -> f64 {
+        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    }
+    orient(a, b, c) * orient(a, b, d) < 0.0 && orient(c, d, a) * orient(c, d, b) < 0.0
+}
+
 impl Sim {
     pub fn new(params: Params, bounds: P, seed: u64, noise: f64) -> Self {
         let mut sim = Self {
@@ -225,6 +277,8 @@ impl Sim {
             time: 0.0,
             steps: 0,
             cutoffs: 0,
+            floods: 0,
+            flood_cutoffs: 0,
             rng: Rng::new(seed),
             recent_cuts: Vec::new(),
             curv: Vec::new(),
@@ -271,6 +325,8 @@ impl Sim {
         self.time = 0.0;
         self.steps = 0;
         self.cutoffs = 0;
+        self.floods = 0;
+        self.flood_cutoffs = 0;
     }
 
     /// Target point spacing Δs, in world units.
@@ -299,6 +355,17 @@ impl Sim {
         self.clamp_to_domain();
         if self.cutoff() {
             self.centerline = resample(&self.centerline, ds);
+        }
+        // Floods arrive as a Poisson process, approximated per step.
+        if self.params.flood_rate > 0.0 && self.rng.uniform() < self.params.flood_rate * self.params.dt {
+            self.floods += 1;
+            let magnitude = self.rng.uniform();
+            for _ in 0..MAX_FLOOD_CUTS {
+                if !self.flood_cutoff(magnitude) {
+                    break;
+                }
+                self.centerline = resample(&self.centerline, ds);
+            }
         }
         self.time += self.params.dt;
         self.steps += 1;
@@ -411,31 +478,21 @@ impl Sim {
         }
     }
 
-    /// Find one neck cutoff and apply it. Returns whether a cut was made.
-    fn cutoff(&mut self) -> bool {
-        let d_cut = self.params.cutoff_dist * self.params.width;
-        let k_sep = self.params.cutoff_min_sep;
+    /// Fill the hashed grid with the centreline points, for cells of size
+    /// `size`. The table has about 2n buckets and is filled by counting
+    /// sort; collisions only add candidates, which callers reject by
+    /// distance. Returns the bucket mask.
+    fn build_grid(&mut self, size: f64) -> usize {
         let pts = &self.centerline;
         let n = pts.len();
-        if n < k_sep + 2 || d_cut <= 0.0 {
-            return false;
-        }
-
-        // Spatial hash: grid cells of size d_cut, hashed into a table of
-        // about 2n buckets and filled by counting sort. Collisions only add
-        // candidates, which the distance test rejects.
         let buckets = (2 * n).next_power_of_two();
         let mask = buckets - 1;
-        let cell = |p: P| -> (i64, i64) { ((p[0] / d_cut).floor() as i64, (p[1] / d_cut).floor() as i64) };
-        let bucket = |cx: i64, cy: i64| -> usize {
-            ((cx.wrapping_mul(73_856_093) ^ cy.wrapping_mul(19_349_663)) as usize) & mask
-        };
         self.grid_start.clear();
         self.grid_start.resize(buckets + 1, 0);
         self.cell_of.clear();
         for &p in pts {
-            let (cx, cy) = cell(p);
-            let b = bucket(cx, cy);
+            let (cx, cy) = grid_cell(p, size);
+            let b = grid_bucket(cx, cy, mask);
             self.cell_of.push(b as u32);
             self.grid_start[b + 1] += 1;
         }
@@ -451,41 +508,124 @@ impl Sim {
             self.grid_items[*slot as usize] = i as u32;
             *slot += 1;
         }
+        mask
+    }
 
-        let d_cut2 = d_cut * d_cut;
-        let cooldown_r = 0.5 * k_sep as f64 * self.ds();
-        let near_recent = |p: P| self.recent_cuts.iter().any(|&(c, _)| dist(c, p) < cooldown_r);
-
-        // Smallest upstream index first, then the smallest loop from it.
-        let mut found = None;
-        'outer: for i in 0..n {
-            let (cx, cy) = cell(pts[i]);
-            let mut best: Option<usize> = None;
-            for y in cy - 1..=cy + 1 {
-                for x in cx - 1..=cx + 1 {
-                    let b = bucket(x, y);
-                    let (s, e) = (self.grid_start[b] as usize, self.grid_start[b + 1] as usize);
-                    for &j in &self.grid_items[s..e] {
-                        let j = j as usize;
-                        if j > i + k_sep
-                            && best.is_none_or(|b| j < b)
-                            && geom::dist2(pts[i], pts[j]) < d_cut2
-                        {
-                            best = Some(j);
-                        }
-                    }
+    /// Call `f` with every point index in the 3 × 3 block of grid cells
+    /// around `p`, which covers all points within `size` of it.
+    fn for_neighbours(&self, p: P, size: f64, mask: usize, mut f: impl FnMut(usize)) {
+        let (cx, cy) = grid_cell(p, size);
+        for y in cy - 1..=cy + 1 {
+            for x in cx - 1..=cx + 1 {
+                let b = grid_bucket(x, y, mask);
+                let (s, e) = (self.grid_start[b] as usize, self.grid_start[b + 1] as usize);
+                for &j in &self.grid_items[s..e] {
+                    f(j as usize);
                 }
-            }
-            if let Some(j) = best {
-                if near_recent(pts[i]) || near_recent(pts[j]) {
-                    continue;
-                }
-                found = Some((i, j));
-                break 'outer;
             }
         }
+    }
 
-        let Some((i, j)) = found else { return false };
+    /// Whether a recent cut suppresses a cutoff at `p`.
+    fn near_recent(&self, p: P) -> bool {
+        let r = 0.5 * self.params.cutoff_min_sep as f64 * self.ds();
+        self.recent_cuts.iter().any(|&(c, _)| dist(c, p) < r)
+    }
+
+    /// Find one neck cutoff and apply it. Returns whether a cut was made.
+    fn cutoff(&mut self) -> bool {
+        let d_cut = self.params.cutoff_dist * self.params.width;
+        let k_sep = self.params.cutoff_min_sep;
+        let n = self.centerline.len();
+        if n < k_sep + 2 || d_cut <= 0.0 {
+            return false;
+        }
+        let mask = self.build_grid(d_cut);
+        let d_cut2 = d_cut * d_cut;
+        let pts = &self.centerline;
+
+        // Smallest upstream index first, then the smallest loop from it.
+        for i in 0..n {
+            let mut best: Option<usize> = None;
+            self.for_neighbours(pts[i], d_cut, mask, |j| {
+                if j > i + k_sep && best.is_none_or(|b| j < b) && geom::dist2(pts[i], pts[j]) < d_cut2 {
+                    best = Some(j);
+                }
+            });
+            if let Some(j) = best
+                && !self.near_recent(pts[i])
+                && !self.near_recent(pts[j])
+            {
+                self.apply_cut(i, j);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// One cut during a flood of magnitude `u` in [0, 1): a neck breach or a
+    /// chute across a point bar. Among the pairs that qualify, the one with
+    /// the largest ratio of arc length to chord is cut, provided the chord
+    /// does not cross the channel. Returns whether a cut was made.
+    fn flood_cutoff(&mut self, u: f64) -> bool {
+        let p = &self.params;
+        let w = p.width;
+        let neck = (p.cutoff_dist + u * (p.breach_dist - p.cutoff_dist).max(0.0)) * w;
+        let min_ratio = if p.chute_ratio > 0.0 && u > 0.0 { p.chute_ratio / u } else { f64::INFINITY };
+        let reach = if min_ratio.is_finite() { neck.max(CHUTE_CHORD * w) } else { neck };
+        let k_sep = p.cutoff_min_sep;
+        let n = self.centerline.len();
+        if n < k_sep + 2 || reach <= 0.0 {
+            return false;
+        }
+        let ds = geom::length(&self.centerline) / (n - 1) as f64;
+        let mask = self.build_grid(reach);
+        let (neck2, reach2) = (neck * neck, reach * reach);
+        let pts = &self.centerline;
+
+        // Best pair from each upstream point, as (ratio, i, j).
+        let mut found: Vec<(f64, usize, usize)> = Vec::new();
+        for i in 0..n {
+            let mut best: Option<(f64, usize)> = None;
+            self.for_neighbours(pts[i], reach, mask, |j| {
+                if j <= i + k_sep {
+                    return;
+                }
+                let d2 = geom::dist2(pts[i], pts[j]);
+                if d2 >= reach2 {
+                    return;
+                }
+                let ratio = (j - i) as f64 * ds / d2.sqrt().max(1e-9);
+                if (d2 < neck2 || ratio >= min_ratio) && best.is_none_or(|(r, _)| ratio > r) {
+                    best = Some((ratio, j));
+                }
+            });
+            if let Some((ratio, j)) = best {
+                found.push((ratio, i, j));
+            }
+        }
+        found.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+        for &(_, i, j) in &found {
+            let (a, b) = (pts[i], pts[j]);
+            if self.near_recent(a) || self.near_recent(b) {
+                continue;
+            }
+            let crosses = (0..n - 1)
+                .filter(|&k| k + 1 < i || k > j || (k > i && k + 1 < j))
+                .any(|k| segments_cross(a, b, pts[k], pts[k + 1]));
+            if !crosses {
+                self.apply_cut(i, j);
+                self.flood_cutoffs += 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Join point `i` to point `j` and abandon the reach between them as an
+    /// oxbow.
+    fn apply_cut(&mut self, i: usize, j: usize) {
         let loop_pts = self.centerline[i..=j].to_vec();
         let mid = geom::lerp(self.centerline[i], self.centerline[j], 0.5);
         self.centerline.drain(i + 1..j);
@@ -493,7 +633,6 @@ impl Sim {
         self.oxbows.push(Oxbow { points: loop_pts, born: self.time });
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));
         self.cutoffs += 1;
-        true
     }
 }
 
@@ -503,7 +642,8 @@ mod tests {
 
     /// Straight channel along x with a sine perturbation, cutoffs off.
     fn sine_sim(amp_w: f64, wavelength_w: f64) -> Sim {
-        let params = Params { cutoff_dist: 0.0, jitter: 0.0, heterogeneity: 0.0, ..Params::default() };
+        let params =
+            Params { cutoff_dist: 0.0, flood_rate: 0.0, jitter: 0.0, heterogeneity: 0.0, ..Params::default() };
         let w = params.width;
         let mut sim = Sim::new(params, [400.0 * w, 100.0 * w], 1, 0.0);
         let k = std::f64::consts::TAU / (wavelength_w * w);
@@ -580,5 +720,36 @@ mod tests {
         }
         assert!(sim.cutoffs >= 3, "only {} cutoffs", sim.cutoffs);
         assert!(max_sin < 6.0, "sinuosity reached {max_sin}");
+    }
+
+    /// Mean sinuosity over the second half of a long run.
+    fn late_sinuosity(params: Params, seed: u64) -> (f64, Sim) {
+        let mut sim = Sim::new(params, [1200.0, 480.0], seed, 0.5);
+        let mut sum = 0.0;
+        for k in 0..300 {
+            sim.step_n(100);
+            if k >= 150 {
+                sum += sim.sinuosity();
+            }
+            assert!(!geom::self_intersects(&sim.centerline), "self-intersection at step {}", sim.steps);
+        }
+        (sum / 150.0, sim)
+    }
+
+    #[test]
+    fn floods_cut_off_earlier_and_never_self_intersect() {
+        let calm = Params { flood_rate: 0.0, ..Params::default() };
+        let stormy = Params { flood_rate: 0.1, chute_ratio: 3.0, ..Params::default() };
+        for seed in [3, 11] {
+            let (s_calm, calm_sim) = late_sinuosity(calm.clone(), seed);
+            let (s_storm, sim) = late_sinuosity(stormy.clone(), seed);
+            eprintln!(
+                "seed {seed}: sinuosity {s_calm:.2} calm, {s_storm:.2} with {} floods and {} flood cutoffs of {}",
+                sim.floods, sim.flood_cutoffs, sim.cutoffs
+            );
+            assert_eq!(calm_sim.flood_cutoffs, 0);
+            assert!(sim.flood_cutoffs >= 3, "only {} flood cutoffs", sim.flood_cutoffs);
+            assert!(s_storm < s_calm, "floods should keep the river straighter");
+        }
     }
 }

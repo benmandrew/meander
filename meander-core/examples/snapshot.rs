@@ -75,13 +75,15 @@ fn main() {
             sim.step_n(every);
         }
         println!(
-            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  tight {:4.2}  cutoffs {:4}  oxbows {:3}",
+            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  tight {:4.2}  cutoffs {:4} ({:4} in {:4} floods)  oxbows {:3}",
             sim.steps,
             sim.time,
             sim.centerline.len(),
             sim.sinuosity(),
             tight_fraction(&sim),
             sim.cutoffs,
+            sim.flood_cutoffs,
+            sim.floods,
             sim.oxbows.len()
         );
         std::fs::write(format!("{out}/step{:06}.svg", sim.steps), svg(&sim, up, view_w)).unwrap();

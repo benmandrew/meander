@@ -126,6 +126,13 @@ impl River {
     pub fn cutoffs(&self) -> u32 {
         self.sim.cutoffs as u32
     }
+    pub fn floods(&self) -> u32 {
+        self.sim.floods as u32
+    }
+    /// Cutoffs made by floods, included in `cutoffs`.
+    pub fn flood_cutoffs(&self) -> u32 {
+        self.sim.flood_cutoffs as u32
+    }
     pub fn point_count(&self) -> usize {
         self.sim.centerline.len()
     }
