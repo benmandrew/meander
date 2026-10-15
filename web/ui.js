@@ -3,65 +3,76 @@
 
 import init, { River } from './pkg/meander_wasm.js';
 
-// World height is fixed; world width follows the view's aspect ratio at
-// each reset.
-const WORLD_H = 700;
+// The visible window's height is fixed in world units; its width follows
+// the view's aspect ratio at each reset.
+const WORLD_H = 480;
 
 // Sliders with `local` set are page settings; the rest are simulation
 // parameters, read from and written to the WASM side by name.
 const SIM_CONTROLS = [
+  { group: 'Time' },
+  { key: 'speed', label: 'Speed (sim time per second)', min: 0.5, max: 60, step: 0.5, local: 6 },
+  { key: 'warmup', label: 'Warm-up on reset (sim time)', min: 0, max: 3000, step: 100, local: 1000 },
   { group: 'Dynamics' },
   { key: 'erodibility', label: 'Erodibility E', min: 0, max: 3, step: 0.05 },
   { key: 'omega', label: 'Local weight Ω', min: -3, max: 1, step: 0.05 },
   { key: 'gamma', label: 'Upstream weight Γ', min: 0, max: 5, step: 0.05 },
   { key: 'alpha', label: 'Upstream decay α (per width)', min: 0.05, max: 2, step: 0.01 },
+  { key: 'peak_radius', label: 'Fastest bend radius (widths, 0 off)', min: 0, max: 6, step: 0.1 },
   { key: 'dt', label: 'Timestep dt', min: 0.01, max: 0.3, step: 0.01 },
-  { key: 'stepsPerFrame', label: 'Steps per frame', min: 1, max: 100, step: 1, local: 20 },
   { key: 'smoothing', label: 'Smoothing k', min: 0, max: 0.25, step: 0.01 },
   { key: 'max_step', label: 'Step limit (× spacing)', min: 0.05, max: 0.3, step: 0.01 },
   { group: 'Channel' },
   { key: 'width', label: 'Channel width w', min: 2, max: 20, step: 0.5 },
+  { key: 'valley_width', label: 'Valley width (widths, 0 off)', min: 0, max: 60, step: 1 },
   { key: 'edge_margin', label: 'Edge margin (widths)', min: 0, max: 30, step: 1 },
   { group: 'Cutoffs' },
   { key: 'cutoff_dist', label: 'Cutoff distance (widths)', min: 0.3, max: 3, step: 0.05 },
   { key: 'cutoff_min_sep', label: 'Min separation K (points)', min: 6, max: 100, step: 1 },
   { key: 'oxbow_lifetime', label: 'Oxbow lifetime', min: 0, max: 2000, step: 10 },
   { group: 'Noise' },
-  { key: 'jitter', label: 'Jitter per step', min: 0, max: 0.5, step: 0.01 },
+  { key: 'jitter', label: 'Jitter', min: 0, max: 0.3, step: 0.01 },
+  { key: 'jitter_scale', label: 'Jitter length (widths)', min: 0.5, max: 10, step: 0.5 },
   { key: 'noise', label: 'Initial noise (widths, on reset)', min: 0, max: 2, step: 0.05, local: 0.5 },
   { group: 'Erodibility' },
   { key: 'heterogeneity', label: 'Heterogeneity', min: 0, max: 1, step: 0.05 },
   { key: 'clay_factor', label: 'Oxbow clay plugs (× E)', min: 0.05, max: 1, step: 0.05 },
 ];
 
-// `renderer` provides resize() and draw(river, memory, state), and may
-// provide reset(bounds). `display` lists extra page-specific controls.
+// `renderer` provides draw(river, memory, state), reset(river, bounds), and
+// capture(river, memory, state), which is called during warm-up in place of
+// drawing. `display` lists extra page-specific controls.
 export async function startApp({ view, renderer, display }) {
   const wasm = await init();
   const controls = [...SIM_CONTROLS, { group: 'Display' }, ...display];
   const local = {};
-  const state = { bounds: [1, 1], local, clock: 0, steps: 0 };
-  let river;
+  const state = { bounds: [1, 1], local, clock: 0 };
+  const river = new River();
   let running = true;
   let frameMs = 0;
+  // Simulated time owed to the loop but not yet stepped.
+  let owed = 0;
+  // Warm-up time still to run, spread over frames so the page stays live.
+  let warming = 0;
+  let lastFrame;
   const $ = (id) => document.getElementById(id);
 
   function reset() {
     const r = view.getBoundingClientRect();
     state.bounds = [WORLD_H * r.width / r.height, WORLD_H];
     const seed = Number($('seed').value) >>> 0;
-    if (river) river.reset(...state.bounds, seed, local.noise);
-    else river = new River(...state.bounds, seed, local.noise);
     for (const s of controls) {
       if (s.key && !s.toggle && s.local === undefined) river.set_param(s.key, Number(s.input.value));
     }
-    state.steps = 0;
-    renderer.reset?.(state.bounds);
+    river.reset(...state.bounds, seed, local.noise, 0);
+    owed = 0;
+    warming = local.warmup;
+    renderer.reset(river, state.bounds);
   }
 
   function buildControls() {
     const root = $('sliders');
-    const defaults = new River(100, 100, 0, 0);
+    const defaults = new River();
     for (const s of controls) {
       if (s.group) {
         const h = document.createElement('h2');
@@ -91,7 +102,7 @@ export async function startApp({ view, renderer, display }) {
         const v = Number(s.input.value);
         out.textContent = String(+v.toFixed(3));
         if (s.local !== undefined) local[s.key] = v;
-        else river?.set_param(s.key, v);
+        else river.set_param(s.key, v);
       };
       s.input.addEventListener('input', apply);
       apply();
@@ -100,15 +111,30 @@ export async function startApp({ view, renderer, display }) {
     defaults.free();
   }
 
-  function step(n) {
-    river.step(n);
-    state.steps += n;
-  }
-
   function frame(now) {
+    // Real seconds since the last frame, capped so a background tab does
+    // not return to a huge backlog.
+    const elapsed = Math.min(0.1, (now - (lastFrame ?? now)) / 1000);
+    lastFrame = now;
+    if (warming > 0) {
+      const t0 = performance.now();
+      while (warming > 0 && performance.now() - t0 < 12) {
+        const chunk = Math.min(warming, 5);
+        river.advance(chunk);
+        warming -= chunk;
+        renderer.capture(river, wasm.memory, state);
+      }
+      $('overlay').hidden = warming <= 0;
+      $('overlay').textContent = `Developing river… ${Math.round(100 * (1 - warming / local.warmup))}%`;
+      requestAnimationFrame(frame);
+      return;
+    }
     if (running) {
       const t0 = performance.now();
-      step(local.stepsPerFrame);
+      const dt = river.get_param('dt');
+      owed += local.speed * elapsed;
+      const n = Math.floor(owed / dt);
+      if (n > 0) owed -= dt * river.advance(n * dt);
       frameMs = 0.9 * frameMs + 0.1 * (performance.now() - t0);
     }
     state.clock = now / 1000;
@@ -126,7 +152,7 @@ export async function startApp({ view, renderer, display }) {
   }
 
   $('play').addEventListener('click', togglePlay);
-  $('step').addEventListener('click', () => step(local.stepsPerFrame));
+  $('step').addEventListener('click', () => river.advance(local.speed));
   $('reset').addEventListener('click', reset);
   $('reseed').addEventListener('click', () => {
     $('seed').value = Math.floor(Math.random() * 1e6);
@@ -145,14 +171,13 @@ export async function startApp({ view, renderer, display }) {
     if (e.target instanceof HTMLInputElement && e.target.type !== 'range') return;
     if (e.key === ' ') { e.preventDefault(); togglePlay(); }
     else if (e.key === 'r') reset();
-    else if (e.key === 's') step(local.stepsPerFrame);
+    else if (e.key === 's') river.advance(local.speed);
   });
-  window.addEventListener('resize', () => renderer.resize());
 
-  renderer.resize();
   buildControls();
+  // ?warmup=T overrides the warm-up slider for the first reset.
+  const warmup = new URLSearchParams(location.search).get('warmup');
+  if (warmup !== null) local.warmup = Number(warmup);
   reset();
-  // ?warmup=N runs N steps before the first frame, to open on a mature river.
-  step(Number(new URLSearchParams(location.search).get('warmup')) || 0);
   requestAnimationFrame(frame);
 }

@@ -7,12 +7,10 @@
 
 pub mod field;
 pub mod geom;
-pub mod mesh;
 pub mod rng;
 
 use geom::{P, curvature, dist, resample, right_normal};
 use field::Erodibility;
-use mesh::AgeMap;
 use rng::Rng;
 
 /// Point spacing as a fraction of the channel width.
@@ -32,6 +30,9 @@ pub struct Params {
     pub gamma: f64,
     /// Upstream decay rate `α`, per channel width.
     pub alpha: f64,
+    /// Bend radius, in channel widths, at which migration is fastest; tighter
+    /// bends migrate more slowly. 0 disables the saturation.
+    pub peak_radius: f64,
     pub dt: f64,
     /// Laplacian smoothing strength per step.
     pub smoothing: f64,
@@ -47,6 +48,11 @@ pub struct Params {
     /// square root of time. Bends drift downstream and leave the domain, so
     /// without this the river eventually straightens.
     pub jitter: f64,
+    /// Correlation length of the jitter along the river, in channel widths.
+    pub jitter_scale: f64,
+    /// Width of the valley the river may migrate within, centred on the
+    /// domain, in channel widths. 0 allows the whole domain.
+    pub valley_width: f64,
     /// Width of the band along each domain edge over which erodibility
     /// tapers to zero, in channel widths.
     pub edge_margin: f64,
@@ -65,13 +71,16 @@ impl Default for Params {
             omega: -1.0,
             gamma: 2.5,
             alpha: 0.6,
+            peak_radius: 2.5,
             dt: 0.1,
             smoothing: 0.1,
             cutoff_dist: 1.0,
             cutoff_min_sep: 20,
             max_step: 0.15,
             oxbow_lifetime: 400.0,
-            jitter: 0.15,
+            jitter: 0.05,
+            jitter_scale: 3.0,
+            valley_width: 45.0,
             edge_margin: 8.0,
             heterogeneity: 0.5,
             clay_factor: 0.35,
@@ -87,6 +96,7 @@ impl Params {
         "omega",
         "gamma",
         "alpha",
+        "peak_radius",
         "dt",
         "smoothing",
         "cutoff_dist",
@@ -94,6 +104,8 @@ impl Params {
         "max_step",
         "oxbow_lifetime",
         "jitter",
+        "jitter_scale",
+        "valley_width",
         "edge_margin",
         "heterogeneity",
         "clay_factor",
@@ -106,12 +118,15 @@ impl Params {
             "omega" => &mut self.omega,
             "gamma" => &mut self.gamma,
             "alpha" => &mut self.alpha,
+            "peak_radius" => &mut self.peak_radius,
             "dt" => &mut self.dt,
             "smoothing" => &mut self.smoothing,
             "cutoff_dist" => &mut self.cutoff_dist,
             "max_step" => &mut self.max_step,
             "oxbow_lifetime" => &mut self.oxbow_lifetime,
             "jitter" => &mut self.jitter,
+            "jitter_scale" => &mut self.jitter_scale,
+            "valley_width" => &mut self.valley_width,
             "edge_margin" => &mut self.edge_margin,
             "heterogeneity" => &mut self.heterogeneity,
             "clay_factor" => &mut self.clay_factor,
@@ -154,8 +169,6 @@ pub struct Sim {
     pub bounds: P,
     pub centerline: Vec<P>,
     pub oxbows: Vec<Oxbow>,
-    /// When each floodplain cell was last under the channel.
-    pub age_map: AgeMap,
     pub erodibility: Erodibility,
     pub time: f64,
     pub steps: u64,
@@ -171,12 +184,14 @@ pub struct Sim {
     tmp: Vec<P>,
     grid_start: Vec<u32>,
     grid_items: Vec<u32>,
+    grid_fill: Vec<u32>,
     cell_of: Vec<u32>,
 }
 
 /// Erodibility multiplier that falls smoothly from 1 to 0 within `margin` of
-/// the domain edges.
-fn edge_taper(p: P, bounds: P, margin: f64) -> f64 {
+/// the domain edges, and within `margin` of the valley walls when
+/// `valley` (the valley width) is non-zero.
+fn edge_taper(p: P, bounds: P, margin: f64, valley: f64) -> f64 {
     if margin <= 0.0 {
         return 1.0;
     }
@@ -184,14 +199,17 @@ fn edge_taper(p: P, bounds: P, margin: f64) -> f64 {
         let t = (d / margin).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     };
-    ramp(p[0]) * ramp(bounds[0] - p[0]) * ramp(p[1]) * ramp(bounds[1] - p[1])
+    let (mut y0, mut y1) = (0.0, bounds[1]);
+    if valley > 0.0 {
+        let mid = 0.5 * bounds[1];
+        y0 = (mid - 0.5 * valley).max(0.0);
+        y1 = (mid + 0.5 * valley).min(bounds[1]);
+    }
+    ramp(p[0]) * ramp(bounds[0] - p[0]) * ramp(p[1] - y0) * ramp(y1 - p[1])
 }
 
 /// Feature size of the erodibility noise, in channel widths at reset.
 const NOISE_SCALE: f64 = 25.0;
-
-/// Age map cell size, in channel widths at reset.
-const AGE_CELL: f64 = 0.25;
 
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
@@ -203,7 +221,6 @@ impl Sim {
             bounds,
             centerline: Vec::new(),
             oxbows: Vec::new(),
-            age_map: AgeMap::new(bounds, 1.0),
             erodibility: Erodibility::new([1.0, 1.0], 1.0, 1.0, 0),
             time: 0.0,
             steps: 0,
@@ -216,6 +233,7 @@ impl Sim {
             tmp: Vec::new(),
             grid_start: Vec::new(),
             grid_items: Vec::new(),
+            grid_fill: Vec::new(),
             cell_of: Vec::new(),
         };
         sim.reset(seed, noise);
@@ -247,9 +265,7 @@ impl Sim {
         }
         self.centerline = pts;
         let w = self.params.width;
-        self.age_map = AgeMap::new(self.bounds, AGE_CELL * w);
         self.erodibility = Erodibility::new(self.bounds, w, NOISE_SCALE * w, seed);
-        self.age_map.stamp(&self.centerline, 0.5 * self.params.width, 0.0);
         self.oxbows.clear();
         self.recent_cuts.clear();
         self.time = 0.0;
@@ -286,7 +302,6 @@ impl Sim {
         }
         self.time += self.params.dt;
         self.steps += 1;
-        self.age_map.stamp(&self.centerline, 0.5 * self.params.width, self.time);
         let (time, life) = (self.time, self.params.oxbow_lifetime);
         self.oxbows.retain(|o| time - o.born < life);
         let steps = self.steps;
@@ -300,8 +315,13 @@ impl Sim {
         let pts = &self.centerline;
         let n = pts.len();
         curvature(pts, &mut self.curv);
+        // Hickin–Nanson saturation: migration grows with w/r for gentle
+        // bends, peaks at r = peak_radius·w, and falls for tighter bends.
+        // c / (1 + (c/c0)²) peaks at c0 = 1/peak_radius.
+        let c0 = if p.peak_radius > 0.0 { 1.0 / p.peak_radius } else { f64::INFINITY };
         for c in &mut self.curv {
-            *c *= p.width;
+            let cw = *c * p.width;
+            *c = cw / (1.0 + (cw / c0).powi(2));
         }
         // Actual spacing after resampling, in channel widths.
         let ds_w = if n > 1 {
@@ -332,17 +352,23 @@ impl Sim {
         let scale = p.dt * p.erodibility * p.width;
         let limit = p.max_step * SPACING * p.width;
 
-        // Spatially smoothed noise, so the perturbation reaches meander
-        // scales and is not only removed again by the Laplacian smoothing.
+        // Noise smoothed along the river by a forward and a backward
+        // exponential filter, with correlation length `jitter_scale`, then
+        // rescaled to the target RMS. Short-correlated noise only adds kinks.
         let amp = p.jitter * p.width * p.dt.sqrt();
         self.noise.clear();
-        self.noise.extend((0..n).map(|_| self.rng.normal() * amp));
-        for _ in 0..4 {
-            let mut prev = self.noise[0];
-            for i in 1..n.saturating_sub(1) {
-                let cur = self.noise[i];
-                self.noise[i] = 0.25 * prev + 0.5 * cur + 0.25 * self.noise[i + 1];
-                prev = cur;
+        self.noise.extend((0..n).map(|_| self.rng.approx_normal()));
+        let a = (-SPACING / p.jitter_scale.max(SPACING)).exp();
+        for i in 1..n {
+            self.noise[i] = a * self.noise[i - 1] + (1.0 - a) * self.noise[i];
+        }
+        for i in (0..n.saturating_sub(1)).rev() {
+            self.noise[i] = a * self.noise[i + 1] + (1.0 - a) * self.noise[i];
+        }
+        let rms = (self.noise.iter().map(|x| x * x).sum::<f64>() / n.max(1) as f64).sqrt();
+        if rms > 0.0 {
+            for x in &mut self.noise {
+                *x *= amp / rms;
             }
         }
 
@@ -350,7 +376,7 @@ impl Sim {
         self.tmp.extend_from_slice(pts);
         for i in 1..n.saturating_sub(1) {
             let nrm = right_normal(pts, i);
-            let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width)
+            let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width, p.valley_width * p.width)
                 * self.erodibility.at(pts[i], p.heterogeneity, p.clay_factor);
             // Positive rate moves toward the outside of a left bend, i.e. to
             // the right, so bends grow.
@@ -395,35 +421,38 @@ impl Sim {
             return false;
         }
 
-        // Uniform grid over the domain with cell size d_cut, filled by
-        // counting sort.
-        let cols = (self.bounds[0] / d_cut).ceil().max(1.0) as usize;
-        let rows = (self.bounds[1] / d_cut).ceil().max(1.0) as usize;
-        let cell = |p: P| -> (usize, usize) {
-            let cx = ((p[0] / d_cut) as usize).min(cols - 1);
-            let cy = ((p[1] / d_cut) as usize).min(rows - 1);
-            (cx, cy)
+        // Spatial hash: grid cells of size d_cut, hashed into a table of
+        // about 2n buckets and filled by counting sort. Collisions only add
+        // candidates, which the distance test rejects.
+        let buckets = (2 * n).next_power_of_two();
+        let mask = buckets - 1;
+        let cell = |p: P| -> (i64, i64) { ((p[0] / d_cut).floor() as i64, (p[1] / d_cut).floor() as i64) };
+        let bucket = |cx: i64, cy: i64| -> usize {
+            ((cx.wrapping_mul(73_856_093) ^ cy.wrapping_mul(19_349_663)) as usize) & mask
         };
         self.grid_start.clear();
-        self.grid_start.resize(cols * rows + 1, 0);
+        self.grid_start.resize(buckets + 1, 0);
         self.cell_of.clear();
         for &p in pts {
             let (cx, cy) = cell(p);
-            let c = cy * cols + cx;
-            self.cell_of.push(c as u32);
-            self.grid_start[c + 1] += 1;
+            let b = bucket(cx, cy);
+            self.cell_of.push(b as u32);
+            self.grid_start[b + 1] += 1;
         }
-        for c in 0..cols * rows {
-            self.grid_start[c + 1] += self.grid_start[c];
+        for b in 0..buckets {
+            self.grid_start[b + 1] += self.grid_start[b];
         }
         self.grid_items.clear();
         self.grid_items.resize(n, 0);
-        let mut fill = self.grid_start.clone();
-        for (i, &c) in self.cell_of.iter().enumerate() {
-            self.grid_items[fill[c as usize] as usize] = i as u32;
-            fill[c as usize] += 1;
+        self.grid_fill.clear();
+        self.grid_fill.extend_from_slice(&self.grid_start[..buckets]);
+        for (i, &b) in self.cell_of.iter().enumerate() {
+            let slot = &mut self.grid_fill[b as usize];
+            self.grid_items[*slot as usize] = i as u32;
+            *slot += 1;
         }
 
+        let d_cut2 = d_cut * d_cut;
         let cooldown_r = 0.5 * k_sep as f64 * self.ds();
         let near_recent = |p: P| self.recent_cuts.iter().any(|&(c, _)| dist(c, p) < cooldown_r);
 
@@ -432,15 +461,15 @@ impl Sim {
         'outer: for i in 0..n {
             let (cx, cy) = cell(pts[i]);
             let mut best: Option<usize> = None;
-            for y in cy.saturating_sub(1)..=(cy + 1).min(rows - 1) {
-                for x in cx.saturating_sub(1)..=(cx + 1).min(cols - 1) {
-                    let c = y * cols + x;
-                    let (s, e) = (self.grid_start[c] as usize, self.grid_start[c + 1] as usize);
+            for y in cy - 1..=cy + 1 {
+                for x in cx - 1..=cx + 1 {
+                    let b = bucket(x, y);
+                    let (s, e) = (self.grid_start[b] as usize, self.grid_start[b + 1] as usize);
                     for &j in &self.grid_items[s..e] {
                         let j = j as usize;
                         if j > i + k_sep
                             && best.is_none_or(|b| j < b)
-                            && dist(pts[i], pts[j]) < d_cut
+                            && geom::dist2(pts[i], pts[j]) < d_cut2
                         {
                             best = Some(j);
                         }

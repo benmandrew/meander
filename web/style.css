@@ -35,6 +35,18 @@ html, body {
   display: block;
 }
 
+#overlay {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: #cfc6a4;
+  color: #5c5640;
+  font-size: 15px;
+}
+
+#overlay[hidden] { display: none; }
+
 #panel {
   position: fixed;
   top: 12px;
@@ -95,14 +107,6 @@ button:hover { border-color: var(--accent); }
   background: var(--panel-bg);
   border: 1px solid var(--border);
 }
-
-.views {
-  margin-top: 6px;
-  color: var(--muted);
-}
-
-.views a { color: var(--accent); }
-.views a[aria-current] { color: inherit; font-weight: 600; }
 
 .buttons, .seed {
   display: flex;

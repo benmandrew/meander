@@ -1,66 +1,66 @@
 //! wasm-bindgen wrapper around `meander-core`.
 //!
+//! The simulated river is longer than the visible window: hidden reaches
+//! upstream and downstream let meanders develop before they come into view
+//! and keep the pinned outlet out of sight.
+//!
 //! Geometry is exposed as pointers into WASM memory so JS can read it
 //! without copying. Call `sync` after stepping, then rebuild every typed
 //! array view: memory growth detaches old views.
 
-use meander_core::mesh::{VERTEX_FLOATS, channel_strip};
 use meander_core::{Params, Sim};
 use wasm_bindgen::prelude::*;
+
+/// Hidden reach lengths, in channel widths.
+const UPSTREAM: f64 = 60.0;
+const DOWNSTREAM: f64 = 20.0;
 
 #[wasm_bindgen]
 pub struct River {
     sim: Sim,
-    /// Channel triangle strip; see `mesh::VERTEX_FLOATS` for the layout.
-    channel: Vec<f32>,
-    /// All oxbow strips, back to back.
-    oxbows: Vec<f32>,
-    /// Start of each oxbow strip in `oxbows`, in vertices, plus a final end
-    /// marker.
-    oxbow_offsets: Vec<u32>,
-    /// Age of each oxbow as a fraction of its lifetime.
-    oxbow_ages: Vec<f32>,
-    /// Floodplain age per cell, scaled to 0..=254 over the age span; 255
-    /// means never occupied.
-    ages: Vec<u8>,
-    /// Erodibility multiplier per cell, scaled so 255 is double the base.
-    erod: Vec<u8>,
-    curv: Vec<f64>,
+    /// Left edge of the visible window in world units.
+    view_x: f64,
     /// Centreline as flat x, y pairs.
     line: Vec<f32>,
     /// All oxbow polylines, back to back, as flat x, y pairs.
     oxbow_line: Vec<f32>,
     /// Start of each oxbow in `oxbow_line`, in points, plus an end marker.
-    oxbow_line_offsets: Vec<u32>,
+    oxbow_offsets: Vec<u32>,
+    /// Age of each oxbow as a fraction of its lifetime.
+    oxbow_ages: Vec<f32>,
 }
 
 #[wasm_bindgen]
 impl River {
+    /// Parameters take their defaults; call `reset` after setting them.
     #[wasm_bindgen(constructor)]
-    pub fn new(width: f64, height: f64, seed: u32, noise: f64) -> River {
+    pub fn new() -> River {
         River {
-            sim: Sim::new(Params::default(), [width, height], seed as u64, noise),
-            channel: Vec::new(),
-            oxbows: Vec::new(),
-            oxbow_offsets: Vec::new(),
-            oxbow_ages: Vec::new(),
-            ages: Vec::new(),
-            erod: Vec::new(),
-            curv: Vec::new(),
+            sim: Sim::new(Params::default(), [1.0, 1.0], 0, 0.0),
+            view_x: 0.0,
             line: Vec::new(),
             oxbow_line: Vec::new(),
-            oxbow_line_offsets: Vec::new(),
+            oxbow_offsets: Vec::new(),
+            oxbow_ages: Vec::new(),
         }
     }
 
-    /// Restart from a noisy straight line, optionally in a new domain.
-    pub fn reset(&mut self, width: f64, height: f64, seed: u32, noise: f64) {
-        self.sim.bounds = [width, height];
+    /// Restart from a noisy straight line, for a visible window of the given
+    /// size, and run `warmup` time units so the river opens developed.
+    pub fn reset(&mut self, view_w: f64, view_h: f64, seed: u32, noise: f64, warmup: f64) {
+        let w = self.sim.params.width;
+        self.view_x = UPSTREAM * w;
+        self.sim.bounds = [(UPSTREAM + DOWNSTREAM) * w + view_w, view_h];
         self.sim.reset(seed as u64, noise);
+        self.advance(warmup);
     }
 
-    pub fn step(&mut self, n: u32) {
+    /// Run whole steps covering `time` units of simulated time; returns the
+    /// number of steps taken.
+    pub fn advance(&mut self, time: f64) -> u32 {
+        let n = (time / self.sim.params.dt).round().max(0.0) as u32;
         self.sim.step_n(n as usize);
+        n
     }
 
     /// Returns false for an unknown parameter name.
@@ -73,61 +73,22 @@ impl River {
         self.sim.params.get(name).unwrap_or(f64::NAN)
     }
 
-    /// Rebuild the meshes and the age texture. Oxbows narrow to
-    /// `1 - oxbow_shrink` of the channel width over their lifetime; the age
-    /// texture saturates at `age_span` time units.
-    pub fn sync(&mut self, oxbow_shrink: f64, age_span: f64) {
-        let sim = &self.sim;
-        let w = sim.params.width;
-        self.channel.clear();
-        channel_strip(&sim.centerline, w, &mut self.curv, &mut self.channel);
-
-        self.oxbows.clear();
-        self.oxbow_offsets.clear();
-        self.oxbow_ages.clear();
-        let life = sim.params.oxbow_lifetime.max(f64::MIN_POSITIVE);
-        for o in &sim.oxbows {
-            let age = ((sim.time - o.born) / life).clamp(0.0, 1.0);
-            self.oxbow_offsets.push((self.oxbows.len() / VERTEX_FLOATS) as u32);
-            channel_strip(&o.points, w * (1.0 - oxbow_shrink * age), &mut self.curv, &mut self.oxbows);
-            self.oxbow_ages.push(age as f32);
-        }
-        self.oxbow_offsets.push((self.oxbows.len() / VERTEX_FLOATS) as u32);
-
-        let now = sim.time as f32;
-        let scale = 254.0 / age_span.max(f64::MIN_POSITIVE) as f32;
-        self.ages.clear();
-        self.ages.extend(sim.age_map.last.iter().map(|&t| {
-            if t == f32::NEG_INFINITY { 255 } else { ((now - t) * scale).min(254.0) as u8 }
-        }));
-
-        let e = &sim.erodibility;
-        let (hetero, clay) = (sim.params.heterogeneity, sim.params.clay_factor);
-        self.erod.clear();
-        for y in 0..e.rows {
-            for x in 0..e.cols {
-                let p = [(x as f64 + 0.5) * e.cell, (y as f64 + 0.5) * e.cell];
-                self.erod.push((e.at(p, hetero, clay) * 127.5).min(255.0) as u8);
-            }
-        }
-    }
-
     /// Copy the centreline and oxbow polylines into flat buffers, and the
     /// oxbow ages as fractions of their lifetime.
-    pub fn sync_lines(&mut self) {
+    pub fn sync(&mut self) {
         let sim = &self.sim;
         self.line.clear();
         self.line.extend(sim.centerline.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
         self.oxbow_line.clear();
-        self.oxbow_line_offsets.clear();
+        self.oxbow_offsets.clear();
         self.oxbow_ages.clear();
         let life = sim.params.oxbow_lifetime.max(f64::MIN_POSITIVE);
         for o in &sim.oxbows {
-            self.oxbow_line_offsets.push((self.oxbow_line.len() / 2) as u32);
+            self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
             self.oxbow_line.extend(o.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
             self.oxbow_ages.push(((sim.time - o.born) / life).clamp(0.0, 1.0) as f32);
         }
-        self.oxbow_line_offsets.push((self.oxbow_line.len() / 2) as u32);
+        self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
     }
 
     pub fn line_ptr(&self) -> *const f32 {
@@ -143,51 +104,19 @@ impl River {
     pub fn oxbow_line_len(&self) -> usize {
         self.oxbow_line.len()
     }
-    pub fn oxbow_line_offsets_ptr(&self) -> *const u32 {
-        self.oxbow_line_offsets.as_ptr()
-    }
-
-    pub fn channel_ptr(&self) -> *const f32 {
-        self.channel.as_ptr()
-    }
-    /// Number of vertices in the channel strip.
-    pub fn channel_vertices(&self) -> usize {
-        self.channel.len() / VERTEX_FLOATS
-    }
-    pub fn oxbows_ptr(&self) -> *const f32 {
-        self.oxbows.as_ptr()
-    }
-    pub fn oxbow_vertices(&self) -> usize {
-        self.oxbows.len() / VERTEX_FLOATS
-    }
     pub fn oxbow_offsets_ptr(&self) -> *const u32 {
         self.oxbow_offsets.as_ptr()
-    }
-    pub fn oxbow_count(&self) -> usize {
-        self.sim.oxbows.len()
     }
     pub fn oxbow_ages_ptr(&self) -> *const f32 {
         self.oxbow_ages.as_ptr()
     }
-    pub fn ages_ptr(&self) -> *const u8 {
-        self.ages.as_ptr()
-    }
-    pub fn age_cols(&self) -> usize {
-        self.sim.age_map.cols
-    }
-    pub fn age_rows(&self) -> usize {
-        self.sim.age_map.rows
-    }
-    pub fn erod_ptr(&self) -> *const u8 {
-        self.erod.as_ptr()
-    }
-    pub fn erod_cols(&self) -> usize {
-        self.sim.erodibility.cols
-    }
-    pub fn erod_rows(&self) -> usize {
-        self.sim.erodibility.rows
+    pub fn oxbow_count(&self) -> usize {
+        self.sim.oxbows.len()
     }
 
+    pub fn view_x(&self) -> f64 {
+        self.view_x
+    }
     pub fn time(&self) -> f64 {
         self.sim.time
     }
@@ -199,5 +128,11 @@ impl River {
     }
     pub fn point_count(&self) -> usize {
         self.sim.centerline.len()
+    }
+}
+
+impl Default for River {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -2,23 +2,27 @@
 
 ## Status
 
-Build with `make build`, run with `make serve`: http://localhost:8000 is the WebGL view and http://localhost:8000/svg.html the SVG view. `?warmup=N` pre-runs N steps on either. Tests: `make test`. Snapshots for tuning: `cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]`, with parameter overrides as upper-case env vars (e.g. `ALPHA=0.8`).
+Build with `make build`, run with `make serve` (http://localhost:8000; `?warmup=T` overrides the warm-up in simulated time). Tests: `make test`. Snapshots for tuning: `cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]`, with parameter overrides as upper-case env vars (e.g. `ALPHA=0.8`) and `UP`/`DOWN` for hidden reaches in widths.
 
-- [x] Core: resample, Menger curvature, Howard–Knutson kernel (option 8), migration, smoothing, grid-hashed neck cutoffs with a spatial cooldown.
-- [x] Validation tests: sine grows and drifts downstream (+11 widths over 200 steps); local-only kernel does not drift; noise run cuts off ≥ 3 times, never self-intersects, and sinuosity stays bounded.
-- [x] WASM wrapper with zero-copy buffers. `web/ui.js` holds the shared panel and loop; each view supplies a renderer.
-- [x] WebGL2 view (`index.html`, `main.js`, `render.js`): bank mesh built in Rust with the inner offset clamped to 0.9 r (option 3), asymmetric depth shading with exposed point bars (option 5), flow streaks, ageing oxbows (option 2), floodplain age map from an `AgeMap` raster stamped every step (option 6), and an erodibility overlay.
-- [x] SVG view (`svg.html`, `svg.js`): stroked centreline and oxbow paths rewritten each frame (options 1 and 2), flow shown by an animated `stroke-dashoffset`, a ring of faded past centrelines that traces the meander belt, and a Save SVG button.
-- [x] Heterogeneous erodibility (option 9): fBm noise field scaled by `heterogeneity`, and oxbow footprints become clay plugs at `clay_factor` × E.
+The frontend is SVG only (`web/index.html`, `web/main.js` for drawing, `web/ui.js` for the panel and loop). A WebGL view with a bank mesh, depth shading and a floodplain age map existed in commit e6cd034 and was removed at the user's request.
+
+- [x] Core: resample, Menger curvature, Howard–Knutson kernel (option 8), migration, smoothing, hashed-grid neck cutoffs with a spatial cooldown.
+- [x] Validation tests: sine grows and drifts downstream; local-only kernel does not drift; noise run cuts off, never self-intersects, and sinuosity stays bounded.
+- [x] SVG view: stroked channel and oxbow paths (options 1 and 2), flow dashes, faded past centrelines tracing the meander belt, Save SVG.
+- [x] Heterogeneous erodibility (option 9): fBm noise field, and oxbow footprints become clay plugs.
 - [ ] Stochastic cutoffs (option 10).
 - [ ] Ikeda–Parker–Sawai coefficients from physical inputs (option 11).
 
 Deviations from the plan, found while tuning:
 
-- Bends drift downstream and leave through the fixed end, so with only initial noise the river straightens after ~12,000 steps. A per-step smoothed lateral noise (`jitter`, default 0.15 widths/√time) keeps it meandering.
-- Hard clamping to the domain pins the river along the walls. Erodibility now tapers to zero within `edge_margin` (default 8 widths) of each edge; the clamp stays as a backstop.
-- α defaults to 0.6 per channel width. 0.35 grows bends that pile into the walls; 1.0 gives a busy, short-wavelength planform.
-- Curvature is non-dimensionalised by w and α is per channel width, so changing w rescales the whole planform.
+- The first version looked like string coiling. Causes and fixes:
+  - Speed: it ran 1,200 steps per second, so bends crossed the screen in about two seconds. The page now runs on simulated time per second (default 6, about 60 steps per second).
+  - Shape: migration now saturates with curvature (Hickin–Nanson), peaking at bend radius `peak_radius` = 2.5 widths, so bends round out instead of coiling.
+  - Kinks: per-step jitter is smoothed along the river over `jitter_scale` = 3 widths, at amplitude 0.05.
+  - Direction: `valley_width` = 45 widths confines the belt, so the river reads as flowing down a valley.
+  - Upstream straightening: bends grow only as they drift downstream, so the visible window is the middle of a longer river, with 60 widths hidden upstream and 20 downstream (set in `meander-wasm`).
+- Hard clamping to the domain pins the river along the walls. Erodibility tapers to zero within `edge_margin` of each edge; the clamp stays as a backstop.
+- `hypot`, `ln` and `cos` are software routines in WASM and made a step 3.6 times slower than native. The core avoids them on the hot path (0.095 ms per step in WASM for ~700 points). Warm-up is spread across frames behind a progress note.
 
 ## Goal
 

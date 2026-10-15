@@ -26,6 +26,13 @@ impl Rng {
         (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
     }
 
+    /// Approximately standard normal, from the sum of four uniforms
+    /// (Irwin–Hall). Avoids `ln` and `cos`, which are slow in WASM.
+    pub fn approx_normal(&mut self) -> f64 {
+        let s = self.uniform() + self.uniform() + self.uniform() + self.uniform();
+        (s - 2.0) * 3f64.sqrt()
+    }
+
     /// Standard normal, by Box–Muller.
     pub fn normal(&mut self) -> f64 {
         let u1 = self.uniform().max(f64::MIN_POSITIVE);

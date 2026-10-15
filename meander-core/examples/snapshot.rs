@@ -2,14 +2,16 @@
 //!
 //! cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]
 
+use meander_core::geom::curvature;
 use meander_core::{Params, Sim};
 use std::fmt::Write as _;
 
-fn svg(sim: &Sim) -> String {
-    let [w, h] = sim.bounds;
+/// Render the window `[x0, x0 + w] × [0, h]` of the domain.
+fn svg(sim: &Sim, x0: f64, w: f64) -> String {
+    let h = sim.bounds[1];
     let mut s = format!(
-        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {w} {h}' width='{w}' height='{h}'>\
-         <rect width='100%' height='100%' fill='#d9d2b6'/>"
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='{x0} 0 {w} {h}' width='{w}' height='{h}'>\
+         <rect x='{x0}' width='{w}' height='{h}' fill='#d9d2b6'/>"
     );
     let path = |pts: &[[f64; 2]]| {
         let mut d = String::new();
@@ -37,6 +39,15 @@ fn svg(sim: &Sim) -> String {
     s
 }
 
+/// Fraction of interior points with bend radius under 1.5 channel widths.
+fn tight_fraction(sim: &Sim) -> f64 {
+    let mut c = Vec::new();
+    curvature(&sim.centerline, &mut c);
+    let w = sim.params.width;
+    let tight = c.iter().filter(|k| k.abs() * w > 1.0 / 1.5).count();
+    tight as f64 / c.len().max(1) as f64
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = args.get(1).expect("usage: snapshot <out_dir> [steps] [every] [seed]");
@@ -52,22 +63,28 @@ fn main() {
             params.set(name, v.parse().unwrap());
         }
     }
-    let mut sim = Sim::new(params, [1200.0, 700.0], seed, 0.5);
+    // Hidden reaches upstream and downstream of the rendered window, in
+    // channel widths.
+    let up = std::env::var("UP").map_or(0.0, |v| v.parse().unwrap()) * params.width;
+    let down = std::env::var("DOWN").map_or(0.0, |v| v.parse().unwrap()) * params.width;
+    let view_w = 840.0;
+    let mut sim = Sim::new(params, [up + view_w + down, 480.0], seed, 0.5);
     let t0 = std::time::Instant::now();
     for k in 0..=steps / every {
         if k > 0 {
             sim.step_n(every);
         }
         println!(
-            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  cutoffs {:4}  oxbows {:3}",
+            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  tight {:4.2}  cutoffs {:4}  oxbows {:3}",
             sim.steps,
             sim.time,
             sim.centerline.len(),
             sim.sinuosity(),
+            tight_fraction(&sim),
             sim.cutoffs,
             sim.oxbows.len()
         );
-        std::fs::write(format!("{out}/step{:06}.svg", sim.steps), svg(&sim)).unwrap();
+        std::fs::write(format!("{out}/step{:06}.svg", sim.steps), svg(&sim, up, view_w)).unwrap();
     }
     println!("{:.2} ms/step", t0.elapsed().as_secs_f64() * 1e3 / steps as f64);
 }

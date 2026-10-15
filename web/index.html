@@ -7,17 +7,18 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<canvas id="view"></canvas>
+<svg id="view"></svg>
+<div id="overlay" hidden></div>
 <aside id="panel">
   <header>
     <h1>Riverine</h1>
     <button id="collapse" title="Hide controls">×</button>
   </header>
-  <nav class="views">View: <a aria-current="page">WebGL</a> · <a href="svg.html">SVG</a></nav>
   <div class="buttons">
     <button id="play" title="Space">Pause</button>
-    <button id="step" title="S">Step</button>
+    <button id="step" title="S: advance one second's worth">Step</button>
     <button id="reset" title="R">Reset</button>
+    <button id="save" title="Download the current frame">Save SVG</button>
   </div>
   <div class="seed">
     <label for="seed">Seed</label>

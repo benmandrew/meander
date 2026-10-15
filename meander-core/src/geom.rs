@@ -1,7 +1,14 @@
 pub type P = [f64; 2];
 
+// sqrt of the sum of squares rather than `hypot`, which is a slow software
+// routine in WASM.
 pub fn dist(a: P, b: P) -> f64 {
-    (b[0] - a[0]).hypot(b[1] - a[1])
+    dist2(a, b).sqrt()
+}
+
+pub fn dist2(a: P, b: P) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    dx * dx + dy * dy
 }
 
 pub fn lerp(a: P, b: P, t: f64) -> P {
@@ -67,7 +74,7 @@ pub fn curvature(pts: &[P], out: &mut Vec<f64>) {
 /// difference tangent.
 pub fn right_normal(pts: &[P], i: usize) -> P {
     let t = [pts[i + 1][0] - pts[i - 1][0], pts[i + 1][1] - pts[i - 1][1]];
-    let len = t[0].hypot(t[1]);
+    let len = (t[0] * t[0] + t[1] * t[1]).sqrt();
     if len > 0.0 {
         [t[1] / len, -t[0] / len]
     } else {
