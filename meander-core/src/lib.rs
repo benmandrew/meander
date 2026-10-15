@@ -11,7 +11,7 @@ pub mod ips;
 pub mod rng;
 
 use geom::{P, curvature, dist, resample, right_normal};
-use field::{Erodibility, Fill};
+use field::{Erodibility, Ground};
 use rng::Rng;
 
 /// Point spacing as a fraction of the channel width.
@@ -75,6 +75,12 @@ pub struct Params {
     /// bank breaks through quickly into open water, and the multiplier moves
     /// to `clay_factor` as the lake fills over `oxbow_lifetime`.
     pub lake_factor: f64,
+    /// Erodibility multiplier on ground the channel has just left, as bare
+    /// point-bar sand. It moves to 1 as vegetation binds the sand over
+    /// `vegetation_time`; 1 disables.
+    pub bar_factor: f64,
+    /// Simulation time vegetation takes to bind a point bar.
+    pub vegetation_time: f64,
     /// Expected floods per unit time. A flood can breach necks wider than
     /// `cutoff_dist` and cut chutes across point bars. 0 disables floods.
     pub flood_rate: f64,
@@ -124,6 +130,8 @@ impl Default for Params {
             heterogeneity: 0.5,
             clay_factor: 0.35,
             lake_factor: 3.0,
+            bar_factor: BAR_FACTOR,
+            vegetation_time: VEGETATION_TIME,
             flood_rate: FLOOD_RATE,
             breach_dist: BREACH_DIST,
             chute_ratio: CHUTE_RATIO,
@@ -161,6 +169,8 @@ impl Params {
         "heterogeneity",
         "clay_factor",
         "lake_factor",
+        "bar_factor",
+        "vegetation_time",
         "flood_rate",
         "breach_dist",
         "chute_ratio",
@@ -194,6 +204,8 @@ impl Params {
             "heterogeneity" => &mut self.heterogeneity,
             "clay_factor" => &mut self.clay_factor,
             "lake_factor" => &mut self.lake_factor,
+            "bar_factor" => &mut self.bar_factor,
+            "vegetation_time" => &mut self.vegetation_time,
             "flood_rate" => &mut self.flood_rate,
             "breach_dist" => &mut self.breach_dist,
             "chute_ratio" => &mut self.chute_ratio,
@@ -310,6 +322,18 @@ fn edge_taper(p: P, bounds: P, margin: f64, valley: f64) -> f64 {
 /// Feature size of the erodibility noise, in channel widths at reset.
 const NOISE_SCALE: f64 = 25.0;
 
+/// Cell size of the erodibility grid, in channel widths at reset.
+const FIELD_CELL: f64 = 0.5;
+
+/// Distance from the centreline at which a point reads the erodibility of
+/// the bank it moves into, in channel widths. It lies past the half-width
+/// bank, so the read misses the cells the channel itself has just swept.
+const BANK_READ: f64 = 0.75;
+
+/// Default point-bar parameters; see [`Params`].
+const BAR_FACTOR: f64 = 1.5;
+const VEGETATION_TIME: f64 = 100.0;
+
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
 
@@ -399,7 +423,7 @@ impl Sim {
         }
         self.centerline = pts;
         let w = self.params.width;
-        self.erodibility = Erodibility::new(self.bounds, w, NOISE_SCALE * w, seed);
+        self.erodibility = Erodibility::new(self.bounds, FIELD_CELL * w, NOISE_SCALE * w, seed);
         self.oxbows.clear();
         self.recent_cuts.clear();
         self.time = 0.0;
@@ -447,6 +471,7 @@ impl Sim {
                 self.centerline = resample(&self.centerline, ds);
             }
         }
+        self.erodibility.sweep(&self.centerline, self.time);
         self.time += self.params.dt;
         self.steps += 1;
         self.rework_oxbows();
@@ -499,7 +524,16 @@ impl Sim {
         let n = pts.len();
         let scale = p.dt * p.erodibility * p.width;
         let limit = p.max_step * SPACING * p.width;
-        let fill = Fill { time: self.time, life: p.oxbow_lifetime, lake: p.lake_factor, clay: p.clay_factor };
+        let ground = Ground {
+            time: self.time,
+            heterogeneity: p.heterogeneity,
+            lake_life: p.oxbow_lifetime,
+            lake: p.lake_factor,
+            clay: p.clay_factor,
+            bar: p.bar_factor,
+            vegetation: p.vegetation_time,
+        };
+        let read = BANK_READ * p.width;
 
         // Noise smoothed along the river by a forward and a backward
         // exponential filter, with correlation length `jitter_scale`, then
@@ -533,11 +567,13 @@ impl Sim {
                 p.pinch_width * p.width,
                 p.pinch_length * p.width,
             );
-            let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width, valley)
-                * self.erodibility.at(pts[i], p.heterogeneity, &fill);
             // Positive rate moves toward the outside of a left bend, i.e. to
             // the right, so bends grow.
-            let d = (e * (scale * self.rate[i] + self.noise[i])).clamp(-limit, limit);
+            let push = scale * self.rate[i] + self.noise[i];
+            let side = if push < 0.0 { -read } else { read };
+            let bank = [pts[i][0] + side * nrm[0], pts[i][1] + side * nrm[1]];
+            let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width, valley) * self.erodibility.at(bank, &ground);
+            let d = (e * push).clamp(-limit, limit);
             self.tmp[i][0] += d * nrm[0];
             self.tmp[i][1] += d * nrm[1];
         }
@@ -870,8 +906,10 @@ mod tests {
 
     #[test]
     fn floods_cut_off_earlier_and_never_self_intersect() {
-        let calm = Params { flood_rate: 0.0, ..Params::default() };
-        let stormy = Params { flood_rate: 0.1, chute_ratio: 3.0, ..Params::default() };
+        // Loose point bars hold sinuosity down by as much as floods do, so
+        // they are off here to isolate the floods.
+        let calm = Params { flood_rate: 0.0, bar_factor: 1.0, ..Params::default() };
+        let stormy = Params { flood_rate: 0.1, chute_ratio: 3.0, bar_factor: 1.0, ..Params::default() };
         for seed in [3, 11] {
             let (s_calm, calm_sim) = late_sinuosity(calm.clone(), seed);
             let (s_storm, sim) = late_sinuosity(stormy.clone(), seed);

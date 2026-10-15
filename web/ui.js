@@ -53,6 +53,8 @@ const SIM_CONTROLS = [
   { key: 'heterogeneity', label: 'Heterogeneity', min: 0, max: 1, step: 0.05 },
   { key: 'clay_factor', label: 'Oxbow clay plugs (× E)', min: 0.05, max: 1, step: 0.05 },
   { key: 'lake_factor', label: 'Open oxbow lakes (× E)', min: 1, max: 6, step: 0.25 },
+  { key: 'bar_factor', label: 'Fresh point bars (× E)', min: 1, max: 3, step: 0.05 },
+  { key: 'vegetation_time', label: 'Vegetation binds bars (sim time)', min: 10, max: 1000, step: 10 },
 ];
 
 // `renderer` provides draw(river, memory, state), reset(river, bounds, seed),
