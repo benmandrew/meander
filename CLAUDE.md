@@ -6,6 +6,9 @@ A live browser simulation of a meandering river: a Rust core compiled to WASM, d
 
 ## Commands
 
+The Nix flake supplies every tool below. `.envrc` loads its dev shell through direnv (run `direnv allow` once), or enter it with `nix develop`. The shell's `wasm-bindgen-cli` version is read from `Cargo.lock`, so after bumping the `wasm-bindgen` crate, nixpkgs must carry the matching `wasm-bindgen-cli_0_2_N`.
+
+- `nix build .#web-dist`: build the deployable site (HTML, JS, CSS and `pkg/`) into `result/`, without `wasm-pack`.
 - `make build`: build the WASM package into `web/pkg` (needs `wasm-pack`).
 - `make serve`: build, then serve `web/` at http://localhost:8000. `?warmup=T` overrides the warm-up in simulated time.
 - `make test`: `cargo test --release -p meander-core`. Tests run long simulations, so always use `--release`.
