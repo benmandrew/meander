@@ -39,7 +39,8 @@ const SCROLL_BANDS = 6;
 const SPLAY = [246, 236, 196];
 const SPLAY_RIM = [214, 198, 150];
 const SPLAY_RILL = [196, 182, 138];
-const SPLAY_HALF_ANGLE = Math.atan(0.7);
+// Simulated time a new splay takes to spread out from the breach.
+const SPLAY_GROW = 60;
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -72,6 +73,19 @@ function pathData(pts, start, end) {
 
 function mixRgb(a, b, t) {
   return a.map((x, i) => x + (b[i] - x) * t);
+}
+
+// Closed path through the points as a Catmull-Rom spline, with
+// coordinates formatted by `f`.
+function closedCurve(pts, f) {
+  const m = pts.length;
+  let d = `M${f(pts[0][0])} ${f(pts[0][1])}`;
+  for (let q = 0; q < m; q++) {
+    const [p0, p1, p2, p3] = [-1, 0, 1, 2].map((j) => pts[(q + j + m) % m]);
+    d += `C${f(p1[0] + (p2[0] - p0[0]) / 6)} ${f(p1[1] + (p2[1] - p0[1]) / 6)} `
+      + `${f(p2[0] - (p3[0] - p1[0]) / 6)} ${f(p2[1] - (p3[1] - p1[1]) / 6)} ${f(p2[0])} ${f(p2[1])}`;
+  }
+  return d + 'Z';
 }
 
 function mix(a, b, t) {
@@ -464,6 +478,20 @@ class SvgRenderer {
   }
 
   draw(river, memory, { local }) {
+    const w = river.get_param('width');
+    // The floodplain layers sync their own data, which can grow memory, so
+    // they go before the views below are built.
+    const layers = [
+      [this.barLayer, local.showBars], [this.leveeLayer, local.showLevees],
+      [this.scrollLayer, local.showScrolls], [this.splayLayer, local.showSplays],
+    ];
+    for (const [layer, show] of layers) {
+      if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
+    }
+    if (local.showLevees) this.drawLevees(river, memory);
+    if (local.showScrolls) this.drawScrolls(river, memory, w);
+    if (local.showSplays) this.drawSplays(river, memory, w);
+
     river.sync();
     // Views must be rebuilt after every step: memory growth detaches them.
     const buf = memory.buffer;
@@ -477,21 +505,10 @@ class SvgRenderer {
     const oxAlong = new Float32Array(buf, river.oxbow_offsets_along_ptr(), n);
     const oxHeight = new Float32Array(buf, river.oxbow_heights_ptr(), oxPts.length / 2);
     const oxSilt = new Float32Array(buf, river.oxbow_silts_ptr(), oxPts.length / 2);
-    const w = river.get_param('width');
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
     const d = pathData(line, 0, line.length / 2);
 
     this.record(line, river.time(), w, local);
-    const layers = [
-      [this.barLayer, local.showBars], [this.leveeLayer, local.showLevees],
-      [this.scrollLayer, local.showScrolls], [this.splayLayer, local.showSplays],
-    ];
-    for (const [layer, show] of layers) {
-      if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
-    }
-    if (local.showLevees) this.drawLevees(river, buf);
-    if (local.showScrolls) this.drawScrolls(river, memory, w);
-    if (local.showSplays) this.drawSplays(river, buf, w);
 
     // Oxbows: a lake that plugs from the ends, narrows far more slowly from
     // the banks and turns murky, fading only over the last fifth of its
@@ -536,13 +553,13 @@ class SvgRenderer {
 
   // Contour the overbank deposits over the window after each flood, and
   // every `LEVEE_REFRESH` of simulated time as the channel sweeps them away.
-  drawLevees(river, buf) {
+  drawLevees(river, memory) {
     const t = river.time(), floods = river.floods();
     const last = this.leveeAt;
     if (last && last.floods === floods && t - last.t < LEVEE_REFRESH && t >= last.t) return;
     this.leveeAt = { floods, t };
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
-    const deposit = new Float32Array(buf, river.deposit_ptr(), cols * rows);
+    const deposit = new Float32Array(memory.buffer, river.deposit_ptr(), cols * rows);
     const [x, vw] = this.window;
     const c0 = Math.max(0, Math.floor(x / cell) - 1);
     const c1 = Math.min(cols, Math.ceil((x + vw) / cell) + 1);
@@ -587,54 +604,80 @@ class SvgRenderer {
     });
   }
 
-  // Draw each crevasse splay as a smooth lobe with a few distributary
-  // rills, seeded by its birth time, when splays come or go and every
-  // `LEVEE_REFRESH` of simulated time as they grass over.
-  drawSplays(river, buf, w) {
-    const t = river.time(), n = river.splay_count(), key = `${river.crevasses()}/${n}`;
+  // Draw each crevasse splay as a smooth lobe of sand with a few rills
+  // from the breach. A new splay spreads out from the breach over
+  // `SPLAY_GROW` of simulated time; after that it is redrawn when the
+  // channel erodes it, and every `LEVEE_REFRESH` as it grasses over.
+  drawSplays(river, memory, w) {
+    const t = river.time(), n = river.splay_count(), version = river.splay_version();
+    const stride = river.splay_stride(), rays = (stride - 6) / 4;
+    river.sync_splays();
+    // Views must be built after syncing: it can grow memory.
+    const data = new Float32Array(memory.buffer, river.splay_data_ptr(), stride * n);
+    let growing = false;
+    for (let k = 0; k < n; k++) growing ||= t - data[stride * k + 5] < SPLAY_GROW;
     const last = this.splayAt;
-    if (last && last.key === key && t - last.t < LEVEE_REFRESH && t >= last.t) return;
-    this.splayAt = { key, t };
-    const data = new Float32Array(buf, river.splay_data_ptr(), 6 * n);
+    if (!growing && last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    this.splayAt = { version, t };
     const life = Math.max(1e-6, river.get_param('splay_lifetime'));
     this.splayLayer.replaceChildren();
     const f = (v) => v.toFixed(1);
     for (let k = 0; k < n; k++) {
-      const [ax, ay, dx, dy, len, born] = data.subarray(6 * k, 6 * k + 6);
+      const o = stride * k;
+      const [ax, ay, , , len, born] = data.subarray(o, o + 6);
       const age = clamp01((t - born) / life);
+      const grown = 1 - (1 - clamp01((t - born) / SPLAY_GROW)) ** 2;
       const rand = random(Math.round(born * 10) ^ 0x5b1a);
-      // Point at angle `a` off the axis and distance `r` from the apex.
-      const at = (a, r) => [ax + r * (dx * Math.cos(a) - dy * Math.sin(a)), ay + r * (dy * Math.cos(a) + dx * Math.sin(a))];
-      // Rim of the lobe, rounded at the front and pinched to the breach.
-      const rim = [at(0, -0.2 * w)];
-      const steps = 9;
-      for (let q = 0; q <= steps; q++) {
-        const a = SPLAY_HALF_ANGLE * (2 * q / steps - 1);
-        rim.push(at(a, len * (0.75 + 0.2 * rand()) * (1 - 0.25 * (a / SPLAY_HALF_ANGLE) ** 2)));
-      }
-      const m = rim.length;
-      let d = `M${f(rim[0][0])} ${f(rim[0][1])}`;
-      for (let q = 0; q < m; q++) {
-        const [p0, p1, p2, p3] = [-1, 0, 1, 2].map((j) => rim[(q + j + m) % m]);
-        d += `C${f(p1[0] + (p2[0] - p0[0]) / 6)} ${f(p1[1] + (p2[1] - p0[1]) / 6)} `
-          + `${f(p2[0] - (p3[0] - p1[0]) / 6)} ${f(p2[1] - (p3[1] - p1[1]) / 6)} ${f(p2[0])} ${f(p2[1])}`;
-      }
+      // Each ray's remaining sand, cut back to the spreading front.
+      const ray = (j) => {
+        const [vx, vy, a, b] = data.subarray(o + 6 + 4 * j, o + 10 + 4 * j);
+        return { vx, vy, a, b: Math.min(b, grown * len) };
+      };
+      const span = Array.from({ length: rays }, (_, j) => ray(j));
+      const live = span.map((r) => r.b > r.a + 0.25 * w);
+      const at = (r, d) => [ax + d * r.vx, ay + d * r.vy];
       const fade = 1 - smoothstep((age - 0.6) / 0.4);
+      // Each run of adjacent rays with sand left is one lobe: out along
+      // the outer ends and back along the inner ones.
+      let d = '';
+      for (let j = 0; j < rays;) {
+        if (!live[j]) { j++; continue; }
+        let e = j;
+        while (e + 1 < rays && live[e + 1]) e++;
+        if (e > j) {
+          const run = span.slice(j, e + 1);
+          d += closedCurve([...run.map((r) => at(r, r.b)), ...run.reverse().map((r) => at(r, r.a))], f);
+        }
+        j = e + 1;
+      }
+      if (!d) continue;
       el('path', {
-        d: d + 'Z', fill: mix(SPLAY, OLD_BAR, smoothstep(1.5 * age)), 'fill-opacity': (0.9 * fade).toFixed(2),
+        d, fill: mix(SPLAY, OLD_BAR, smoothstep(1.5 * age)), 'fill-opacity': (0.9 * fade).toFixed(2),
         stroke: `rgb(${SPLAY_RIM})`, 'stroke-width': (0.1 * w).toFixed(2), 'stroke-opacity': (0.7 * fade).toFixed(2),
       }, this.splayLayer);
-      // Rills: curves from the breach that bend gently as they spread.
+      // Rills: gentle curves outwards between two rays, over what is left
+      // of the sand.
       let rills = '';
       for (let r = 0; r < 3; r++) {
-        const a = SPLAY_HALF_ANGLE * (0.8 * rand() - 0.4 + 0.3 * (r - 1));
-        const [c, e] = [at(a + 0.3 * (rand() - 0.5), 0.4 * len), at(a, (0.55 + 0.2 * rand()) * len)];
-        rills += `M${f(ax)} ${f(ay)}Q${f(c[0])} ${f(c[1])} ${f(e[0])} ${f(e[1])}`;
+        const u = (rays - 1) * (0.2 + 0.3 * r + 0.1 * (rand() - 0.5));
+        const j = Math.floor(u), s = u - j;
+        const wobble = (rand() - 0.5) * w, reach = (0.55 + 0.2 * rand()) * len;
+        if (!live[j] || !live[j + 1]) continue;
+        const [p, q] = [span[j], span[j + 1]];
+        const lerp = (x, y) => x + s * (y - x);
+        const v = { vx: lerp(p.vx, q.vx), vy: lerp(p.vy, q.vy) };
+        const [from, to] = [Math.max(lerp(p.a, q.a), 0), Math.min(lerp(p.b, q.b), reach)];
+        if (to <= from) continue;
+        const [a, b] = [at(v, from), at(v, to)];
+        const c = at(v, (from + to) / 2);
+        rills += `M${f(a[0])} ${f(a[1])}Q${f(c[0] - wobble * v.vy)} ${f(c[1] + wobble * v.vx)} ${f(b[0])} ${f(b[1])}`;
       }
-      el('path', {
-        d: rills, fill: 'none', stroke: `rgb(${SPLAY_RILL})`, 'stroke-width': (0.12 * w).toFixed(2),
-        'stroke-opacity': (0.8 * fade * (1 - age)).toFixed(2),
-      }, this.splayLayer);
+      if (rills) {
+        el('path', {
+          d: rills, fill: 'none', stroke: `rgb(${SPLAY_RILL})`, 'stroke-width': (0.12 * w).toFixed(2),
+          'stroke-opacity': (0.8 * fade * (1 - age)).toFixed(2),
+        }, this.splayLayer);
+      }
     }
   }
 

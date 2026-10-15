@@ -342,6 +342,17 @@ pub struct Splay {
     pub dir: P,
     pub length: f64,
     pub born: f64,
+    /// [`SPLAY_RAYS`] rays fanning across the splay, each a unit direction
+    /// and the distances from the apex, inner then outer, between which
+    /// its sand remains. The channel erodes the sand from either end.
+    pub rays: Vec<(P, [f64; 2])>,
+}
+
+impl Splay {
+    /// Whether the channel has eroded all of the splay.
+    pub fn is_gone(&self) -> bool {
+        self.rays.iter().all(|r| r.1[0] >= r.1[1])
+    }
 }
 
 pub struct Sim {
@@ -356,6 +367,8 @@ pub struct Sim {
     /// Counts changes to `scrolls`, so a renderer can skip redrawing them.
     pub scroll_version: u64,
     pub splays: Vec<Splay>,
+    /// Counts changes to `splays`, so a renderer can skip redrawing them.
+    pub splay_version: u64,
     /// Crevasse splays so far.
     pub crevasses: u64,
     pub erodibility: Erodibility,
@@ -469,6 +482,9 @@ const SPLAY_EXTRA: f64 = 5.0;
 /// Spread of a splay across per unit along it: tan 35°.
 pub const SPLAY_SPREAD: f64 = 0.7;
 
+/// Rays across a splay that track how much of it the channel has eroded.
+pub const SPLAY_RAYS: usize = 9;
+
 /// Steps between checks for scroll bars under the channel. They do not
 /// affect the dynamics, so the check need not run every step.
 const SCROLL_REWORK_EVERY: u64 = 10;
@@ -513,6 +529,7 @@ impl Sim {
             scrolls: Vec::new(),
             scroll_version: 0,
             splays: Vec::new(),
+            splay_version: 0,
             crevasses: 0,
             erodibility: Erodibility::new([1.0, 1.0], 1.0, 1.0, 0),
             time: 0.0,
@@ -565,6 +582,7 @@ impl Sim {
         self.scrolls.clear();
         self.scroll_version += 1;
         self.splays.clear();
+        self.splay_version += 1;
         self.crevasses = 0;
         self.recent_cuts.clear();
         self.time = 0.0;
@@ -632,6 +650,7 @@ impl Sim {
         self.oxbows.retain(|o| time - o.filled_at < scar);
         if self.steps % SCROLL_REWORK_EVERY == 0 {
             self.rework_scrolls();
+            self.erode_splays();
         }
         let steps = self.steps;
         self.recent_cuts.retain(|&(_, until)| until > steps);
@@ -1051,22 +1070,57 @@ impl Sim {
         let length = (SPLAY_BASE + SPLAY_EXTRA * u) * w;
         let thickness = u * self.params.levee_height;
         self.erodibility.stamp_splay(apex, dir, length, SPLAY_SPREAD, thickness, self.time);
-        self.splays.push(Splay { apex, dir, length, born: self.time });
+        // The rim is rounded, shorter at the flanks, and a little uneven.
+        let rays = (0..SPLAY_RAYS)
+            .map(|k| {
+                let f = 2.0 * k as f64 / (SPLAY_RAYS - 1) as f64 - 1.0;
+                let v = [dir[0] - f * SPLAY_SPREAD * dir[1], dir[1] + f * SPLAY_SPREAD * dir[0]];
+                let m = (v[0] * v[0] + v[1] * v[1]).sqrt();
+                let rim = length * (1.0 - 0.25 * f * f) * (0.8 + 0.2 * self.rng.uniform());
+                ([v[0] / m, v[1] / m], [0.0, rim])
+            })
+            .collect();
+        self.splays.push(Splay { apex, dir, length, born: self.time, rays });
+        self.splay_version += 1;
         self.crevasses += 1;
         true
+    }
+
+    /// Trim each splay's rays back from either end past the ground the
+    /// channel has crossed since the splay formed, and drop splays that are
+    /// vegetated over or wholly eroded.
+    fn erode_splays(&mut self) {
+        let (time, life) = (self.time, self.params.splay_lifetime);
+        let step = self.erodibility.cell;
+        let field = &self.erodibility;
+        let mut changed = false;
+        for s in &mut self.splays {
+            for (v, ends) in &mut s.rays {
+                let at = |r: f64| [s.apex[0] + r * v[0], s.apex[1] + r * v[1]];
+                let [mut a, mut b] = *ends;
+                while a < b && field.swept_since(at(a), s.born) {
+                    a += step;
+                }
+                while a < b && field.swept_since(at(b), s.born) {
+                    b -= step;
+                }
+                if [a, b] != *ends {
+                    *ends = [a, b];
+                    changed = true;
+                }
+            }
+        }
+        let before = self.splays.len();
+        self.splays.retain(|s| time - s.born < life && !s.is_gone());
+        if changed || self.splays.len() != before {
+            self.splay_version += 1;
+        }
     }
 
     /// Drop scroll bars past their lifetime and the parts of the rest
     /// within half a width of the channel, which has eroded them.
     fn rework_scrolls(&mut self) {
         let (time, life) = (self.time, self.params.scroll_lifetime);
-        // Splays go once vegetated, or once the channel reaches their middle.
-        let (w, splay_life) = (self.params.width, self.params.splay_lifetime);
-        let line = &self.centerline;
-        self.splays.retain(|s| {
-            let mid = [s.apex[0] + 0.5 * s.length * s.dir[0], s.apex[1] + 0.5 * s.length * s.dir[1]];
-            time - s.born < splay_life && line.iter().all(|&c| geom::dist2(c, mid) > w * w)
-        });
         let before = self.scrolls.len();
         self.scrolls.retain(|s| time - s.born < life);
         let mut changed = self.scrolls.len() != before;
@@ -1369,6 +1423,41 @@ mod tests {
         assert!((s.apex[1] + s.dir[1] - mid).abs() > (s.apex[1] - mid).abs(), "dir {:?}", s.dir);
         let inside = [s.apex[0] + 0.3 * s.length * s.dir[0], s.apex[1] + 0.3 * s.length * s.dir[1]];
         assert!(sim.erodibility.deposit_at(inside) > 0.1 * sim.params.levee_height);
+    }
+
+    #[test]
+    fn the_channel_erodes_a_splay_from_the_breach() {
+        let mut sim = sine_sim(4.0, 20.0);
+        sim.params.splay_chance = 1.0;
+        assert!(sim.crevasse(1.0));
+        let w = sim.params.width;
+        let s = sim.splays[0].clone();
+        let perp = [-s.dir[1], s.dir[0]];
+        // The bend moves 1.5 widths into the splay.
+        sim.time += 1.0;
+        let swept: Vec<P> = (0..=6)
+            .flat_map(|i| (-40..=40).map(move |j| (0.25 * i as f64 * w, 0.1 * j as f64 * w)))
+            .map(|(r, x)| [s.apex[0] + r * s.dir[0] + x * perp[0], s.apex[1] + r * s.dir[1] + x * perp[1]])
+            .collect();
+        sim.erodibility.sweep(&swept, sim.time);
+        let v = sim.splay_version;
+        sim.erode_splays();
+        assert!(sim.splay_version > v);
+        let left = &sim.splays[0];
+        let v8 = left.rays[8].0;
+        for (k, (_, [a, b])) in left.rays.iter().enumerate() {
+            // The channel reaches 0.75 widths past the band, give or take a
+            // cell, and flank rays cross it obliquely.
+            assert!(*a > 1.5 * w && *a <= 3.5 * w, "ray {k} eroded to {a}");
+            assert_eq!(*b, s.rays[k].1[1], "the rim is untouched");
+        }
+        // Once the channel has crossed all of it, the splay is gone.
+        let all: Vec<P> = (0..=4 * 9).flat_map(|i| (-60..=60).map(move |j| (0.25 * i as f64 * w, 0.1 * j as f64 * w)))
+            .map(|(r, x)| [s.apex[0] + r * s.dir[0] + x * perp[0], s.apex[1] + r * s.dir[1] + x * perp[1]])
+            .collect();
+        sim.erodibility.sweep(&all, sim.time);
+        sim.erode_splays();
+        assert!(sim.splays.is_empty());
     }
 
     #[test]

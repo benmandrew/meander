@@ -235,6 +235,23 @@ impl Erodibility {
         }
     }
 
+    /// Whether the channel has passed within about half a width of `p`
+    /// since `time`: whether any cell within one and a half cells of `p`
+    /// was swept after it.
+    pub fn swept_since(&self, p: P, time: f64) -> bool {
+        let c = self.cell;
+        let x = ((p[0] / c).max(0.0) as usize).min(self.cols - 1);
+        let y = ((p[1] / c).max(0.0) as usize).min(self.rows - 1);
+        let near = |x: usize, y: usize| {
+            let (dx, dy) = ((x as f64 + 0.5) * c - p[0], (y as f64 + 0.5) * c - p[1]);
+            dx * dx + dy * dy <= 2.25 * c * c
+        };
+        (y.saturating_sub(1)..=(y + 1).min(self.rows - 1)).any(|y| {
+            (x.saturating_sub(1)..=(x + 1).min(self.cols - 1))
+                .any(|x| near(x, y) && self.swept_at[y * self.cols + x] > time)
+        })
+    }
+
     /// Lay a crevasse splay: a fan of sand from `apex` along the unit vector
     /// `dir`, out to `length`, spreading `spread` across per unit along. It
     /// is `thickness` channel depths deep at the apex and thins to nothing
