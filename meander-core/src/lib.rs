@@ -235,6 +235,9 @@ pub struct Oxbow {
     /// it, so the drawn lake plugs at a rate that does not jump when the
     /// channel trims the oxbow.
     pub length: f64,
+    /// Arc length from the first point of the oxbow as cut off to the
+    /// first point of this piece, so only the original ends plug.
+    pub offset: f64,
 }
 
 pub struct Sim {
@@ -702,9 +705,11 @@ impl Sim {
         false
     }
 
-    /// Remove the parts of oxbows that the channel now overlaps, splitting
-    /// an oxbow where the channel crosses it, and drop pieces too short to
-    /// draw. A piece keeps its parent's birth time.
+    /// Remove the parts of oxbows under the channel, splitting an oxbow
+    /// where the channel crosses it, and drop pieces too short to draw. A
+    /// piece keeps its parent's birth time and length. At a cut it keeps
+    /// one point under the water, so the lake runs in beneath the channel
+    /// and the cut end stays hidden as the channel advances.
     fn rework_oxbows(&mut self) {
         if self.oxbows.is_empty() {
             return;
@@ -719,18 +724,20 @@ impl Sim {
             hit.clear();
             hit.extend(o.points.iter().map(|&q| {
                 let mut near = false;
-                self.for_neighbours(q, w, mask, |j| near |= geom::dist2(q, pts[j]) < w * w);
+                self.for_neighbours(q, w, mask, |j| near |= geom::dist2(q, pts[j]) < 0.25 * w * w);
                 near
             }));
             if !hit.contains(&true) {
                 kept.push(o);
                 continue;
             }
-            let mut start = 0;
-            for k in 0..=hit.len() {
-                if k == hit.len() || hit[k] {
-                    if k - start >= MIN_OXBOW_POINTS {
-                        kept.push(Oxbow { points: o.points[start..k].to_vec(), ..o });
+            let (n, mut start) = (hit.len(), 0usize);
+            for k in 0..=n {
+                if k == n || hit[k] {
+                    let (a, b) = (start.saturating_sub(1), (k + 1).min(n));
+                    if k > start && b - a >= MIN_OXBOW_POINTS {
+                        let offset = o.offset + geom::length(&o.points[..=a]);
+                        kept.push(Oxbow { points: o.points[a..b].to_vec(), offset, ..o });
                     }
                     start = k + 1;
                 }
@@ -747,7 +754,7 @@ impl Sim {
         self.centerline.drain(i + 1..j);
         self.erodibility.stamp_clay(&loop_pts, 0.5 * self.params.width);
         let length = geom::length(&loop_pts);
-        self.oxbows.push(Oxbow { points: loop_pts, born: self.time, length });
+        self.oxbows.push(Oxbow { points: loop_pts, born: self.time, length, offset: 0.0 });
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));
         self.cutoffs += 1;
     }
@@ -918,15 +925,20 @@ mod tests {
         // A vertical oxbow across the channel, and one well clear of it.
         let across: Vec<P> = (-20..=20).map(|k| [100.0 * w, mid + 0.5 * k as f64 * w]).collect();
         let clear: Vec<P> = (0..20).map(|k| [(150 + k) as f64 * w, mid + 20.0 * w]).collect();
-        sim.oxbows.push(Oxbow { points: across, born: 0.0, length: 20.0 * w });
-        sim.oxbows.push(Oxbow { points: clear.clone(), born: 0.0, length: 9.5 * w });
+        sim.oxbows.push(Oxbow { points: across, born: 0.0, length: 20.0 * w, offset: 0.0 });
+        sim.oxbows.push(Oxbow { points: clear.clone(), born: 0.0, length: 9.5 * w, offset: 0.0 });
         sim.step();
         assert_eq!(sim.oxbows.len(), 3, "the crossed oxbow splits in two");
         assert_eq!(sim.oxbows[2].points, clear);
-        for o in &sim.oxbows {
-            for &q in &o.points {
-                assert!(sim.centerline.iter().all(|&c| dist(q, c) >= w));
-            }
+        // Each piece reaches one point under the water at the cut, and
+        // keeps its place along the original oxbow.
+        let gap = |q: P| sim.centerline.iter().map(|&c| dist(q, c)).fold(f64::INFINITY, f64::min);
+        let (a, b) = (&sim.oxbows[0], &sim.oxbows[1]);
+        for o in [a, b] {
+            let m = o.points.len();
+            assert!(o.points[1..m - 1].iter().all(|&q| gap(q) >= 0.5 * w));
         }
+        assert!(gap(a.points[a.points.len() - 1]) < 0.5 * w && gap(b.points[0]) < 0.5 * w);
+        assert!((b.offset - dist(b.points[0], [100.0 * w, mid - 10.0 * w])).abs() < 1e-9);
     }
 }

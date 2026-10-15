@@ -30,6 +30,8 @@ pub struct River {
     oxbow_ages: Vec<f32>,
     /// Arc length of each oxbow when it was cut off.
     oxbow_lengths: Vec<f32>,
+    /// Arc length along each oxbow as cut off to the start of its piece.
+    oxbow_offsets_along: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -45,6 +47,7 @@ impl River {
             oxbow_offsets: Vec::new(),
             oxbow_ages: Vec::new(),
             oxbow_lengths: Vec::new(),
+            oxbow_offsets_along: Vec::new(),
         }
     }
 
@@ -79,7 +82,7 @@ impl River {
     }
 
     /// Copy the centreline and oxbow polylines into flat buffers, and the
-    /// oxbow ages and birth lengths.
+    /// oxbow ages, birth lengths and offsets along the original oxbow.
     pub fn sync(&mut self) {
         let sim = &self.sim;
         self.line.clear();
@@ -88,11 +91,13 @@ impl River {
         self.oxbow_offsets.clear();
         self.oxbow_ages.clear();
         self.oxbow_lengths.clear();
+        self.oxbow_offsets_along.clear();
         for o in &sim.oxbows {
             self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
             self.oxbow_line.extend(o.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
             self.oxbow_ages.push((sim.time - o.born) as f32);
             self.oxbow_lengths.push(o.length as f32);
+            self.oxbow_offsets_along.push(o.offset as f32);
         }
         self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
     }
@@ -118,6 +123,9 @@ impl River {
     }
     pub fn oxbow_lengths_ptr(&self) -> *const f32 {
         self.oxbow_lengths.as_ptr()
+    }
+    pub fn oxbow_offsets_along_ptr(&self) -> *const f32 {
+        self.oxbow_offsets_along.as_ptr()
     }
     pub fn oxbow_count(&self) -> usize {
         self.sim.oxbows.len()

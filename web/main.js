@@ -105,11 +105,12 @@ function blobData(rand, cx, cy, rx, ry) {
 }
 
 // Outline of an oxbow lake of half-width `hw` along points [start, end) of a
-// flat x, y array, with `trim` taken off each end by the plugs. Each end is
-// half an ellipse sampled by angle, so it stays round wherever the trim
-// falls between points: a round cap when young, lengthening with `age` in
-// [0, 1] to a crescent tip.
-function lakeData(pts, start, end, trim, hw, age) {
+// flat x, y array, covering arc lengths [from, to] along them. Each end is
+// half an ellipse sampled by angle, so it stays round wherever it falls
+// between points. A plugged end is a round cap when young, lengthening with
+// `age` in [0, 1] to a crescent tip. An end cut by the channel stays a round
+// cap, hidden under the water.
+function lakeData(pts, start, end, from, to, hw, age) {
   const m = end - start;
   if (m < 2 || hw <= 0) return '';
   const s = new Float64Array(m), tx = new Float64Array(m), ty = new Float64Array(m);
@@ -117,7 +118,7 @@ function lakeData(pts, start, end, trim, hw, age) {
     const i = 2 * (start + k);
     s[k] = s[k - 1] + Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
   }
-  const [a, b] = [trim, s[m - 1] - trim];
+  const [a, b] = [Math.max(0, from), Math.min(s[m - 1], to)];
   if (b <= a) return '';
   // Unit tangents at the points, by central differences.
   for (let k = 0; k < m; k++) {
@@ -127,7 +128,10 @@ function lakeData(pts, start, end, trim, hw, age) {
     tx[k] = dx / l;
     ty[k] = dy / l;
   }
-  const cap = Math.min(hw * (1 + 3 * age), 0.5 * (b - a));
+  const tip = hw * (1 + 3 * age);
+  let [capA, capB] = [from > 0 ? tip : hw, to < s[m - 1] ? tip : hw];
+  const fit = Math.min(1, (b - a) / (capA + capB));
+  [capA, capB] = [capA * fit, capB * fit];
   const left = [], right = [];
   let j = 0;
   // Bank points at arc length `at`, `h` either side of the centreline, with
@@ -144,12 +148,12 @@ function lakeData(pts, start, end, trim, hw, age) {
   };
   for (let q = 0; q <= CAP_STEPS; q++) {
     const t = 0.5 * Math.PI * q / CAP_STEPS;
-    add(a + cap * (1 - Math.cos(t)), hw * Math.sin(t));
+    add(a + capA * (1 - Math.cos(t)), hw * Math.sin(t));
   }
-  for (let k = 0; k < m; k++) if (s[k] > a + cap && s[k] < b - cap) add(s[k], hw);
+  for (let k = 0; k < m; k++) if (s[k] > a + capA && s[k] < b - capB) add(s[k], hw);
   for (let q = CAP_STEPS; q >= 0; q--) {
     const t = 0.5 * Math.PI * q / CAP_STEPS;
-    add(b - cap * (1 - Math.cos(t)), hw * Math.sin(t));
+    add(b - capB * (1 - Math.cos(t)), hw * Math.sin(t));
   }
   // Both banks meet at the tips; keep each tip once.
   return 'M' + left.join('L') + 'L' + right.reverse().slice(1, -1).join('L') + 'Z';
@@ -295,6 +299,7 @@ class SvgRenderer {
     const oxOff = new Uint32Array(buf, river.oxbow_offsets_ptr(), n + 1);
     const oxAge = new Float32Array(buf, river.oxbow_ages_ptr(), n);
     const oxLen = new Float32Array(buf, river.oxbow_lengths_ptr(), n);
+    const oxAlong = new Float32Array(buf, river.oxbow_offsets_along_ptr(), n);
     const w = river.get_param('width');
     const life = Math.max(1e-6, river.get_param('oxbow_lifetime'));
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
@@ -325,7 +330,11 @@ class SvgRenderer {
       }
       const reeds = 0.1 * w + 0.15 * w * age;
       const hw = 0.5 * w * (1 - local.oxbowShrink * age) - 0.5 * reeds;
-      lake.setAttribute('d', lakeData(oxPts, oxOff[k], oxOff[k + 1], PLUG * age * oxLen[k], hw, age));
+      // The plugs advance from the ends of the oxbow as cut off, which a
+      // piece split off by the channel may lack.
+      const plug = PLUG * age * oxLen[k];
+      const [from, to] = [plug - oxAlong[k], oxLen[k] - plug - oxAlong[k]];
+      lake.setAttribute('d', lakeData(oxPts, oxOff[k], oxOff[k + 1], from, to, hw, age));
       lake.setAttribute('fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
       lake.setAttribute('opacity', clamp01(5 * (1 - age)).toFixed(2));
       lake.setAttribute('stroke-width', reeds.toFixed(2));
