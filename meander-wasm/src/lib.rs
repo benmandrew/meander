@@ -26,7 +26,7 @@ pub struct River {
     oxbow_line: Vec<f32>,
     /// Start of each oxbow in `oxbow_line`, in points, plus an end marker.
     oxbow_offsets: Vec<u32>,
-    /// Age of each oxbow as a fraction of its lifetime.
+    /// Age of each oxbow in simulation time.
     oxbow_ages: Vec<f32>,
 }
 
@@ -74,7 +74,7 @@ impl River {
     }
 
     /// Copy the centreline and oxbow polylines into flat buffers, and the
-    /// oxbow ages as fractions of their lifetime.
+    /// oxbow ages.
     pub fn sync(&mut self) {
         let sim = &self.sim;
         self.line.clear();
@@ -82,11 +82,10 @@ impl River {
         self.oxbow_line.clear();
         self.oxbow_offsets.clear();
         self.oxbow_ages.clear();
-        let life = sim.params.oxbow_lifetime.max(f64::MIN_POSITIVE);
         for o in &sim.oxbows {
             self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
             self.oxbow_line.extend(o.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
-            self.oxbow_ages.push(((sim.time - o.born) / life).clamp(0.0, 1.0) as f32);
+            self.oxbow_ages.push((sim.time - o.born) as f32);
         }
         self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
     }
@@ -112,6 +111,11 @@ impl River {
     }
     pub fn oxbow_count(&self) -> usize {
         self.sim.oxbows.len()
+    }
+
+    /// Erodibility noise at a point, in [0, 1]; low values erode slowly.
+    pub fn soil(&self, x: f64, y: f64) -> f64 {
+        self.sim.erodibility.noise_at([x, y])
     }
 
     pub fn view_x(&self) -> f64 {

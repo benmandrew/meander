@@ -31,7 +31,8 @@ const SIM_CONTROLS = [
   { group: 'Cutoffs' },
   { key: 'cutoff_dist', label: 'Cutoff distance (widths)', min: 0.3, max: 3, step: 0.05 },
   { key: 'cutoff_min_sep', label: 'Min separation K (points)', min: 6, max: 100, step: 1 },
-  { key: 'oxbow_lifetime', label: 'Oxbow lifetime', min: 0, max: 2000, step: 10 },
+  { key: 'oxbow_lifetime', label: 'Oxbow lake lifetime', min: 0, max: 2000, step: 10 },
+  { key: 'scar_lifetime', label: 'Oxbow scar lifetime', min: 0, max: 5000, step: 50 },
   { group: 'Floods' },
   { key: 'flood_rate', label: 'Floods per unit time (0 off)', min: 0, max: 0.2, step: 0.005 },
   { key: 'breach_dist', label: 'Widest neck breached (widths)', min: 1, max: 5, step: 0.1 },
@@ -51,9 +52,9 @@ const SIM_CONTROLS = [
   { key: 'clay_factor', label: 'Oxbow clay plugs (× E)', min: 0.05, max: 1, step: 0.05 },
 ];
 
-// `renderer` provides draw(river, memory, state), reset(river, bounds), and
-// capture(river, memory, state), which is called during warm-up in place of
-// drawing. `display` lists extra page-specific controls.
+// `renderer` provides draw(river, memory, state), reset(river, bounds, seed),
+// and capture(river, memory, state), which is called during warm-up in place
+// of drawing. `display` lists extra page-specific controls.
 export async function startApp({ view, renderer, display }) {
   const wasm = await init();
   const controls = [...SIM_CONTROLS, { group: 'Display' }, ...display];
@@ -81,7 +82,7 @@ export async function startApp({ view, renderer, display }) {
     refresh();
     owed = 0;
     warming = local.warmup;
-    renderer.reset(river, state.bounds);
+    renderer.reset(river, state.bounds, seed);
   }
 
   // Show the simulation's current parameter values, which differ from the
@@ -176,7 +177,7 @@ export async function startApp({ view, renderer, display }) {
     renderer.draw(river, wasm.memory, state);
     $('stats').textContent =
       `t ${river.time().toFixed(1)}   sinuosity ${river.sinuosity().toFixed(2)}\n` +
-      `points ${river.point_count()}   cutoffs ${river.cutoffs()}   oxbows ${river.oxbow_count()}\n` +
+      `points ${river.point_count()}   cutoffs ${river.cutoffs()}   oxbows and scars ${river.oxbow_count()}\n` +
       `floods ${river.floods()}, which made ${river.flood_cutoffs()} cutoffs\n` +
       `${frameMs.toFixed(1)} ms/frame (sim)`;
     requestAnimationFrame(frame);

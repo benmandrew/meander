@@ -1,11 +1,28 @@
-// SVG view: the channel, oxbows and past centrelines as stroked paths,
-// rewritten every frame.
+// SVG view: soil patches as smooth filled outlines, past centrelines as
+// point-bar sand, oxbow lakes and their scars, and the channel.
 
 import { startApp } from './ui.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const WATER = [61, 126, 166];
-const SILT = [128, 150, 110];
+// Water colour of a lake near the end of its life, turbid and weedy.
+const MURKY = [80, 120, 116];
+const REEDS = 'rgb(104, 126, 84)';
+const MARSH = 'rgb(118, 134, 96)';
+
+// Floodplain colours. Loam is the background; patches range from clay and
+// silt where erosion is slow to sand and gravel where it is fast.
+const SOIL = {
+  peat: [128, 124, 92],
+  clay: [160, 158, 120],
+  silt: [182, 182, 140],
+  loam: [196, 196, 152],
+  sand: [226, 214, 166],
+  gravel: [206, 204, 192],
+};
+// Fresh point-bar sand, and the grassed-over colour old bars fade towards.
+const BAR = [233, 222, 186];
+const OLD_BAR = [200, 202, 156];
 
 function el(name, attrs, parent) {
   const e = document.createElementNS(NS, name);
@@ -28,23 +45,114 @@ function mix(a, b, t) {
   return `rgb(${a.map((x, i) => Math.round(x + (b[i] - x) * t))})`;
 }
 
+function clamp01(t) {
+  return t < 0 ? 0 : t > 1 ? 1 : t;
+}
+
+function smoothstep(t) {
+  t = clamp01(t);
+  return t * t * (3 - 2 * t);
+}
+
+// Seeded generator of uniform values in [0, 1) (mulberry32).
+function random(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Outline of a soil patch: an oval with radii `rx`, `ry` at a random angle,
+// its radius jittered at a few vertices and smoothed with a closed
+// Catmull–Rom spline written as cubic Béziers.
+function blobData(rand, cx, cy, rx, ry) {
+  const n = 7 + Math.floor(4 * rand());
+  const turn = Math.PI * rand();
+  const [c, s] = [Math.cos(turn), Math.sin(turn)];
+  const pts = [];
+  for (let k = 0; k < n; k++) {
+    const a = 2 * Math.PI * (k + 0.3 * (rand() - 0.5)) / n;
+    const r = 0.85 + 0.3 * rand();
+    const x = rx * r * Math.cos(a), y = ry * r * Math.sin(a);
+    pts.push([cx + c * x - s * y, cy + s * x + c * y]);
+  }
+  const f = (v) => v.toFixed(1);
+  let d = `M${f(pts[0][0])} ${f(pts[0][1])}`;
+  for (let k = 0; k < n; k++) {
+    const [p0, p1, p2, p3] = [-1, 0, 1, 2].map((j) => pts[(k + j + n) % n]);
+    d += `C${f(p1[0] + (p2[0] - p0[0]) / 6)} ${f(p1[1] + (p2[1] - p0[1]) / 6)} `
+      + `${f(p2[0] - (p3[0] - p1[0]) / 6)} ${f(p2[1] - (p3[1] - p1[1]) / 6)} ${f(p2[0])} ${f(p2[1])}`;
+  }
+  return d + 'Z';
+}
+
+// Outline of an oxbow lake from points [start, end) of a flat x, y array.
+// With `age` in [0, 1], plugs grow in from both ends, so the lake shortens
+// and tapers to a crescent, and it narrows by `shrink` as it fills.
+function lakeData(pts, start, end, w, age, shrink) {
+  const m = end - start;
+  if (m < 2) return '';
+  const s = new Float64Array(m);
+  for (let k = 1; k < m; k++) {
+    const i = 2 * (start + k);
+    s[k] = s[k - 1] + Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
+  }
+  const len = s[m - 1];
+  const trim = 0.4 * age * len;
+  const half = 0.5 * len - trim;
+  const hw = 0.5 * w * (1 - shrink * age);
+  if (half < 0.25 * w || hw <= 0) return '';
+  const taper = Math.min(w * (0.5 + 4 * age), half);
+  const left = [], right = [];
+  for (let k = 0; k < m; k++) {
+    const d = Math.min(s[k] - trim, len - trim - s[k]);
+    if (d < 0) continue;
+    // A quarter ellipse at each end: a round cap when young, a long
+    // crescent tip when old.
+    const t = Math.min(1, d / taper);
+    const h = hw * Math.sqrt(t * (2 - t));
+    const a = 2 * (start + Math.max(0, k - 1)), b = 2 * (start + Math.min(m - 1, k + 1));
+    const tx = pts[b] - pts[a], ty = pts[b + 1] - pts[a + 1];
+    const tl = Math.hypot(tx, ty) || 1;
+    const x = pts[2 * (start + k)], y = pts[2 * (start + k) + 1];
+    const nx = -ty / tl * h, ny = tx / tl * h;
+    left.push((x + nx).toFixed(1) + ' ' + (y + ny).toFixed(1));
+    right.push((x - nx).toFixed(1) + ' ' + (y - ny).toFixed(1));
+  }
+  if (left.length < 2) return '';
+  return 'M' + left.join('L') + 'L' + right.reverse().join('L') + 'Z';
+}
+
+// Reuse `n` path elements from `list` under `parent`, adding or removing
+// elements as needed.
+function resize(list, n, parent) {
+  while (list.length < n) list.push(el('path', {}, parent));
+  while (list.length > n) list.pop().remove();
+}
+
 class SvgRenderer {
   constructor(svg) {
     this.svg = svg;
     svg.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     const round = { fill: 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' };
-    this.background = el('rect', { y: 0, fill: '#cfc6a4' }, svg);
-    this.historyLayer = el('g', { ...round, stroke: '#ddd0a6' }, svg);
-    this.oxbowLayer = el('g', round, svg);
+    this.background = el('rect', { y: 0, fill: `rgb(${SOIL.loam})` }, svg);
+    this.soilLayer = el('g', {}, svg);
+    this.historyLayer = el('g', round, svg);
+    this.scarLayer = el('g', { ...round, stroke: MARSH }, svg);
+    this.lakeLayer = el('g', { 'stroke-linejoin': 'round', stroke: REEDS }, svg);
     this.bank = el('path', { ...round, stroke: '#b8a678' }, svg);
     this.water = el('path', { ...round, stroke: `rgb(${WATER})` }, svg);
-    this.oxbows = [];
+    this.lakes = [];
+    this.scars = [];
     this.history = [];
     this.lastCapture = 0;
   }
 
   // Show only the visible window; the hidden reaches fall outside it.
-  reset(river, [w, h]) {
+  reset(river, [w, h], seed) {
     const x = river.view_x();
     this.svg.setAttribute('viewBox', `${x} 0 ${w} ${h}`);
     this.background.setAttribute('x', x);
@@ -53,6 +161,40 @@ class SvgRenderer {
     this.historyLayer.replaceChildren();
     this.history = [];
     this.lastCapture = -Infinity;
+    this.drawSoils(river, x, w, h, seed);
+  }
+
+  // Scatter soil patches over the window: broad patches whose type follows
+  // the erodibility noise at their centre, then small ones of gravel on
+  // erodible ground and peat in clay hollows.
+  drawSoils(river, x0, vw, h, seed) {
+    this.soilLayer.replaceChildren();
+    const rand = random(seed ^ 0x5eed);
+    const w = river.get_param('width');
+    const margin = 6 * w;
+    const place = (count, rMin, rMax, kind) => {
+      for (let k = 0; k < count; k++) {
+        const cx = x0 - margin + rand() * (vw + 2 * margin);
+        const cy = -margin + rand() * (h + 2 * margin);
+        const n = clamp01((river.soil(Math.max(0, cx), Math.max(0, cy)) - 0.35) / 0.3);
+        const type = kind(n, rand());
+        if (!type) continue;
+        const r = (rMin + (rMax - rMin) * rand()) * w;
+        const aspect = 0.45 + 0.55 * rand();
+        el('path', {
+          d: blobData(rand, cx, cy, r, r * aspect),
+          fill: `rgb(${SOIL[type]})`,
+          'fill-opacity': (0.4 + 0.25 * rand()).toFixed(2),
+        }, this.soilLayer);
+      }
+    };
+    const area = (vw + 2 * margin) * (h + 2 * margin) / (w * w);
+    place(Math.round(area / 150), 3, 8, (n) => (n < 0.25 ? 'clay' : n < 0.45 ? 'silt' : n < 0.6 ? null : 'sand'));
+    place(Math.round(area / 50), 0.8, 2.5, (n, u) => {
+      if (n > 0.5 && u < n - 0.2) return 'gravel';
+      if (n < 0.25 && u < 0.5 - n) return 'peat';
+      return null;
+    });
   }
 
   draw(river, memory, { local }) {
@@ -65,22 +207,33 @@ class SvgRenderer {
     const oxOff = new Uint32Array(buf, river.oxbow_offsets_ptr(), n + 1);
     const oxAge = new Float32Array(buf, river.oxbow_ages_ptr(), n);
     const w = river.get_param('width');
+    const life = Math.max(1e-6, river.get_param('oxbow_lifetime'));
+    const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
     const d = pathData(line, 0, line.length / 2);
 
     this.historyLayer.style.display = local.showHistory ? '' : 'none';
     this.historyLayer.setAttribute('stroke-width', w);
     this.record(d, river.time(), local);
 
-    // Oxbows, reusing path elements.
-    while (this.oxbows.length < n) this.oxbows.push(el('path', {}, this.oxbowLayer));
-    while (this.oxbows.length > n) this.oxbows.pop().remove();
+    // Oxbows: a lake that plugs from the ends and turns murky, fading only
+    // over the last fifth of its life, then a marshy scar that fades out.
+    resize(this.scars, n, this.scarLayer);
+    resize(this.lakes, n, this.lakeLayer);
+    this.scarLayer.setAttribute('stroke-width', w);
     for (let k = 0; k < n; k++) {
-      const age = oxAge[k];
-      const p = this.oxbows[k];
-      p.setAttribute('d', pathData(oxPts, oxOff[k], oxOff[k + 1]));
-      p.setAttribute('stroke', mix(WATER, SILT, Math.min(1, 1.5 * age)));
-      p.setAttribute('stroke-opacity', (1 - 0.9 * age).toFixed(2));
-      p.setAttribute('stroke-width', (w * (1 - local.oxbowShrink * age)).toFixed(2));
+      const age = oxAge[k] / life;
+      const scar = this.scars[k], lake = this.lakes[k];
+      scar.setAttribute('d', pathData(oxPts, oxOff[k], oxOff[k + 1]));
+      const fade = 1 - smoothstep((oxAge[k] - life) / scarLife);
+      scar.setAttribute('stroke-opacity', (0.45 * smoothstep(age) * fade).toFixed(2));
+      if (age >= 1) {
+        lake.setAttribute('d', '');
+        continue;
+      }
+      lake.setAttribute('d', lakeData(oxPts, oxOff[k], oxOff[k + 1], w, age, local.oxbowShrink));
+      lake.setAttribute('fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
+      lake.setAttribute('opacity', clamp01(5 * (1 - age)).toFixed(2));
+      lake.setAttribute('stroke-width', (0.1 * w + 0.15 * w * age).toFixed(2));
     }
 
     this.bank.setAttribute('d', d);
@@ -97,14 +250,19 @@ class SvgRenderer {
   }
 
   // Past centrelines, kept every `historyEvery` units of simulated time in a
-  // ring of `historyLength` paths, older ones fainter.
+  // ring of `historyLength` paths. They read as point-bar sand, bare for the
+  // newest and grassed over and fainter for older ones.
   record(d, t, local) {
     if (t - this.lastCapture < local.historyEvery) return;
     this.lastCapture = t;
     this.history.push(el('path', { d }, this.historyLayer));
     while (this.history.length > local.historyLength) this.history.shift().remove();
     const k = this.history.length;
-    this.history.forEach((p, i) => p.setAttribute('stroke-opacity', (0.08 + 0.32 * (i + 1) / k).toFixed(2)));
+    this.history.forEach((p, i) => {
+      const fresh = (i + 1) / k;
+      p.setAttribute('stroke', mix(OLD_BAR, BAR, fresh * fresh));
+      p.setAttribute('stroke-opacity', (0.04 + 0.4 * fresh ** 3).toFixed(2));
+    });
   }
 
   // Serialise the current frame as a standalone SVG file.
@@ -130,8 +288,8 @@ startApp({
   renderer,
   display: [
     { key: 'oxbowShrink', label: 'Oxbow narrowing', min: 0, max: 0.95, step: 0.05, local: 0.6 },
-    { key: 'historyEvery', label: 'History interval (sim time)', min: 2, max: 200, step: 2, local: 20 },
-    { key: 'historyLength', label: 'History length (paths)', min: 1, max: 200, step: 1, local: 60 },
-    { key: 'showHistory', label: 'Show past centrelines', toggle: true, local: true },
+    { key: 'historyEvery', label: 'Point bar interval (sim time)', min: 2, max: 200, step: 2, local: 20 },
+    { key: 'historyLength', label: 'Point bars kept (paths)', min: 1, max: 200, step: 1, local: 60 },
+    { key: 'showHistory', label: 'Show point bars (past centrelines)', toggle: true, local: true },
   ],
 });

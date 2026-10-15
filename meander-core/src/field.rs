@@ -70,6 +70,11 @@ impl Erodibility {
         y * self.cols + x
     }
 
+    /// Noise at `p`, in [0, 1].
+    pub fn noise_at(&self, p: P) -> f64 {
+        self.noise[self.index(p)] as f64
+    }
+
     /// Multiplier at `p`: noise of strength `hetero` around 1, times
     /// `clay_factor` inside oxbow fills.
     pub fn at(&self, p: P, hetero: f64, clay_factor: f64) -> f64 {

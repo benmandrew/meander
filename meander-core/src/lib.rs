@@ -43,8 +43,10 @@ pub struct Params {
     pub cutoff_min_sep: usize,
     /// Per-step displacement limit, as a fraction of the point spacing.
     pub max_step: f64,
-    /// Oxbows are dropped after this much simulation time.
+    /// Simulation time an oxbow lake takes to fill.
     pub oxbow_lifetime: f64,
+    /// Simulation time a filled oxbow stays as a scar before it is dropped.
+    pub scar_lifetime: f64,
     /// Random lateral perturbation added each step, in channel widths per
     /// square root of time. Bends drift downstream and leave the domain, so
     /// without this the river eventually straightens.
@@ -101,6 +103,7 @@ impl Default for Params {
             cutoff_min_sep: 20,
             max_step: 0.15,
             oxbow_lifetime: 400.0,
+            scar_lifetime: 1600.0,
             jitter: 0.05,
             jitter_scale: 3.0,
             valley_width: 45.0,
@@ -134,6 +137,7 @@ impl Params {
         "cutoff_min_sep",
         "max_step",
         "oxbow_lifetime",
+        "scar_lifetime",
         "jitter",
         "jitter_scale",
         "valley_width",
@@ -163,6 +167,7 @@ impl Params {
             "cutoff_dist" => &mut self.cutoff_dist,
             "max_step" => &mut self.max_step,
             "oxbow_lifetime" => &mut self.oxbow_lifetime,
+            "scar_lifetime" => &mut self.scar_lifetime,
             "jitter" => &mut self.jitter,
             "jitter_scale" => &mut self.jitter_scale,
             "valley_width" => &mut self.valley_width,
@@ -276,6 +281,9 @@ const CHUTE_RATIO: f64 = 4.0;
 
 /// Longest chute a flood can cut, in channel widths.
 pub const CHUTE_CHORD: f64 = 5.0;
+
+/// Oxbow pieces with fewer points than this are dropped.
+const MIN_OXBOW_POINTS: usize = 3;
 
 /// Most cutoffs a single flood can make.
 const MAX_FLOOD_CUTS: usize = 4;
@@ -401,7 +409,8 @@ impl Sim {
         }
         self.time += self.params.dt;
         self.steps += 1;
-        let (time, life) = (self.time, self.params.oxbow_lifetime);
+        self.rework_oxbows();
+        let (time, life) = (self.time, self.params.oxbow_lifetime + self.params.scar_lifetime);
         self.oxbows.retain(|o| time - o.born < life);
         let steps = self.steps;
         self.recent_cuts.retain(|&(_, until)| until > steps);
@@ -655,6 +664,43 @@ impl Sim {
         false
     }
 
+    /// Remove the parts of oxbows that the channel now overlaps, splitting
+    /// an oxbow where the channel crosses it, and drop pieces too short to
+    /// draw. A piece keeps its parent's birth time.
+    fn rework_oxbows(&mut self) {
+        if self.oxbows.is_empty() {
+            return;
+        }
+        let w = self.params.width;
+        let mask = self.build_grid(w);
+        let oxbows = std::mem::take(&mut self.oxbows);
+        let mut kept = Vec::with_capacity(oxbows.len());
+        let pts = &self.centerline;
+        let mut hit = Vec::new();
+        for o in oxbows {
+            hit.clear();
+            hit.extend(o.points.iter().map(|&q| {
+                let mut near = false;
+                self.for_neighbours(q, w, mask, |j| near |= geom::dist2(q, pts[j]) < w * w);
+                near
+            }));
+            if !hit.contains(&true) {
+                kept.push(o);
+                continue;
+            }
+            let mut start = 0;
+            for k in 0..=hit.len() {
+                if k == hit.len() || hit[k] {
+                    if k - start >= MIN_OXBOW_POINTS {
+                        kept.push(Oxbow { points: o.points[start..k].to_vec(), born: o.born });
+                    }
+                    start = k + 1;
+                }
+            }
+        }
+        self.oxbows = kept;
+    }
+
     /// Join point `i` to point `j` and abandon the reach between them as an
     /// oxbow.
     fn apply_cut(&mut self, i: usize, j: usize) {
@@ -800,5 +846,24 @@ mod tests {
         assert!(p.gamma < 4.0, "derived weights override direct sets");
         p.set("aspect", 10.0);
         assert!((p.alpha - 0.4).abs() < 1e-12);
+    }
+
+    #[test]
+    fn channel_reworks_oxbows_it_crosses() {
+        let mut sim = sine_sim(0.0, 40.0);
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        // A vertical oxbow across the channel, and one well clear of it.
+        let across: Vec<P> = (-20..=20).map(|k| [100.0 * w, mid + 0.5 * k as f64 * w]).collect();
+        let clear: Vec<P> = (0..20).map(|k| [(150 + k) as f64 * w, mid + 20.0 * w]).collect();
+        sim.oxbows.push(Oxbow { points: across, born: 0.0 });
+        sim.oxbows.push(Oxbow { points: clear.clone(), born: 0.0 });
+        sim.step();
+        assert_eq!(sim.oxbows.len(), 3, "the crossed oxbow splits in two");
+        assert_eq!(sim.oxbows[2].points, clear);
+        for o in &sim.oxbows {
+            for &q in &o.points {
+                assert!(sim.centerline.iter().all(|&c| dist(q, c) >= w));
+            }
+        }
     }
 }
