@@ -39,6 +39,9 @@ pub struct River {
     /// Fraction of the lake depth filled with flood silt at each oxbow
     /// point, in [0, 1], matching `oxbow_line`.
     oxbow_silts: Vec<f32>,
+    /// `Sim::oxbow_version` the oxbow polylines, heights, lengths and
+    /// offsets were last copied for.
+    oxbows_synced: Option<u64>,
     /// All scroll bar polylines, back to back, as flat x, y pairs.
     scroll_line: Vec<f32>,
     /// Start of each scroll bar in `scroll_line`, in points, plus an end
@@ -69,6 +72,7 @@ impl River {
             oxbow_offsets_along: Vec::new(),
             oxbow_heights: Vec::new(),
             oxbow_silts: Vec::new(),
+            oxbows_synced: None,
             scroll_line: Vec::new(),
             scroll_offsets: Vec::new(),
             scroll_ages: Vec::new(),
@@ -106,32 +110,44 @@ impl River {
         self.sim.params.get(name).unwrap_or(f64::NAN)
     }
 
+    /// Copy the centreline into a flat buffer.
+    pub fn sync_line(&mut self) {
+        self.line.clear();
+        self.line.extend(self.sim.centerline.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
+    }
+
     /// Copy the centreline and oxbow polylines into flat buffers, and the
     /// oxbow fills, scar ages, birth lengths, offsets along the original
-    /// oxbow, and the land height and silt at each oxbow point.
+    /// oxbow, and the land height and silt at each oxbow point. What depends
+    /// only on the oxbows' shape is copied only when it changes; see
+    /// `oxbow_version`.
     pub fn sync(&mut self) {
+        self.sync_line();
         let sim = &self.sim;
-        self.line.clear();
-        self.line.extend(sim.centerline.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
-        self.oxbow_line.clear();
-        self.oxbow_offsets.clear();
+        if self.oxbows_synced != Some(sim.oxbow_version) {
+            self.oxbows_synced = Some(sim.oxbow_version);
+            self.oxbow_line.clear();
+            self.oxbow_offsets.clear();
+            self.oxbow_lengths.clear();
+            self.oxbow_offsets_along.clear();
+            self.oxbow_heights.clear();
+            for o in &sim.oxbows {
+                self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
+                self.oxbow_line.extend(o.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
+                self.oxbow_heights.extend(o.points.iter().map(|&p| sim.erodibility.height(p) as f32));
+                self.oxbow_lengths.push(o.length as f32);
+                self.oxbow_offsets_along.push(o.offset as f32);
+            }
+            self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
+        }
         self.oxbow_fills.clear();
         self.oxbow_scar_ages.clear();
-        self.oxbow_lengths.clear();
-        self.oxbow_offsets_along.clear();
-        self.oxbow_heights.clear();
         self.oxbow_silts.clear();
         for o in &sim.oxbows {
-            self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
-            self.oxbow_line.extend(o.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
-            self.oxbow_heights.extend(o.points.iter().map(|&p| sim.erodibility.height(p) as f32));
             self.oxbow_silts.extend(o.points.iter().map(|&p| sim.erodibility.silt_at(p) as f32));
             self.oxbow_fills.push(o.fill as f32);
             self.oxbow_scar_ages.push(if o.is_lake() { 0.0 } else { (sim.time - o.filled_at) as f32 });
-            self.oxbow_lengths.push(o.length as f32);
-            self.oxbow_offsets_along.push(o.offset as f32);
         }
-        self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
     }
 
     /// Copy the crevasse splays into a flat buffer; see `splay_stride`.

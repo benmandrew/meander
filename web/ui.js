@@ -79,6 +79,8 @@ export async function startApp({ view, renderer, display }) {
   let owed = 0;
   // Warm-up time still to run, spread over frames so the page stays live.
   let warming = 0;
+  // Whether the view needs redrawing although the river has not moved.
+  let dirty = true;
   let lastFrame;
   const $ = (id) => document.getElementById(id);
 
@@ -94,6 +96,7 @@ export async function startApp({ view, renderer, display }) {
     refresh();
     owed = 0;
     warming = local.warmup;
+    dirty = true;
     renderer.reset(river, state.bounds, seed);
   }
 
@@ -129,12 +132,16 @@ export async function startApp({ view, renderer, display }) {
         if (s.local !== undefined) {
           box.checked = s.local;
           local[s.key] = s.local;
-          box.addEventListener('change', () => { local[s.key] = box.checked; });
+          box.addEventListener('change', () => {
+            local[s.key] = box.checked;
+            dirty = true;
+          });
         } else {
           box.checked = defaults.get_param(s.key) !== 0;
           box.addEventListener('change', () => {
             river.set_param(s.key, Number(box.checked));
             refresh();
+            dirty = true;
           });
         }
         root.append(row);
@@ -152,6 +159,7 @@ export async function startApp({ view, renderer, display }) {
         out.textContent = String(+v.toFixed(3));
         if (s.local !== undefined) local[s.key] = v;
         else if (river.set_param(s.key, v) && river.get_param('physics') !== 0) refresh();
+        dirty = true;
       };
       s.input.addEventListener('input', apply);
       apply();
@@ -183,9 +191,19 @@ export async function startApp({ view, renderer, display }) {
       const dt = river.get_param('dt');
       owed += local.speed * elapsed;
       const n = Math.floor(owed / dt);
-      if (n > 0) owed -= dt * river.advance(n * dt);
+      if (n > 0) {
+        owed -= dt * river.advance(n * dt);
+        dirty = true;
+      }
       frameMs = 0.9 * frameMs + 0.1 * (performance.now() - t0);
     }
+    // Draw only when something has changed, so a paused or slow river costs
+    // nothing between steps.
+    if (!dirty) {
+      requestAnimationFrame(frame);
+      return;
+    }
+    dirty = false;
     renderer.draw(river, wasm.memory, state);
     $('stats').textContent =
       `t ${river.time().toFixed(1)}   sinuosity ${river.sinuosity().toFixed(2)}\n` +
@@ -201,7 +219,12 @@ export async function startApp({ view, renderer, display }) {
   }
 
   $('play').addEventListener('click', togglePlay);
-  $('step').addEventListener('click', () => river.advance(local.speed));
+  // Advance one second's worth of simulated time.
+  const step = () => {
+    river.advance(local.speed);
+    dirty = true;
+  };
+  $('step').addEventListener('click', step);
   $('reset').addEventListener('click', reset);
   $('reseed').addEventListener('click', () => {
     $('seed').value = Math.floor(Math.random() * 1e6);
@@ -220,7 +243,7 @@ export async function startApp({ view, renderer, display }) {
     if (e.target instanceof HTMLInputElement && e.target.type !== 'range') return;
     if (e.key === ' ') { e.preventDefault(); togglePlay(); }
     else if (e.key === 'r') reset();
-    else if (e.key === 's') river.advance(local.speed);
+    else if (e.key === 's') step();
   });
 
   buildControls();

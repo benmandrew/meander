@@ -1,5 +1,5 @@
 :root {
-  --panel-bg: rgba(250, 247, 238, 0.92);
+  --panel-bg: rgba(250, 247, 238, 0.95);
   --panel-fg: #2b2a26;
   --muted: #6d6a60;
   --accent: #2f6f8f;
@@ -8,7 +8,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --panel-bg: rgba(28, 30, 32, 0.92);
+    --panel-bg: rgba(28, 30, 32, 0.95);
     --panel-fg: #e6e3da;
     --muted: #9c998f;
     --accent: #7fb7d4;
@@ -27,7 +27,7 @@ html, body {
   color: var(--panel-fg);
 }
 
-#ground, #view {
+#bars, #ground, #view {
   position: fixed;
   inset: 0;
   width: 100%;
@@ -35,8 +35,10 @@ html, body {
   display: block;
 }
 
-/* Its own compositing layer, so redrawing the channel does not repaint it. */
-#ground {
+/* Each its own compositing layer, so redrawing the channel does not repaint
+   them, and the frequent changes to the ground do not repaint the bulky old
+   point bars beneath it. */
+#bars, #ground {
   will-change: transform;
 }
 
@@ -63,7 +65,6 @@ html, body {
   background: var(--panel-bg);
   border: 1px solid var(--border);
   border-radius: 10px;
-  backdrop-filter: blur(6px);
 }
 
 #panel header {

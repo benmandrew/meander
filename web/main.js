@@ -1,7 +1,10 @@
-// SVG view in two stacked layers. The ground layer holds past centrelines
-// as point-bar sand under the soil patches, and changes only when a
-// centreline is kept, so the browser can cache it. The top layer holds the
-// oxbow lakes, their scars and the channel, redrawn every frame.
+// SVG view in three stacked layers, each cached by the browser apart from
+// the others. The bottom layer holds past centrelines as point-bar sand,
+// and changes only when a band of them stops growing or is dropped. The
+// ground layer holds the growing band, the soil patches and the floodplain
+// features floods leave, and changes when a centreline is kept or a
+// feature changes. The top layer holds the oxbow lakes, their scars and the
+// channel, redrawn whenever the river moves.
 
 import { startApp } from './ui.js';
 
@@ -44,7 +47,7 @@ const SPLAY_GROW = 60;
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
-// Point bars are kept in this many age bands, each one path element.
+// Point bars are kept in this many age bands, each one group of paths.
 const BANDS = 24;
 // Points on each rounded end of a lake.
 const CAP_STEPS = 8;
@@ -53,6 +56,16 @@ const PLUG = 0.4;
 // A centreline is kept once some part of it has moved this many widths from
 // the last kept one, so the swept area has no gaps.
 const BAR_STEP = 0.5;
+// Segments in each run of a long polyline drawn as one path element. The
+// browser rasterises the view in tiles and skips elements whose bounds miss
+// a tile, so short runs spare each tile from stroking the whole line.
+const RUN = 24;
+// Change in a lake's fill that redraws its outline. A lake fills over about
+// a thousand units of simulated time, so its outline is rebuilt every few
+// units, not every step, and moves less than a pixel at each rebuild.
+const LAKE_STEP = 1e-3;
+// Simulated time between redraws of a growing crevasse splay.
+const SPLAY_STEP = 0.5;
 
 function el(name, attrs, parent) {
   const e = document.createElementNS(NS, name);
@@ -61,13 +74,34 @@ function el(name, attrs, parent) {
   return e;
 }
 
+// Set an attribute only when its value changes, so the browser does not
+// repaint an element that looks the same.
+function set(e, name, value) {
+  const last = e.attrs ??= {};
+  if (last[name] === value) return;
+  last[name] = value;
+  e.setAttribute(name, value);
+}
+
+// Path data for points [start, end) of a flat x, y array in runs of `RUN`
+// segments, each run sharing its last point with the next.
+function runData(pts, start, end) {
+  const runs = [];
+  for (let s = start; s < end - 1; s += RUN) runs.push(pathData(pts, s, Math.min(end, s + RUN + 1)));
+  return runs;
+}
+
+// `v` to one decimal place, without the trailing zero `toFixed` keeps,
+// and several times faster.
+function dp1(v) {
+  return '' + Math.round(10 * v) / 10;
+}
+
 // Path data for points [start, end) of a flat x, y array.
 function pathData(pts, start, end) {
   if (end - start < 2) return '';
   const parts = new Array(end - start);
-  for (let i = start; i < end; i++) {
-    parts[i - start] = pts[2 * i].toFixed(1) + ' ' + pts[2 * i + 1].toFixed(1);
-  }
+  for (let i = start; i < end; i++) parts[i - start] = dp1(pts[2 * i]) + ' ' + dp1(pts[2 * i + 1]);
   return 'M' + parts[0] + 'L' + parts.slice(1).join(' ');
 }
 
@@ -352,33 +386,51 @@ function cropped(line, x0, x1) {
 }
 
 // Points of a flat x, y array hashed into square cells of side `size`.
+// Hashed grid of points, filled by counting sort into flat arrays. Cells
+// along a row hash to consecutive buckets, so the three cells around a
+// point in a row are one run of the table.
 class Grid {
   constructor(pts, size) {
+    const n = pts.length / 2;
+    let buckets = 1;
+    while (buckets < 4 * n) buckets *= 2;
     this.pts = pts;
     this.size = size;
-    this.cells = new Map();
-    for (let i = 0; i < pts.length; i += 2) {
-      const k = this.key(Math.floor(pts[i] / size), Math.floor(pts[i + 1] / size));
-      const cell = this.cells.get(k);
-      if (cell) cell.push(i);
-      else this.cells.set(k, [i]);
+    this.mask = buckets - 1;
+    this.stride = 4099;
+    this.start = new Int32Array(buckets + 1);
+    const cell = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      cell[i] = this.bucket(Math.floor(pts[2 * i] / size), Math.floor(pts[2 * i + 1] / size));
+      this.start[cell[i] + 1]++;
     }
+    for (let b = 0; b < buckets; b++) this.start[b + 1] += this.start[b];
+    const fill = this.start.slice(0, buckets);
+    this.items = new Int32Array(n);
+    for (let i = 0; i < n; i++) this.items[fill[cell[i]]++] = 2 * i;
   }
 
-  key(cx, cy) {
-    return cx * 65536 + cy;
+  bucket(cx, cy) {
+    return (cy * this.stride + cx) & this.mask;
   }
 
   // Whether any point lies within `r` (at most `size`) of (x, y).
   near(x, y, r) {
     const cx = Math.floor(x / this.size), cy = Math.floor(y / this.size);
-    for (let i = -1; i <= 1; i++) {
-      for (let j = -1; j <= 1; j++) {
-        for (const k of this.cells.get(this.key(cx + i, cy + j)) ?? []) {
-          const dx = this.pts[k] - x, dy = this.pts[k + 1] - y;
-          if (dx * dx + dy * dy <= r * r) return true;
-        }
-      }
+    const { start, mask } = this, r2 = r * r;
+    for (let j = cy - 1; j <= cy + 1; j++) {
+      // The run of three buckets, in two parts where it wraps.
+      const b = this.bucket(cx - 1, j), e = Math.min(b + 3, mask + 1);
+      if (this.scan(start[b], start[e], x, y, r2) || this.scan(0, start[b + 3 - e], x, y, r2)) return true;
+    }
+    return false;
+  }
+
+  // Whether any point in items [lo, hi) lies within √r2 of (x, y).
+  scan(lo, hi, x, y, r2) {
+    for (let m = lo; m < hi; m++) {
+      const k = this.items[m], dx = this.pts[k] - x, dy = this.pts[k + 1] - y;
+      if (dx * dx + dy * dy <= r2) return true;
     }
     return false;
   }
@@ -392,19 +444,37 @@ function resize(list, n, parent) {
 }
 
 class SvgRenderer {
-  constructor(ground, svg) {
+  constructor(bars, ground, svg) {
+    this.layers = [bars, ground, svg];
+    this.bars = bars;
     this.ground = ground;
     this.svg = svg;
-    for (const s of [ground, svg]) s.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+    for (const s of this.layers) s.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     const round = { fill: 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' };
-    this.background = el('rect', { y: 0, fill: `rgb(${SOIL.loam})` }, ground);
-    // Point bars: each age band is one opaque path, newest on top, so each
-    // spot shows the newest band over it and bands never build up. Old bands
-    // fade to the background colour, and the translucent soil patches lie
-    // over them.
-    this.barLayer = el('g', round, ground);
+    // Centrelines turn only a few degrees at each point, where a bevel join
+    // looks the same as a round one and is far cheaper to rasterise.
+    const line = { ...round, 'stroke-linejoin': 'bevel' };
+    this.background = el('rect', { y: 0, fill: `rgb(${SOIL.loam})` }, bars);
+    // Point bars: each age band is one group of opaque paths in one colour,
+    // newest on top, so each spot shows the newest band over it and bands
+    // never build up. Old bands fade to the background colour, and the
+    // translucent soil patches lie over them. Bands that have stopped
+    // growing lie in the bottom layer; the growing band lies in the ground
+    // layer, so keeping a centreline does not repaint the old ones.
+    this.oldBars = el('g', line, bars);
+    this.barLayer = el('g', line, ground);
+    // Scroll bars: one group for each age band, with one path for each
+    // ridge, so trimming a ridge repaints only the ground around it.
     this.scrollLayer = el('g', round, ground);
-    this.scrollBands = Array.from({ length: SCROLL_BANDS }, () => el('path', {}, this.scrollLayer));
+    this.scrollBands = Array.from({ length: SCROLL_BANDS }, (_, b) => {
+      const age = (b + 0.5) / SCROLL_BANDS;
+      return el('g', {
+        stroke: mix(RIDGE, OLD_RIDGE, smoothstep(2 * age)),
+        'stroke-opacity': (0.7 * (1 - smoothstep((age - 0.75) / 0.25))).toFixed(2),
+      }, this.scrollLayer);
+    });
+    // Path element of each ridge drawn, by band and path data.
+    this.ridges = new Map();
     this.scrollAt = null;
     // Natural levees: nested translucent silt regions, higher ground inside.
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
@@ -414,15 +484,24 @@ class SvgRenderer {
     // Splays bury the soil and levees beneath them in sand.
     this.splayLayer = el('g', round, ground);
     this.splayAt = null;
-    this.scarLayer = el('g', { ...round, stroke: MARSH }, svg);
+    // Oxbow scars lie over the whole ground, under the channel. They change
+    // slowly, so they sit at the top of the ground layer, not in the top
+    // layer that is redrawn whenever the river moves.
+    this.scarLayer = el('g', { ...line, stroke: MARSH }, ground);
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
-    this.bank = el('path', { ...round, stroke: '#b8a678' }, svg);
+    this.bank = el('g', { ...line, stroke: '#b8a678' }, svg);
     this.lakeLayer = el('g', { 'stroke-linejoin': 'round', stroke: REEDS }, svg);
-    this.water = el('path', { ...round, stroke: `rgb(${WATER})` }, svg);
+    this.water = el('g', { ...line, stroke: `rgb(${WATER})` }, svg);
+    this.bankRuns = [];
+    this.waterRuns = [];
     this.lakes = [];
     this.scars = [];
     this.bands = [];
+    // Bands dropped since the last draw, still to be removed from the page.
+    this.dropped = [];
+    // Bar settings the old bands were last shaded for.
+    this.shadedFor = null;
     this.lastBar = null;
     this.window = [0, 0];
   }
@@ -430,17 +509,22 @@ class SvgRenderer {
   // Show only the visible window; the hidden reaches fall outside it.
   reset(river, [w, h], seed) {
     const x = river.view_x();
-    for (const s of [this.ground, this.svg]) s.setAttribute('viewBox', `${x} 0 ${w} ${h}`);
+    for (const s of this.layers) s.setAttribute('viewBox', `${x} 0 ${w} ${h}`);
     this.background.setAttribute('x', x);
     this.background.setAttribute('width', w);
     this.background.setAttribute('height', h);
+    this.oldBars.replaceChildren();
     this.barLayer.replaceChildren();
     this.bands = [];
+    this.dropped = [];
+    this.shadedFor = null;
     this.lastBar = null;
     this.window = [x, w];
     this.leveeAt = null;
     this.scrollAt = null;
     this.splayAt = null;
+    for (const scar of this.scars) scar.shape = null;
+    for (const lake of this.lakes) lake.inputs = null;
     this.drawSoils(river, x, w, h, seed);
   }
 
@@ -482,7 +566,7 @@ class SvgRenderer {
     // The floodplain layers sync their own data, which can grow memory, so
     // they go before the views below are built.
     const layers = [
-      [this.barLayer, local.showBars], [this.leveeLayer, local.showLevees],
+      [this.oldBars, local.showBars], [this.barLayer, local.showBars], [this.leveeLayer, local.showLevees],
       [this.scrollLayer, local.showScrolls], [this.splayLayer, local.showSplays],
     ];
     for (const [layer, show] of layers) {
@@ -506,9 +590,10 @@ class SvgRenderer {
     const oxHeight = new Float32Array(buf, river.oxbow_heights_ptr(), oxPts.length / 2);
     const oxSilt = new Float32Array(buf, river.oxbow_silts_ptr(), oxPts.length / 2);
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
-    const d = pathData(line, 0, line.length / 2);
+    const runs = runData(line, 0, line.length / 2);
 
     this.record(line, river.time(), w, local);
+    this.drawBars(river.time(), w, local);
 
     // Oxbows: a lake that plugs from the ends, narrows far more slowly from
     // the banks and turns murky, fading only over the last fifth of its
@@ -519,15 +604,22 @@ class SvgRenderer {
     // narrowing.
     resize(this.scars, n, this.scarLayer);
     resize(this.lakes, n, this.lakeLayer);
-    this.scarLayer.setAttribute('stroke-width', w);
+    set(this.scarLayer, 'stroke-width', w);
     for (let k = 0; k < n; k++) {
       const age = oxFill[k];
       const scar = this.scars[k], lake = this.lakes[k];
-      scar.setAttribute('d', pathData(oxPts, oxOff[k], oxOff[k + 1]));
+      // The channel splits an oxbow into pieces of its original polyline,
+      // so a piece's ends and length identify its shape.
+      const [s0, s1] = [2 * oxOff[k], 2 * oxOff[k + 1]];
+      const shape = `${s1 - s0} ${oxPts[s0]} ${oxPts[s0 + 1]} ${oxPts[s1 - 2]} ${oxPts[s1 - 1]}`;
+      if (scar.shape !== shape) {
+        scar.shape = shape;
+        set(scar, 'd', pathData(oxPts, oxOff[k], oxOff[k + 1]));
+      }
       const fade = 1 - smoothstep(oxScar[k] / scarLife);
-      scar.setAttribute('stroke-opacity', (0.45 * smoothstep(age) * fade).toFixed(2));
+      set(scar, 'stroke-opacity', (0.45 * smoothstep(age) * fade).toFixed(2));
       if (age >= 1) {
-        lake.setAttribute('d', '');
+        set(lake, 'd', '');
         continue;
       }
       const reeds = 0.1 * w + 0.15 * w * age;
@@ -538,17 +630,28 @@ class SvgRenderer {
       const plug = PLUG * age * oxLen[k];
       const [from, to] = [plug - oxAlong[k], oxLen[k] - plug - oxAlong[k]];
       const level = hw > 0 ? (hw / (0.5 * w)) ** 2 : 0;
-      lake.setAttribute('d', lakeData(oxPts, oxHeight, oxSilt, oxOff[k], oxOff[k + 1], from, to,
-        0.5 * w, level, local.oxbowRelief, age));
-      lake.setAttribute('fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
-      lake.setAttribute('opacity', clamp01(5 * (1 - age)).toFixed(2));
-      lake.setAttribute('stroke-width', reeds.toFixed(2));
+      // Floods and the channel change the silt without reshaping the oxbow.
+      let silt = 0;
+      for (let i = oxOff[k]; i < oxOff[k + 1]; i++) silt += oxSilt[i];
+      const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief}`;
+      if (lake.inputs !== inputs) {
+        lake.inputs = inputs;
+        set(lake, 'd', lakeData(oxPts, oxHeight, oxSilt, oxOff[k], oxOff[k + 1], from, to,
+          0.5 * w, level, local.oxbowRelief, age));
+      }
+      set(lake, 'fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
+      set(lake, 'opacity', clamp01(5 * (1 - age)).toFixed(2));
+      set(lake, 'stroke-width', reeds.toFixed(2));
     }
 
-    this.bank.setAttribute('d', d);
-    this.bank.setAttribute('stroke-width', w * 1.3);
-    this.water.setAttribute('d', d);
-    this.water.setAttribute('stroke-width', w);
+    resize(this.bankRuns, runs.length, this.bank);
+    resize(this.waterRuns, runs.length, this.water);
+    runs.forEach((d, k) => {
+      set(this.bankRuns[k], 'd', d);
+      set(this.waterRuns[k], 'd', d);
+    });
+    set(this.bank, 'stroke-width', w * 1.3);
+    set(this.water, 'stroke-width', w);
   }
 
   // Contour the overbank deposits over the window after each flood, and
@@ -586,39 +689,45 @@ class SvgRenderer {
     const ages = new Float32Array(buf, river.scroll_ages_ptr(), n);
     const life = Math.max(1e-6, river.get_param('scroll_lifetime'));
     const [x, vw] = this.window;
-    const d = this.scrollBands.map(() => []);
+    // Keep the path of each ridge already drawn in its band, and add the
+    // rest; what is left in `this.ridges` afterwards is gone.
+    const ridges = new Map();
     for (let k = 0; k < n; k++) {
       // Skip ridges wholly outside the window.
       let inside = false;
       for (let i = off[k]; i < off[k + 1] && !inside; i++) inside = pts[2 * i] >= x - w && pts[2 * i] <= x + vw + w;
       if (!inside) continue;
       const band = Math.min(SCROLL_BANDS - 1, Math.floor(SCROLL_BANDS * ages[k] / life));
-      d[band].push(pathData(pts, off[k], off[k + 1]));
+      const d = pathData(pts, off[k], off[k + 1]);
+      let key = `${band}${d}`;
+      if (ridges.has(key)) key += `#${k}`;
+      const path = this.ridges.get(key) ?? el('path', { d }, this.scrollBands[band]);
+      this.ridges.delete(key);
+      ridges.set(key, path);
     }
-    this.scrollLayer.setAttribute('stroke-width', (0.15 * w).toFixed(2));
-    this.scrollBands.forEach((path, b) => {
-      const age = (b + 0.5) / SCROLL_BANDS;
-      path.setAttribute('d', d[b].join(''));
-      path.setAttribute('stroke', mix(RIDGE, OLD_RIDGE, smoothstep(2 * age)));
-      path.setAttribute('stroke-opacity', (0.7 * (1 - smoothstep((age - 0.75) / 0.25))).toFixed(2));
-    });
+    for (const path of this.ridges.values()) path.remove();
+    this.ridges = ridges;
+    set(this.scrollLayer, 'stroke-width', (0.15 * w).toFixed(2));
   }
 
   // Draw each crevasse splay as a smooth lobe of sand with a few rills
   // from the breach. A new splay spreads out from the breach over
-  // `SPLAY_GROW` of simulated time; after that it is redrawn when the
-  // channel erodes it, and every `LEVEE_REFRESH` as it grasses over.
+  // `SPLAY_GROW` of simulated time, redrawn every `SPLAY_STEP`; after that
+  // it is redrawn when the channel erodes it, and every `LEVEE_REFRESH` as
+  // it grasses over.
   drawSplays(river, memory, w) {
     const t = river.time(), n = river.splay_count(), version = river.splay_version();
     const stride = river.splay_stride(), rays = (stride - 6) / 4;
+    const last = this.splayAt;
+    if (last && last.version === version && t >= last.t
+      && t - last.t < (t < last.growing ? SPLAY_STEP : LEVEE_REFRESH)) return;
     river.sync_splays();
     // Views must be built after syncing: it can grow memory.
     const data = new Float32Array(memory.buffer, river.splay_data_ptr(), stride * n);
-    let growing = false;
-    for (let k = 0; k < n; k++) growing ||= t - data[stride * k + 5] < SPLAY_GROW;
-    const last = this.splayAt;
-    if (!growing && last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return;
-    this.splayAt = { version, t };
+    // Time until which some splay is still growing.
+    let growing = -Infinity;
+    for (let k = 0; k < n; k++) growing = Math.max(growing, data[stride * k + 5] + SPLAY_GROW);
+    this.splayAt = { version, t, growing };
     const life = Math.max(1e-6, river.get_param('splay_lifetime'));
     this.splayLayer.replaceChildren();
     const f = (v) => v.toFixed(1);
@@ -683,7 +792,7 @@ class SvgRenderer {
 
   // Record the centreline without drawing, during warm-up.
   capture(river, memory, { local }) {
-    river.sync();
+    river.sync_line();
     const line = new Float32Array(memory.buffer, river.line_ptr(), river.line_len());
     this.record(line, river.time(), river.get_param('width'), local);
   }
@@ -691,7 +800,8 @@ class SvgRenderer {
   // Keep the visible part of the centreline as point-bar sand once it has
   // moved `BAR_STEP` widths from the last kept one, into the newest band.
   // A band spans `barMemory / BANDS` of simulated time, and is dropped once
-  // all its centrelines are older than `barMemory`.
+  // all its centrelines are older than `barMemory`. This only records the
+  // bands; `drawBars` puts them on the page.
   record(line, t, w, local) {
     const [x, vw] = this.window;
     const [x0, x1] = [x - w, x + vw + w];
@@ -710,32 +820,54 @@ class SvgRenderer {
     this.lastBar = new Grid(pts, w);
     let band = this.bands.at(-1);
     if (!band || t - band.t0 >= local.barMemory / BANDS) {
-      band = { t0: t, t1: t, d: '', path: el('path', {}, this.barLayer) };
+      // Path data still to be added to the page, and the band's group there.
+      band = { t0: t, t1: t, pending: [], g: null };
       this.bands.push(band);
     }
     band.t1 = t;
-    band.d += d;
-    band.path.setAttribute('d', band.d);
-    while (this.bands.length && t - this.bands[0].t1 > local.barMemory) this.bands.shift().path.remove();
-    this.shadeBars(t, w, local);
+    band.pending.push(d);
+    while (this.bands.length && t - this.bands[0].t1 > local.barMemory) this.dropped.push(this.bands.shift());
   }
 
-  // Shade each band by its age: bare sand when new, then grassed over and
-  // fading into the background as it nears `barMemory`. This runs only when
-  // a centreline is kept, so the ground layer stays cached in between.
-  shadeBars(t, w, local) {
-    this.barLayer.setAttribute('stroke-width', w);
+  // Bring the bands on the page up to date: add the centrelines kept since
+  // the last draw, move bands that have stopped growing to the bottom layer
+  // and remove dropped ones. Shade each band by its age: bare sand when
+  // new, then grassed over and fading into the background as it nears
+  // `barMemory`. The old bands are shaded only when the bottom layer
+  // changes anyway, or the bar settings do, so it stays cached in between.
+  drawBars(t, w, local) {
+    let changed = false;
+    for (const b of this.dropped) {
+      changed ||= b.g?.parentNode === this.oldBars;
+      b.g?.remove();
+    }
+    this.dropped = [];
+    const newest = this.bands.at(-1);
     for (const b of this.bands) {
+      const layer = b === newest ? this.barLayer : this.oldBars;
+      if (!b.g) b.g = el('g', {}, layer);
+      else if (b.g.parentNode !== layer) layer.append(b.g);
+      else if (!b.pending.length) continue;
+      changed ||= layer === this.oldBars;
+      for (const d of b.pending) el('path', { d }, b.g);
+      b.pending = [];
+    }
+    const key = `${w} ${local.barMemory} ${local.barOpacity}`;
+    if (key !== this.shadedFor) changed = true;
+    this.shadedFor = key;
+    set(this.oldBars, 'stroke-width', w);
+    set(this.barLayer, 'stroke-width', w);
+    for (const b of changed ? this.bands : this.bands.slice(-1)) {
       const fresh = clamp01(1 - (t - 0.5 * (b.t0 + b.t1)) / local.barMemory);
       const sand = mixRgb(OLD_BAR, BAR, fresh * fresh);
-      b.path.setAttribute('stroke', mix(SOIL.loam, sand, local.barOpacity * fresh));
+      set(b.g, 'stroke', mix(SOIL.loam, sand, local.barOpacity * fresh));
     }
   }
 
   // Serialise the current frame, both layers, as a standalone SVG file.
   save() {
     const copy = this.svg.cloneNode(true);
-    copy.prepend(...[...this.ground.childNodes].map((n) => n.cloneNode(true)));
+    copy.prepend(...[...this.bars.childNodes, ...this.ground.childNodes].map((n) => n.cloneNode(true)));
     copy.setAttribute('xmlns', NS);
     copy.removeAttribute('id');
     const blob = new Blob([new XMLSerializer().serializeToString(copy)], { type: 'image/svg+xml' });
@@ -748,7 +880,7 @@ class SvgRenderer {
 }
 
 const svg = document.getElementById('view');
-const renderer = new SvgRenderer(document.getElementById('ground'), svg);
+const renderer = new SvgRenderer(document.getElementById('bars'), document.getElementById('ground'), svg);
 document.getElementById('save').addEventListener('click', () => renderer.save());
 
 startApp({
