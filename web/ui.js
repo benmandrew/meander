@@ -52,6 +52,7 @@ const SIM_CONTROLS = [
   { group: 'Erodibility' },
   { key: 'heterogeneity', label: 'Heterogeneity', min: 0, max: 1, step: 0.05 },
   { key: 'clay_factor', label: 'Oxbow clay plugs (× E)', min: 0.05, max: 1, step: 0.05 },
+  { key: 'lake_factor', label: 'Open oxbow lakes (× E)', min: 1, max: 6, step: 0.25 },
 ];
 
 // `renderer` provides draw(river, memory, state), reset(river, bounds, seed),

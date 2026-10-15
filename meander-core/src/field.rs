@@ -1,5 +1,5 @@
-//! Spatially varying erodibility: smooth noise plus clay plugs left where
-//! oxbows fill in. The same noise, with a finer layer added, gives the
+//! Spatially varying erodibility: smooth noise, plus oxbow footprints that
+//! erode fast while open water and stiffen to clay plugs as they fill. The same noise, with a finer layer added, gives the
 //! height of the land.
 
 use crate::geom::P;
@@ -41,16 +41,29 @@ fn value_noise(seed: u64, x: f64, y: f64) -> f64 {
     top + (bottom - top) * sy
 }
 
+/// How erodibility changes over an oxbow footprint as the lake fills.
+pub struct Fill {
+    /// Current simulation time.
+    pub time: f64,
+    /// Time a lake takes to fill.
+    pub life: f64,
+    /// Multiplier when the lake is first cut off, as open water.
+    pub lake: f64,
+    /// Multiplier once the lake has filled, as a clay plug.
+    pub clay: f64,
+}
+
 /// Erodibility multiplier on a grid. Built from noise at reset; oxbow
-/// footprints are lowered to the clay factor as they are cut off.
+/// footprints are stamped with their cutoff time, and their multiplier moves
+/// from the lake factor to the clay factor as the lake fills.
 pub struct Erodibility {
     pub cell: f64,
     pub cols: usize,
     pub rows: usize,
     /// Noise in [0, 1], before the heterogeneity strength is applied.
     pub noise: Vec<f32>,
-    /// Whether each cell is an oxbow fill.
-    pub clay: Vec<bool>,
+    /// Time each cell was cut off as part of an oxbow, or infinity.
+    pub cut_at: Vec<f64>,
     seed: u64,
     scale: f64,
 }
@@ -67,7 +80,7 @@ impl Erodibility {
                 noise.push(fbm(seed, wx / scale, wy / scale, 4) as f32);
             }
         }
-        Self { cell, cols, rows, noise, clay: vec![false; cols * rows], seed, scale }
+        Self { cell, cols, rows, noise, cut_at: vec![f64::INFINITY; cols * rows], seed, scale }
     }
 
     fn index(&self, p: P) -> usize {
@@ -89,17 +102,24 @@ impl Erodibility {
         0.5 * fbm(self.seed, x, y, 4) + 0.5 * fbm(self.seed ^ HEIGHT_SEED, 4.0 * x, 4.0 * y, 3)
     }
 
-    /// Multiplier at `p`: noise of strength `hetero` around 1, times
-    /// `clay_factor` inside oxbow fills.
-    pub fn at(&self, p: P, hetero: f64, clay_factor: f64) -> f64 {
+    /// Multiplier at `p`: noise of strength `hetero` around 1, times the
+    /// fill factor inside oxbow footprints, which moves linearly from
+    /// `fill.lake` to `fill.clay` over `fill.life`.
+    pub fn at(&self, p: P, hetero: f64, fill: &Fill) -> f64 {
         let i = self.index(p);
         let n = 1.0 + hetero * 2.0 * (self.noise[i] as f64 - 0.5);
-        let c = if self.clay[i] { clay_factor } else { 1.0 };
+        let born = self.cut_at[i];
+        let c = if born.is_finite() {
+            let t = ((fill.time - born) / fill.life.max(1e-9)).clamp(0.0, 1.0);
+            fill.lake + (fill.clay - fill.lake) * t
+        } else {
+            1.0
+        };
         n.max(0.05) * c
     }
 
-    /// Mark cells within `radius` of the points as clay.
-    pub fn stamp_clay(&mut self, pts: &[P], radius: f64) {
+    /// Mark cells within `radius` of the points as cut off at `time`.
+    pub fn stamp_oxbow(&mut self, pts: &[P], radius: f64, time: f64) {
         let c = self.cell;
         let r2 = radius * radius;
         for p in pts {
@@ -112,7 +132,7 @@ impl Erodibility {
                 for x in x0..=x1 {
                     let dx = (x as f64 + 0.5) * c - p[0];
                     if dx * dx + dy * dy <= r2 {
-                        self.clay[y * self.cols + x] = true;
+                        self.cut_at[y * self.cols + x] = time;
                     }
                 }
             }
@@ -145,10 +165,15 @@ mod tests {
     }
 
     #[test]
-    fn clay_lowers_erodibility() {
+    fn oxbow_erodes_fast_then_stiffens_to_clay() {
         let mut e = Erodibility::new([10.0, 10.0], 1.0, 5.0, 0);
-        assert_eq!(e.at([5.0, 5.0], 0.0, 0.3), 1.0);
-        e.stamp_clay(&[[5.0, 5.0]], 1.0);
-        assert!((e.at([5.0, 5.0], 0.0, 0.3) - 0.3).abs() < 1e-12);
+        let at = |e: &Erodibility, time| e.at([5.0, 5.0], 0.0, &Fill { time, life: 100.0, lake: 3.0, clay: 0.3 });
+        assert_eq!(at(&e, 10.0), 1.0);
+        e.stamp_oxbow(&[[5.0, 5.0]], 1.0, 10.0);
+        assert!((at(&e, 10.0) - 3.0).abs() < 1e-12);
+        assert!((at(&e, 60.0) - 1.65).abs() < 1e-12);
+        assert!((at(&e, 110.0) - 0.3).abs() < 1e-12);
+        assert!((at(&e, 1000.0) - 0.3).abs() < 1e-12);
+        assert_eq!(e.at([1.0, 1.0], 0.0, &Fill { time: 10.0, life: 100.0, lake: 3.0, clay: 0.3 }), 1.0);
     }
 }

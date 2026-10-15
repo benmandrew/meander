@@ -11,7 +11,7 @@ pub mod ips;
 pub mod rng;
 
 use geom::{P, curvature, dist, resample, right_normal};
-use field::Erodibility;
+use field::{Erodibility, Fill};
 use rng::Rng;
 
 /// Point spacing as a fraction of the channel width.
@@ -71,6 +71,10 @@ pub struct Params {
     pub heterogeneity: f64,
     /// Erodibility multiplier inside filled oxbows (clay plugs); 1 disables.
     pub clay_factor: f64,
+    /// Erodibility multiplier inside an oxbow lake when it is cut off. The
+    /// bank breaks through quickly into open water, and the multiplier moves
+    /// to `clay_factor` as the lake fills over `oxbow_lifetime`.
+    pub lake_factor: f64,
     /// Expected floods per unit time. A flood can breach necks wider than
     /// `cutoff_dist` and cut chutes across point bars. 0 disables floods.
     pub flood_rate: f64,
@@ -119,6 +123,7 @@ impl Default for Params {
             pinch_length: 20.0,
             heterogeneity: 0.5,
             clay_factor: 0.35,
+            lake_factor: 3.0,
             flood_rate: FLOOD_RATE,
             breach_dist: BREACH_DIST,
             chute_ratio: CHUTE_RATIO,
@@ -155,6 +160,7 @@ impl Params {
         "pinch_length",
         "heterogeneity",
         "clay_factor",
+        "lake_factor",
         "flood_rate",
         "breach_dist",
         "chute_ratio",
@@ -187,6 +193,7 @@ impl Params {
             "pinch_length" => &mut self.pinch_length,
             "heterogeneity" => &mut self.heterogeneity,
             "clay_factor" => &mut self.clay_factor,
+            "lake_factor" => &mut self.lake_factor,
             "flood_rate" => &mut self.flood_rate,
             "breach_dist" => &mut self.breach_dist,
             "chute_ratio" => &mut self.chute_ratio,
@@ -492,6 +499,7 @@ impl Sim {
         let n = pts.len();
         let scale = p.dt * p.erodibility * p.width;
         let limit = p.max_step * SPACING * p.width;
+        let fill = Fill { time: self.time, life: p.oxbow_lifetime, lake: p.lake_factor, clay: p.clay_factor };
 
         // Noise smoothed along the river by a forward and a backward
         // exponential filter, with correlation length `jitter_scale`, then
@@ -526,7 +534,7 @@ impl Sim {
                 p.pinch_length * p.width,
             );
             let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width, valley)
-                * self.erodibility.at(pts[i], p.heterogeneity, p.clay_factor);
+                * self.erodibility.at(pts[i], p.heterogeneity, &fill);
             // Positive rate moves toward the outside of a left bend, i.e. to
             // the right, so bends grow.
             let d = (e * (scale * self.rate[i] + self.noise[i])).clamp(-limit, limit);
@@ -752,7 +760,7 @@ impl Sim {
         let loop_pts = self.centerline[i..=j].to_vec();
         let mid = geom::lerp(self.centerline[i], self.centerline[j], 0.5);
         self.centerline.drain(i + 1..j);
-        self.erodibility.stamp_clay(&loop_pts, 0.5 * self.params.width);
+        self.erodibility.stamp_oxbow(&loop_pts, 0.5 * self.params.width, self.time);
         let length = geom::length(&loop_pts);
         self.oxbows.push(Oxbow { points: loop_pts, born: self.time, length, offset: 0.0 });
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));
