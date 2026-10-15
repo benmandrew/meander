@@ -8,7 +8,7 @@ The frontend is SVG only (`web/index.html`, `web/main.js` for drawing, `web/ui.j
 
 - [x] Core: resample, Menger curvature, Howard–Knutson kernel (option 8), migration, smoothing, hashed-grid neck cutoffs with a spatial cooldown.
 - [x] Validation tests: sine grows and drifts downstream; local-only kernel does not drift; noise run cuts off, never self-intersects, and sinuosity stays bounded.
-- [x] SVG view: stroked channel and oxbow paths (options 1 and 2), flow dashes, faded past centrelines tracing the meander belt, Save SVG.
+- [x] SVG view: stroked channel and oxbow paths (options 1 and 2), faded past centrelines tracing the meander belt, Save SVG.
 - [x] Heterogeneous erodibility (option 9): fBm noise field, and oxbow footprints become clay plugs.
 - [ ] Stochastic cutoffs (option 10).
 - [ ] Ikeda–Parker–Sawai coefficients from physical inputs (option 11).

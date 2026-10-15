@@ -46,7 +46,7 @@ export async function startApp({ view, renderer, display }) {
   const wasm = await init();
   const controls = [...SIM_CONTROLS, { group: 'Display' }, ...display];
   const local = {};
-  const state = { bounds: [1, 1], local, clock: 0 };
+  const state = { bounds: [1, 1], local };
   const river = new River();
   let running = true;
   let frameMs = 0;
@@ -137,7 +137,6 @@ export async function startApp({ view, renderer, display }) {
       if (n > 0) owed -= dt * river.advance(n * dt);
       frameMs = 0.9 * frameMs + 0.1 * (performance.now() - t0);
     }
-    state.clock = now / 1000;
     renderer.draw(river, wasm.memory, state);
     $('stats').textContent =
       `t ${river.time().toFixed(1)}   sinuosity ${river.sinuosity().toFixed(2)}\n` +

@@ -38,7 +38,6 @@ class SvgRenderer {
     this.oxbowLayer = el('g', round, svg);
     this.bank = el('path', { ...round, stroke: '#b8a678' }, svg);
     this.water = el('path', { ...round, stroke: `rgb(${WATER})` }, svg);
-    this.sheen = el('path', { ...round, stroke: '#cfe3ea', 'stroke-opacity': 0.55 }, svg);
     this.oxbows = [];
     this.history = [];
     this.lastCapture = 0;
@@ -56,7 +55,7 @@ class SvgRenderer {
     this.lastCapture = -Infinity;
   }
 
-  draw(river, memory, { local, clock }) {
+  draw(river, memory, { local }) {
     river.sync();
     // Views must be rebuilt after every step: memory growth detaches them.
     const buf = memory.buffer;
@@ -88,12 +87,6 @@ class SvgRenderer {
     this.bank.setAttribute('stroke-width', w * 1.3);
     this.water.setAttribute('d', d);
     this.water.setAttribute('stroke-width', w);
-    // Dashes along the centreline, shifted downstream over time.
-    this.sheen.style.display = local.flow > 0 ? '' : 'none';
-    this.sheen.setAttribute('d', d);
-    this.sheen.setAttribute('stroke-width', w * 0.18);
-    this.sheen.setAttribute('stroke-dasharray', `${w * 0.6} ${w * 2.4}`);
-    this.sheen.setAttribute('stroke-dashoffset', (-clock * local.flow * w * 3).toFixed(1));
   }
 
   // Record the centreline without drawing, during warm-up.
@@ -136,7 +129,6 @@ startApp({
   view: svg,
   renderer,
   display: [
-    { key: 'flow', label: 'Flow dash speed', min: 0, max: 3, step: 0.1, local: 1 },
     { key: 'oxbowShrink', label: 'Oxbow narrowing', min: 0, max: 0.95, step: 0.05, local: 0.6 },
     { key: 'historyEvery', label: 'History interval (sim time)', min: 2, max: 200, step: 2, local: 20 },
     { key: 'historyLength', label: 'History length (paths)', min: 1, max: 200, step: 1, local: 60 },
