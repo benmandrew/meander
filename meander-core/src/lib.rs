@@ -231,6 +231,10 @@ impl Params {
 pub struct Oxbow {
     pub points: Vec<P>,
     pub born: f64,
+    /// Arc length when the oxbow was cut off. Pieces split from it keep
+    /// it, so the drawn lake plugs at a rate that does not jump when the
+    /// channel trims the oxbow.
+    pub length: f64,
 }
 
 pub struct Sim {
@@ -726,7 +730,7 @@ impl Sim {
             for k in 0..=hit.len() {
                 if k == hit.len() || hit[k] {
                     if k - start >= MIN_OXBOW_POINTS {
-                        kept.push(Oxbow { points: o.points[start..k].to_vec(), born: o.born });
+                        kept.push(Oxbow { points: o.points[start..k].to_vec(), ..o });
                     }
                     start = k + 1;
                 }
@@ -742,7 +746,8 @@ impl Sim {
         let mid = geom::lerp(self.centerline[i], self.centerline[j], 0.5);
         self.centerline.drain(i + 1..j);
         self.erodibility.stamp_clay(&loop_pts, 0.5 * self.params.width);
-        self.oxbows.push(Oxbow { points: loop_pts, born: self.time });
+        let length = geom::length(&loop_pts);
+        self.oxbows.push(Oxbow { points: loop_pts, born: self.time, length });
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));
         self.cutoffs += 1;
     }
@@ -913,8 +918,8 @@ mod tests {
         // A vertical oxbow across the channel, and one well clear of it.
         let across: Vec<P> = (-20..=20).map(|k| [100.0 * w, mid + 0.5 * k as f64 * w]).collect();
         let clear: Vec<P> = (0..20).map(|k| [(150 + k) as f64 * w, mid + 20.0 * w]).collect();
-        sim.oxbows.push(Oxbow { points: across, born: 0.0 });
-        sim.oxbows.push(Oxbow { points: clear.clone(), born: 0.0 });
+        sim.oxbows.push(Oxbow { points: across, born: 0.0, length: 20.0 * w });
+        sim.oxbows.push(Oxbow { points: clear.clone(), born: 0.0, length: 9.5 * w });
         sim.step();
         assert_eq!(sim.oxbows.len(), 3, "the crossed oxbow splits in two");
         assert_eq!(sim.oxbows[2].points, clear);

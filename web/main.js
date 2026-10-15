@@ -27,6 +27,10 @@ const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
 // Point bars are kept in this many age bands, each one path element.
 const BANDS = 24;
+// Points on each rounded end of a lake.
+const CAP_STEPS = 8;
+// Fraction of its length a lake loses from each end over its lifetime.
+const PLUG = 0.4;
 // A centreline is kept once some part of it has moved this many widths from
 // the last kept one, so the swept area has no gaps.
 const BAR_STEP = 0.5;
@@ -100,41 +104,55 @@ function blobData(rand, cx, cy, rx, ry) {
   return d + 'Z';
 }
 
-// Outline of an oxbow lake from points [start, end) of a flat x, y array.
-// With `age` in [0, 1], plugs grow in from both ends, so the lake shortens
-// and tapers to a crescent, and it narrows by `shrink` as it fills.
-function lakeData(pts, start, end, w, age, shrink) {
+// Outline of an oxbow lake of half-width `hw` along points [start, end) of a
+// flat x, y array, with `trim` taken off each end by the plugs. Each end is
+// half an ellipse sampled by angle, so it stays round wherever the trim
+// falls between points: a round cap when young, lengthening with `age` in
+// [0, 1] to a crescent tip.
+function lakeData(pts, start, end, trim, hw, age) {
   const m = end - start;
-  if (m < 2) return '';
-  const s = new Float64Array(m);
+  if (m < 2 || hw <= 0) return '';
+  const s = new Float64Array(m), tx = new Float64Array(m), ty = new Float64Array(m);
   for (let k = 1; k < m; k++) {
     const i = 2 * (start + k);
     s[k] = s[k - 1] + Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
   }
-  const len = s[m - 1];
-  const trim = 0.4 * age * len;
-  const half = 0.5 * len - trim;
-  const hw = 0.5 * w * (1 - shrink * age);
-  if (half < 0.25 * w || hw <= 0) return '';
-  const taper = Math.min(w * (0.5 + 4 * age), half);
-  const left = [], right = [];
+  const [a, b] = [trim, s[m - 1] - trim];
+  if (b <= a) return '';
+  // Unit tangents at the points, by central differences.
   for (let k = 0; k < m; k++) {
-    const d = Math.min(s[k] - trim, len - trim - s[k]);
-    if (d < 0) continue;
-    // A quarter ellipse at each end: a round cap when young, a long
-    // crescent tip when old.
-    const t = Math.min(1, d / taper);
-    const h = hw * Math.sqrt(t * (2 - t));
-    const a = 2 * (start + Math.max(0, k - 1)), b = 2 * (start + Math.min(m - 1, k + 1));
-    const tx = pts[b] - pts[a], ty = pts[b + 1] - pts[a + 1];
-    const tl = Math.hypot(tx, ty) || 1;
-    const x = pts[2 * (start + k)], y = pts[2 * (start + k) + 1];
-    const nx = -ty / tl * h, ny = tx / tl * h;
-    left.push((x + nx).toFixed(1) + ' ' + (y + ny).toFixed(1));
-    right.push((x - nx).toFixed(1) + ' ' + (y - ny).toFixed(1));
+    const p = 2 * (start + Math.max(0, k - 1)), q = 2 * (start + Math.min(m - 1, k + 1));
+    const dx = pts[q] - pts[p], dy = pts[q + 1] - pts[p + 1];
+    const l = Math.hypot(dx, dy) || 1;
+    tx[k] = dx / l;
+    ty[k] = dy / l;
   }
-  if (left.length < 2) return '';
-  return 'M' + left.join('L') + 'L' + right.reverse().join('L') + 'Z';
+  const cap = Math.min(hw * (1 + 3 * age), 0.5 * (b - a));
+  const left = [], right = [];
+  let j = 0;
+  // Bank points at arc length `at`, `h` either side of the centreline, with
+  // the position and normal interpolated along the segment.
+  const add = (at, h) => {
+    while (j < m - 2 && s[j + 1] < at) j++;
+    const u = (at - s[j]) / (s[j + 1] - s[j] || 1);
+    const i = 2 * (start + j);
+    const x = pts[i] + (pts[i + 2] - pts[i]) * u, y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * u;
+    const nx = -(ty[j] + (ty[j + 1] - ty[j]) * u), ny = tx[j] + (tx[j + 1] - tx[j]) * u;
+    const f = h / (Math.hypot(nx, ny) || 1);
+    left.push((x + nx * f).toFixed(1) + ' ' + (y + ny * f).toFixed(1));
+    right.push((x - nx * f).toFixed(1) + ' ' + (y - ny * f).toFixed(1));
+  };
+  for (let q = 0; q <= CAP_STEPS; q++) {
+    const t = 0.5 * Math.PI * q / CAP_STEPS;
+    add(a + cap * (1 - Math.cos(t)), hw * Math.sin(t));
+  }
+  for (let k = 0; k < m; k++) if (s[k] > a + cap && s[k] < b - cap) add(s[k], hw);
+  for (let q = CAP_STEPS; q >= 0; q--) {
+    const t = 0.5 * Math.PI * q / CAP_STEPS;
+    add(b - cap * (1 - Math.cos(t)), hw * Math.sin(t));
+  }
+  // Both banks meet at the tips; keep each tip once.
+  return 'M' + left.join('L') + 'L' + right.reverse().slice(1, -1).join('L') + 'Z';
 }
 
 // Points of a flat x, y array with x in [x0, x1]: path data with one subpath
@@ -276,6 +294,7 @@ class SvgRenderer {
     const oxPts = new Float32Array(buf, river.oxbow_line_ptr(), river.oxbow_line_len());
     const oxOff = new Uint32Array(buf, river.oxbow_offsets_ptr(), n + 1);
     const oxAge = new Float32Array(buf, river.oxbow_ages_ptr(), n);
+    const oxLen = new Float32Array(buf, river.oxbow_lengths_ptr(), n);
     const w = river.get_param('width');
     const life = Math.max(1e-6, river.get_param('oxbow_lifetime'));
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
@@ -286,8 +305,11 @@ class SvgRenderer {
       this.barLayer.style.display = local.showBars ? '' : 'none';
     }
 
-    // Oxbows: a lake that plugs from the ends and turns murky, fading only
-    // over the last fifth of its life, then a marshy scar that fades out.
+    // Oxbows: a lake that plugs from the ends, narrows far more slowly from
+    // the banks and turns murky, fading only over the last fifth of its
+    // life, then a marshy scar that fades out. Both plugs and banks advance
+    // steadily with age. The reed fringe grows inwards, so it does not hide
+    // the narrowing.
     resize(this.scars, n, this.scarLayer);
     resize(this.lakes, n, this.lakeLayer);
     this.scarLayer.setAttribute('stroke-width', w);
@@ -301,10 +323,12 @@ class SvgRenderer {
         lake.setAttribute('d', '');
         continue;
       }
-      lake.setAttribute('d', lakeData(oxPts, oxOff[k], oxOff[k + 1], w, age, local.oxbowShrink));
+      const reeds = 0.1 * w + 0.15 * w * age;
+      const hw = 0.5 * w * (1 - local.oxbowShrink * age) - 0.5 * reeds;
+      lake.setAttribute('d', lakeData(oxPts, oxOff[k], oxOff[k + 1], PLUG * age * oxLen[k], hw, age));
       lake.setAttribute('fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
       lake.setAttribute('opacity', clamp01(5 * (1 - age)).toFixed(2));
-      lake.setAttribute('stroke-width', (0.1 * w + 0.15 * w * age).toFixed(2));
+      lake.setAttribute('stroke-width', reeds.toFixed(2));
     }
 
     this.bank.setAttribute('d', d);
