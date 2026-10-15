@@ -8,16 +8,18 @@ import init, { River } from './pkg/meander_wasm.js';
 const WORLD_H = 480;
 
 // Sliders with `local` set are page settings; the rest are simulation
-// parameters, read from and written to the WASM side by name.
+// parameters, read from and written to the WASM side by name. Toggles
+// without `local` are simulation flags, set as 0 or 1. Sliders marked
+// `derived` are computed by the simulation while the physics flag is on.
 const SIM_CONTROLS = [
   { group: 'Time' },
   { key: 'speed', label: 'Speed (sim time per second)', min: 0.5, max: 60, step: 0.5, local: 6 },
   { key: 'warmup', label: 'Warm-up on reset (sim time)', min: 0, max: 3000, step: 100, local: 1000 },
   { group: 'Dynamics' },
   { key: 'erodibility', label: 'Erodibility E', min: 0, max: 3, step: 0.05 },
-  { key: 'omega', label: 'Local weight Ω', min: -3, max: 1, step: 0.05 },
-  { key: 'gamma', label: 'Upstream weight Γ', min: 0, max: 5, step: 0.05 },
-  { key: 'alpha', label: 'Upstream decay α (per width)', min: 0.05, max: 2, step: 0.01 },
+  { key: 'omega', label: 'Local weight Ω', min: -3, max: 1, step: 0.05, derived: true },
+  { key: 'gamma', label: 'Upstream weight Γ', min: 0, max: 5, step: 0.05, derived: true },
+  { key: 'alpha', label: 'Upstream decay α (per width)', min: 0.05, max: 2, step: 0.01, derived: true },
   { key: 'peak_radius', label: 'Fastest bend radius (widths, 0 off)', min: 0, max: 6, step: 0.1 },
   { key: 'dt', label: 'Timestep dt', min: 0.01, max: 0.3, step: 0.01 },
   { key: 'smoothing', label: 'Smoothing k', min: 0, max: 0.25, step: 0.01 },
@@ -34,6 +36,12 @@ const SIM_CONTROLS = [
   { key: 'flood_rate', label: 'Floods per unit time (0 off)', min: 0, max: 0.2, step: 0.005 },
   { key: 'breach_dist', label: 'Widest neck breached (widths)', min: 1, max: 5, step: 0.1 },
   { key: 'chute_ratio', label: 'Chute arc / chord (0 off)', min: 0, max: 10, step: 0.5 },
+  { group: 'Physics (Ikeda–Parker–Sawai)' },
+  { key: 'physics', label: 'Derive Ω, Γ, α from hydraulics', toggle: true },
+  { key: 'friction', label: 'Friction coefficient Cf', min: 0.002, max: 0.03, step: 0.001 },
+  { key: 'aspect', label: 'Width / depth', min: 5, max: 100, step: 1 },
+  { key: 'froude', label: 'Froude number', min: 0.05, max: 0.9, step: 0.05 },
+  { key: 'scour', label: 'Scour factor A', min: 1, max: 6, step: 0.1 },
   { group: 'Noise' },
   { key: 'jitter', label: 'Jitter', min: 0, max: 0.3, step: 0.01 },
   { key: 'jitter_scale', label: 'Jitter length (widths)', min: 0.5, max: 10, step: 0.5 },
@@ -66,12 +74,28 @@ export async function startApp({ view, renderer, display }) {
     state.bounds = [WORLD_H * r.width / r.height, WORLD_H];
     const seed = Number($('seed').value) >>> 0;
     for (const s of controls) {
-      if (s.key && !s.toggle && s.local === undefined) river.set_param(s.key, Number(s.input.value));
+      if (!s.key || s.local !== undefined) continue;
+      river.set_param(s.key, s.toggle ? Number(s.box.checked) : Number(s.input.value));
     }
     river.reset(...state.bounds, seed, local.noise, 0);
+    refresh();
     owed = 0;
     warming = local.warmup;
     renderer.reset(river, state.bounds);
+  }
+
+  // Show the simulation's current parameter values, which differ from the
+  // sliders where the physics flag derives them.
+  function refresh() {
+    const physics = river.get_param('physics') !== 0;
+    for (const s of controls) {
+      if (!s.input || s.local !== undefined) continue;
+      const v = river.get_param(s.key);
+      s.input.value = v;
+      s.out.textContent = String(+v.toFixed(3));
+      s.input.disabled = Boolean(s.derived && physics);
+      s.input.parentElement.classList.toggle('derived', s.input.disabled);
+    }
   }
 
   function buildControls() {
@@ -88,10 +112,18 @@ export async function startApp({ view, renderer, display }) {
         const row = document.createElement('label');
         row.className = 'toggle';
         row.innerHTML = `<input type="checkbox"> ${s.label}`;
-        const box = row.querySelector('input');
-        box.checked = s.local;
-        local[s.key] = s.local;
-        box.addEventListener('change', () => { local[s.key] = box.checked; });
+        const box = s.box = row.querySelector('input');
+        if (s.local !== undefined) {
+          box.checked = s.local;
+          local[s.key] = s.local;
+          box.addEventListener('change', () => { local[s.key] = box.checked; });
+        } else {
+          box.checked = defaults.get_param(s.key) !== 0;
+          box.addEventListener('change', () => {
+            river.set_param(s.key, Number(box.checked));
+            refresh();
+          });
+        }
         root.append(row);
         continue;
       }
@@ -100,13 +132,13 @@ export async function startApp({ view, renderer, display }) {
       row.innerHTML = `<label for="p-${s.key}">${s.label}</label><output></output>
         <input id="p-${s.key}" type="range" min="${s.min}" max="${s.max}" step="${s.step}">`;
       s.input = row.querySelector('input');
-      const out = row.querySelector('output');
+      const out = s.out = row.querySelector('output');
       s.input.value = s.local ?? defaults.get_param(s.key);
       const apply = () => {
         const v = Number(s.input.value);
         out.textContent = String(+v.toFixed(3));
         if (s.local !== undefined) local[s.key] = v;
-        else river.set_param(s.key, v);
+        else if (river.set_param(s.key, v) && river.get_param('physics') !== 0) refresh();
       };
       s.input.addEventListener('input', apply);
       apply();

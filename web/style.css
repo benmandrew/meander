@@ -136,6 +136,8 @@ button:hover { border-color: var(--accent); }
 
 .slider label { color: var(--panel-fg); }
 
+.slider.derived { opacity: 0.5; }
+
 .slider output {
   font-variant-numeric: tabular-nums;
   color: var(--muted);

@@ -7,6 +7,7 @@
 
 pub mod field;
 pub mod geom;
+pub mod ips;
 pub mod rng;
 
 use geom::{P, curvature, dist, resample, right_normal};
@@ -72,6 +73,17 @@ pub struct Params {
     /// is at least `chute_ratio / u` times the chord, for chords up to
     /// [`CHUTE_CHORD`] widths. 0 disables chute cutoffs.
     pub chute_ratio: f64,
+    /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
+    /// with the Ikeda–Parker–Sawai model (see [`ips`]).
+    pub physics: bool,
+    /// Friction coefficient `C_f`.
+    pub friction: f64,
+    /// Width to depth ratio `w/H`.
+    pub aspect: f64,
+    /// Froude number `U/√(gH)`.
+    pub froude: f64,
+    /// Scour factor `A`: transverse bed slope per unit curvature.
+    pub scour: f64,
 }
 
 impl Default for Params {
@@ -98,6 +110,11 @@ impl Default for Params {
             flood_rate: FLOOD_RATE,
             breach_dist: BREACH_DIST,
             chute_ratio: CHUTE_RATIO,
+            physics: false,
+            friction: 0.01,
+            aspect: 30.0,
+            froude: 0.3,
+            scour: 2.89,
         }
     }
 }
@@ -126,6 +143,11 @@ impl Params {
         "flood_rate",
         "breach_dist",
         "chute_ratio",
+        "physics",
+        "friction",
+        "aspect",
+        "froude",
+        "scour",
     ];
 
     fn field(&mut self, name: &str) -> Option<&mut f64> {
@@ -150,30 +172,40 @@ impl Params {
             "flood_rate" => &mut self.flood_rate,
             "breach_dist" => &mut self.breach_dist,
             "chute_ratio" => &mut self.chute_ratio,
+            "friction" => &mut self.friction,
+            "aspect" => &mut self.aspect,
+            "froude" => &mut self.froude,
+            "scour" => &mut self.scour,
             _ => return None,
         })
     }
 
+    /// Flags read as 0 or 1.
     pub fn get(&self, name: &str) -> Option<f64> {
-        if name == "cutoff_min_sep" {
-            return Some(self.cutoff_min_sep as f64);
+        match name {
+            "cutoff_min_sep" => Some(self.cutoff_min_sep as f64),
+            "physics" => Some(if self.physics { 1.0 } else { 0.0 }),
+            _ => self.clone().field(name).map(|v| *v),
         }
-        self.clone().field(name).map(|v| *v)
     }
 
-    /// Set a parameter by name. Returns false for an unknown name.
+    /// Set a parameter by name; a flag is set by any non-zero value. With
+    /// `physics` on, `omega`, `gamma` and `alpha` are re-derived after every
+    /// set, so setting them directly has no effect. Returns false for an
+    /// unknown name.
     pub fn set(&mut self, name: &str, value: f64) -> bool {
-        if name == "cutoff_min_sep" {
-            self.cutoff_min_sep = value.max(2.0) as usize;
-            return true;
+        match name {
+            "cutoff_min_sep" => self.cutoff_min_sep = value.max(2.0) as usize,
+            "physics" => self.physics = value != 0.0,
+            _ => match self.field(name) {
+                Some(v) => *v = value,
+                None => return false,
+            },
         }
-        match self.field(name) {
-            Some(v) => {
-                *v = value;
-                true
-            }
-            None => false,
+        if self.physics {
+            (self.omega, self.gamma, self.alpha) = ips::coefficients(self.friction, self.aspect, self.froude, self.scour);
         }
+        true
     }
 }
 
@@ -751,5 +783,22 @@ mod tests {
             assert!(sim.flood_cutoffs >= 3, "only {} flood cutoffs", sim.flood_cutoffs);
             assert!(s_storm < s_calm, "floods should keep the river straighter");
         }
+    }
+
+    #[test]
+    fn physics_sets_the_kernel_weights() {
+        let mut p = Params::default();
+        let alpha = p.alpha;
+        p.set("friction", 0.02);
+        assert_eq!(p.alpha, alpha, "hand-tuned weights stay until physics is on");
+        p.set("physics", 1.0);
+        assert_eq!(p.get("physics"), Some(1.0));
+        assert_eq!(p.omega, -1.0);
+        assert!((p.gamma - 0.5 * (0.3f64.powi(2) + 2.89 + 3.0)).abs() < 1e-12);
+        assert!((p.alpha - 2.0 * 0.02 * 30.0).abs() < 1e-12);
+        p.set("gamma", 9.0);
+        assert!(p.gamma < 4.0, "derived weights override direct sets");
+        p.set("aspect", 10.0);
+        assert!((p.alpha - 0.4).abs() < 1e-12);
     }
 }
