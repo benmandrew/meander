@@ -2,7 +2,8 @@
 //! swept, which is loose point-bar sand until vegetation binds it, and oxbow
 //! footprints that erode fast while open water and stiffen to clay plugs as
 //! they fill. The same noise, with a finer layer added, gives the height of
-//! the land.
+//! the land. Floods lay overbank deposits on top, thickest beside the
+//! channel as natural levees, and a higher bank erodes more slowly.
 
 use crate::geom::P;
 
@@ -20,6 +21,10 @@ pub fn fbm(seed: u64, x: f64, y: f64, octaves: u32) -> f64 {
 
 /// Seed offset of the fine layer of [`Erodibility::height`].
 const HEIGHT_SEED: u64 = 0x4E1F_7A2B;
+
+/// Distance from the bank, in levee lengths, beyond which a flood lays no
+/// deposit; exp(−4) is under 2% of the deposit at the bank.
+const LEVEE_REACH: f64 = 4.0;
 
 fn lattice(seed: u64, x: i64, y: i64) -> f64 {
     let mut h = seed ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
@@ -78,6 +83,12 @@ pub struct Erodibility {
     pub cut_at: Vec<f64>,
     /// Time the channel last swept each cell, or minus infinity.
     pub swept_at: Vec<f64>,
+    /// Height of overbank deposits above fresh point-bar sand, in channel
+    /// depths. The channel resets it to 0 where it sweeps.
+    pub deposit: Vec<f32>,
+    /// Scratch: squared distance from each cell to the channel during a
+    /// flood.
+    near: Vec<f32>,
     seed: u64,
     scale: f64,
 }
@@ -102,6 +113,8 @@ impl Erodibility {
             noise,
             cut_at: vec![f64::INFINITY; cells],
             swept_at: vec![f64::NEG_INFINITY; cells],
+            deposit: vec![0.0; cells],
+            near: Vec::new(),
             seed,
             scale,
         }
@@ -129,7 +142,10 @@ impl Erodibility {
     /// Multiplier at `p`: noise of strength `g.heterogeneity` around 1,
     /// times a factor for the ground's history. Inside an oxbow footprint it
     /// moves linearly from `g.lake` to `g.clay` over `g.lake_life`; on a
-    /// point bar, from `g.bar` to 1 over `g.vegetation`.
+    /// point bar, from `g.bar` to 1 over `g.vegetation`. A bank raised by
+    /// overbank deposits of height h, in channel depths, holds 1 + h times
+    /// the material of a bank at bar level, so it erodes 1 / (1 + h) as
+    /// fast.
     pub fn at(&self, p: P, g: &Ground) -> f64 {
         let i = self.index(p);
         let n = 1.0 + g.heterogeneity * 2.0 * (self.noise[i] as f64 - 0.5);
@@ -144,7 +160,53 @@ impl Erodibility {
         } else {
             1.0
         };
-        n.max(0.05) * c
+        n.max(0.05) * c / (1.0 + (self.deposit[i] as f64).max(0.0))
+    }
+
+    /// Overbank deposit at `p`, in channel depths.
+    pub fn deposit_at(&self, p: P) -> f64 {
+        self.deposit[self.index(p)] as f64
+    }
+
+    /// Lay one flood's overbank deposit beside a channel of half-width
+    /// `half` along the points. A cell at distance d from the bank gains
+    /// `amount · exp(−d / length) · (1 − h / stage)`, so deposits thin away
+    /// from the channel into natural levees and stop growing as the ground
+    /// nears the flood level `stage`. Cells under the channel gain nothing.
+    pub fn flood(&mut self, pts: &[P], half: f64, amount: f64, length: f64, stage: f64) {
+        if amount <= 0.0 || length <= 0.0 || stage <= 0.0 {
+            return;
+        }
+        let c = self.cell;
+        let reach = half + LEVEE_REACH * length;
+        let r2 = (reach * reach) as f32;
+        self.near.clear();
+        self.near.resize(self.deposit.len(), f32::INFINITY);
+        for p in pts {
+            let x0 = ((p[0] - reach) / c).floor().max(0.0) as usize;
+            let y0 = ((p[1] - reach) / c).floor().max(0.0) as usize;
+            let x1 = (((p[0] + reach) / c) as usize).min(self.cols - 1);
+            let y1 = (((p[1] + reach) / c) as usize).min(self.rows - 1);
+            for y in y0..=y1 {
+                let dy = ((y as f64 + 0.5) * c - p[1]) as f32;
+                let row = y * self.cols;
+                for x in x0..=x1 {
+                    let dx = ((x as f64 + 0.5) * c - p[0]) as f32;
+                    let d2 = dx * dx + dy * dy;
+                    let n = &mut self.near[row + x];
+                    if d2 < *n && d2 < r2 {
+                        *n = d2;
+                    }
+                }
+            }
+        }
+        for (h, &d2) in self.deposit.iter_mut().zip(&self.near) {
+            let d = (d2 as f64).sqrt();
+            if d.is_finite() && d >= half {
+                let room = (1.0 - *h as f64 / stage).max(0.0);
+                *h += (amount * (-(d - half) / length).exp() * room) as f32;
+            }
+        }
     }
 
     /// Mark the cell under each point as swept by the channel at `time`. The
@@ -154,6 +216,7 @@ impl Erodibility {
             let i = self.index(p);
             self.swept_at[i] = time;
             self.cut_at[i] = f64::INFINITY;
+            self.deposit[i] = 0.0;
         }
     }
 
@@ -218,6 +281,26 @@ mod tests {
         assert!((at(&e, 110.0) - 0.3).abs() < 1e-12);
         assert!((at(&e, 1000.0) - 0.3).abs() < 1e-12);
         assert_eq!(e.at([1.0, 1.0], &ground(10.0)), 1.0);
+    }
+
+    #[test]
+    fn floods_build_levees_that_slow_erosion() {
+        let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
+        let channel: Vec<P> = (0..80).map(|k| [k as f64 * 0.5, 20.0]).collect();
+        let h = |e: &Erodibility, y: f64| e.deposit_at([20.0, y]);
+        e.flood(&channel, 1.0, 0.3, 2.0, 1.0);
+        assert_eq!(h(&e, 20.25), 0.0, "nothing settles under the channel");
+        assert!(h(&e, 21.25) > 0.25, "bank {}", h(&e, 21.25));
+        assert!(h(&e, 21.25) > 2.0 * h(&e, 23.25) && h(&e, 23.25) > 2.0 * h(&e, 25.25));
+        assert_eq!(h(&e, 38.0), 0.0, "beyond the reach");
+        for _ in 0..200 {
+            e.flood(&channel, 1.0, 0.3, 2.0, 1.0);
+        }
+        assert!(h(&e, 21.25) <= 1.0 && h(&e, 21.25) > 0.95, "levee {}", h(&e, 21.25));
+        let at = |e: &Erodibility, y| e.at([20.0, y], &ground(0.0));
+        assert!((at(&e, 21.25) - 1.0 / (1.0 + h(&e, 21.25))).abs() < 1e-9);
+        e.sweep(&[[20.0, 21.25]], 0.0);
+        assert_eq!(h(&e, 21.25), 0.0, "the channel clears the levee it crosses");
     }
 
     #[test]

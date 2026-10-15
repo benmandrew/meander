@@ -22,6 +22,12 @@ const SOIL = {
   sand: [226, 214, 166],
   gravel: [206, 204, 192],
 };
+// Silt of the natural levees that floods build beside the channel.
+const LEVEE = [216, 210, 166];
+// Levee contours, as fractions of the highest ground floods can build.
+const LEVEE_LEVELS = [0.3, 0.7];
+// Simulated time between levee redraws when no flood has come.
+const LEVEE_REFRESH = 10;
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -220,6 +226,78 @@ function lakeData(pts, heights, start, end, from, to, half, level, relief, age) 
   return path;
 }
 
+// Marching squares cases: for each set of corners above the level (top left
+// 8, top right 4, bottom right 2, bottom left 1), the cell edges each
+// contour segment joins, as T, R, B, L. Saddles 5 and 10 list the pairing
+// for a centre above the level, then for one below it.
+const CASES = [
+  [], ['LB'], ['BR'], ['LR'], ['TR'], [['LT', 'BR'], ['LB', 'TR']], ['TB'], ['LT'],
+  ['LT'], ['TB'], [['TR', 'LB'], ['LT', 'BR']], ['TR'], ['LR'], ['BR'], ['LB'], [],
+];
+
+// Region where a grid exceeds `level`, as path data for the even-odd fill
+// rule. `values` holds `cols` × `rows` cells of side `cell`, row by row; only
+// columns [c0, c1) are traced, and cells outside them count as below the
+// level, so every contour closes. The contours run through the cell centres,
+// placed by linear interpolation along the cell edges.
+function contourData(values, cols, rows, cell, c0, c1, level) {
+  // Corner grid over the cell centres, with a one-cell border below the level.
+  const W = c1 - c0 + 2, H = rows + 2;
+  const v = new Float32Array(W * H).fill(-level);
+  for (let j = 1; j <= rows; j++) {
+    for (let i = 1; i <= c1 - c0; i++) v[j * W + i] = values[(j - 1) * cols + c0 + i - 1];
+  }
+  // Edge ids: 2k is the edge from corner k rightwards, 2k + 1 downwards.
+  const edge = (i, j, side) => {
+    const k = j * W + i;
+    return side === 'T' ? 2 * k : side === 'B' ? 2 * (k + W) : side === 'L' ? 2 * k + 1 : 2 * (k + 1) + 1;
+  };
+  const point = (id) => {
+    const k = id >> 1, i = k % W, j = (k - i) / W;
+    const k2 = id & 1 ? k + W : k + 1;
+    const t = (level - v[k]) / (v[k2] - v[k]);
+    const [di, dj] = id & 1 ? [0, t] : [t, 0];
+    return ((c0 + i + di - 0.5) * cell).toFixed(1) + ' ' + ((j + dj - 0.5) * cell).toFixed(1);
+  };
+  // Segments as pairs of edge ids, and up to two segments at each edge.
+  const segs = [];
+  const at = new Int32Array(4 * W * H).fill(-1);
+  const link = (e, s) => { at[2 * e + (at[2 * e] < 0 ? 0 : 1)] = s; };
+  for (let j = 0; j < H - 1; j++) {
+    for (let i = 0; i < W - 1; i++) {
+      const tl = v[j * W + i], tr = v[j * W + i + 1], br = v[(j + 1) * W + i + 1], bl = v[(j + 1) * W + i];
+      const c = (tl > level) * 8 + (tr > level) * 4 + (br > level) * 2 + (bl > level);
+      let pairs = CASES[c];
+      if (c === 5 || c === 10) pairs = pairs[(tl + tr + br + bl) / 4 > level ? 0 : 1];
+      for (const [a, b] of pairs) {
+        const s = segs.length / 2;
+        const [ea, eb] = [edge(i, j, a), edge(i, j, b)];
+        segs.push(ea, eb);
+        link(ea, s);
+        link(eb, s);
+      }
+    }
+  }
+  // Chain the segments into closed loops.
+  const used = new Uint8Array(segs.length / 2);
+  let d = '';
+  for (let s0 = 0; s0 < used.length; s0++) {
+    if (used[s0]) continue;
+    const pts = [point(segs[2 * s0])];
+    let [s, e] = [s0, segs[2 * s0 + 1]];
+    while (s >= 0) {
+      used[s] = 1;
+      pts.push(point(e));
+      const next = at[2 * e] === s ? at[2 * e + 1] : at[2 * e];
+      if (next < 0 || used[next]) break;
+      s = next;
+      e = segs[2 * s] === e ? segs[2 * s + 1] : segs[2 * s];
+    }
+    if (pts.length > 3) d += 'M' + pts.join('L') + 'Z';
+  }
+  return d;
+}
+
 // Points of a flat x, y array with x in [x0, x1]: path data with one subpath
 // per run inside the range, and the points themselves.
 function cropped(line, x0, x1) {
@@ -291,6 +369,10 @@ class SvgRenderer {
     // fade to the background colour, and the translucent soil patches lie
     // over them.
     this.barLayer = el('g', round, ground);
+    // Natural levees: nested translucent silt regions, higher ground inside.
+    this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
+    this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
+    this.leveeAt = null;
     this.soilLayer = el('g', {}, ground);
     this.scarLayer = el('g', { ...round, stroke: MARSH }, svg);
     // The bank lies under the lakes, so a lake that meets the channel joins
@@ -316,6 +398,7 @@ class SvgRenderer {
     this.bands = [];
     this.lastBar = null;
     this.window = [x, w];
+    this.leveeAt = null;
     this.drawSoils(river, x, w, h, seed);
   }
 
@@ -370,9 +453,10 @@ class SvgRenderer {
     const d = pathData(line, 0, line.length / 2);
 
     this.record(line, river.time(), w, local);
-    if (this.barLayer.style.display !== (local.showBars ? '' : 'none')) {
-      this.barLayer.style.display = local.showBars ? '' : 'none';
+    for (const [layer, show] of [[this.barLayer, local.showBars], [this.leveeLayer, local.showLevees]]) {
+      if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
     }
+    if (local.showLevees) this.drawLevees(river, buf);
 
     // Oxbows: a lake that plugs from the ends, narrows far more slowly from
     // the banks and turns murky, fading only over the last fifth of its
@@ -412,6 +496,24 @@ class SvgRenderer {
     this.bank.setAttribute('stroke-width', w * 1.3);
     this.water.setAttribute('d', d);
     this.water.setAttribute('stroke-width', w);
+  }
+
+  // Contour the overbank deposits over the window after each flood, and
+  // every `LEVEE_REFRESH` of simulated time as the channel sweeps them away.
+  drawLevees(river, buf) {
+    const t = river.time(), floods = river.floods();
+    const last = this.leveeAt;
+    if (last && last.floods === floods && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    this.leveeAt = { floods, t };
+    const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
+    const deposit = new Float32Array(buf, river.deposit_ptr(), cols * rows);
+    const [x, vw] = this.window;
+    const c0 = Math.max(0, Math.floor(x / cell) - 1);
+    const c1 = Math.min(cols, Math.ceil((x + vw) / cell) + 1);
+    const top = river.get_param('levee_height');
+    LEVEE_LEVELS.forEach((f, k) => {
+      this.levees[k].setAttribute('d', top > 0 ? contourData(deposit, cols, rows, cell, c0, c1, f * top) : '');
+    });
   }
 
   // Record the centreline without drawing, during warm-up.
@@ -493,5 +595,6 @@ startApp({
     { key: 'barMemory', label: 'Point bar memory (sim time)', min: 50, max: 5000, step: 50, local: 600 },
     { key: 'barOpacity', label: 'Point bar strength', min: 0.1, max: 1, step: 0.05, local: 0.75 },
     { key: 'showBars', label: 'Show point bars (past centrelines)', toggle: true, local: true },
+    { key: 'showLevees', label: 'Show natural levees', toggle: true, local: true },
   ],
 });

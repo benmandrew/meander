@@ -92,6 +92,16 @@ pub struct Params {
     /// is at least `chute_ratio / u` times the chord, for chords up to
     /// [`CHUTE_CHORD`] widths. 0 disables chute cutoffs.
     pub chute_ratio: f64,
+    /// Overbank deposit a flood of magnitude 1 lays at the bank, in channel
+    /// depths, before it thins towards the flood level. 0 disables.
+    pub overbank: f64,
+    /// Distance over which overbank deposits thin by a factor of e away
+    /// from the bank, in channel widths.
+    pub levee_length: f64,
+    /// Flood level above fresh point-bar sand, in channel depths: the
+    /// highest ground overbank deposits can build. A bank raised by h
+    /// erodes 1 / (1 + h) as fast.
+    pub levee_height: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -135,6 +145,9 @@ impl Default for Params {
             flood_rate: FLOOD_RATE,
             breach_dist: BREACH_DIST,
             chute_ratio: CHUTE_RATIO,
+            overbank: OVERBANK,
+            levee_length: LEVEE_LENGTH,
+            levee_height: LEVEE_HEIGHT,
             physics: false,
             friction: 0.01,
             aspect: 30.0,
@@ -174,6 +187,9 @@ impl Params {
         "flood_rate",
         "breach_dist",
         "chute_ratio",
+        "overbank",
+        "levee_length",
+        "levee_height",
         "physics",
         "friction",
         "aspect",
@@ -209,6 +225,9 @@ impl Params {
             "flood_rate" => &mut self.flood_rate,
             "breach_dist" => &mut self.breach_dist,
             "chute_ratio" => &mut self.chute_ratio,
+            "overbank" => &mut self.overbank,
+            "levee_length" => &mut self.levee_length,
+            "levee_height" => &mut self.levee_height,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -331,7 +350,7 @@ const FIELD_CELL: f64 = 0.5;
 const BANK_READ: f64 = 0.75;
 
 /// Default point-bar parameters; see [`Params`].
-const BAR_FACTOR: f64 = 1.5;
+const BAR_FACTOR: f64 = 1.3;
 const VEGETATION_TIME: f64 = 100.0;
 
 /// Steps during which a cut suppresses further cutoffs around it.
@@ -341,6 +360,9 @@ const CUT_COOLDOWN: u64 = 100;
 const FLOOD_RATE: f64 = 0.02;
 const BREACH_DIST: f64 = 2.5;
 const CHUTE_RATIO: f64 = 4.0;
+const OVERBANK: f64 = 0.3;
+const LEVEE_LENGTH: f64 = 2.0;
+const LEVEE_HEIGHT: f64 = 0.25;
 
 /// Longest chute a flood can cut, in channel widths.
 pub const CHUTE_CHORD: f64 = 5.0;
@@ -470,6 +492,8 @@ impl Sim {
                 }
                 self.centerline = resample(&self.centerline, ds);
             }
+            let p = &self.params;
+            self.erodibility.flood(&self.centerline, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
         }
         self.erodibility.sweep(&self.centerline, self.time);
         self.time += self.params.dt;
@@ -569,11 +593,13 @@ impl Sim {
             );
             // Positive rate moves toward the outside of a left bend, i.e. to
             // the right, so bends grow.
-            let push = scale * self.rate[i] + self.noise[i];
-            let side = if push < 0.0 { -read } else { read };
+            // The bank is on the side the rate pushes towards. Choosing it
+            // by the jitter as well would damp outward and amplify inward
+            // noise wherever the banks differ, a net drift inwards.
+            let side = if self.rate[i] < 0.0 { -read } else { read };
             let bank = [pts[i][0] + side * nrm[0], pts[i][1] + side * nrm[1]];
             let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width, valley) * self.erodibility.at(bank, &ground);
-            let d = (e * push).clamp(-limit, limit);
+            let d = (e * (scale * self.rate[i] + self.noise[i])).clamp(-limit, limit);
             self.tmp[i][0] += d * nrm[0];
             self.tmp[i][1] += d * nrm[1];
         }
@@ -890,36 +916,49 @@ mod tests {
         assert!(max_sin < 6.0, "sinuosity reached {max_sin}");
     }
 
-    /// Mean sinuosity over the second half of a long run.
-    fn late_sinuosity(params: Params, seed: u64) -> (f64, Sim) {
+    /// Mean sinuosity over the second half of a long run, and the mean arc
+    /// length of the loops cut off over the whole run, in channel widths.
+    fn late_sinuosity(params: Params, seed: u64) -> (f64, f64, Sim) {
         let mut sim = Sim::new(params, [1200.0, 480.0], seed, 0.5);
-        let mut sum = 0.0;
+        let (mut sum, mut cut) = (0.0, Vec::new());
         for k in 0..300 {
+            let before = sim.time;
             sim.step_n(100);
             if k >= 150 {
                 sum += sim.sinuosity();
             }
+            // Pieces of one oxbow share its birth time and length.
+            for o in sim.oxbows.iter().filter(|o| o.born >= before) {
+                if !cut.contains(&(o.born, o.length)) {
+                    cut.push((o.born, o.length));
+                }
+            }
             assert!(!geom::self_intersects(&sim.centerline), "self-intersection at step {}", sim.steps);
         }
-        (sum / 150.0, sim)
+        let loop_w = cut.iter().map(|c| c.1).sum::<f64>() / cut.len().max(1) as f64 / sim.params.width;
+        (sum / 150.0, loop_w, sim)
     }
 
     #[test]
     fn floods_cut_off_earlier_and_never_self_intersect() {
-        // Loose point bars hold sinuosity down by as much as floods do, so
-        // they are off here to isolate the floods.
-        let calm = Params { flood_rate: 0.0, bar_factor: 1.0, ..Params::default() };
-        let stormy = Params { flood_rate: 0.1, chute_ratio: 3.0, bar_factor: 1.0, ..Params::default() };
+        // Loose point bars and overbank deposits change the planform, and
+        // deposits come only with floods, so both are off here to isolate
+        // the cutoffs. Sinuosity is reported but not compared: with bank
+        // reads by the rate's sign, floods no longer lower it on every seed.
+        let isolated = Params { bar_factor: 1.0, overbank: 0.0, ..Params::default() };
+        let calm = Params { flood_rate: 0.0, ..isolated.clone() };
+        let stormy = Params { flood_rate: 0.1, chute_ratio: 3.0, ..isolated };
         for seed in [3, 11] {
-            let (s_calm, calm_sim) = late_sinuosity(calm.clone(), seed);
-            let (s_storm, sim) = late_sinuosity(stormy.clone(), seed);
+            let (s_calm, l_calm, calm_sim) = late_sinuosity(calm.clone(), seed);
+            let (s_storm, l_storm, sim) = late_sinuosity(stormy.clone(), seed);
             eprintln!(
-                "seed {seed}: sinuosity {s_calm:.2} calm, {s_storm:.2} with {} floods and {} flood cutoffs of {}",
+                "seed {seed}: sinuosity {s_calm:.2} calm, {s_storm:.2} with {} floods and {} flood cutoffs of {}; \
+                 loops cut at {l_calm:.1} widths calm, {l_storm:.1} with floods",
                 sim.floods, sim.flood_cutoffs, sim.cutoffs
             );
             assert_eq!(calm_sim.flood_cutoffs, 0);
             assert!(sim.flood_cutoffs >= 3, "only {} flood cutoffs", sim.flood_cutoffs);
-            assert!(s_storm < s_calm, "floods should keep the river straighter");
+            assert!(l_storm < 0.85 * l_calm, "floods should cut loops off shorter");
         }
     }
 

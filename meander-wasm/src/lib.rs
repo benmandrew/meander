@@ -140,6 +140,23 @@ impl River {
         self.sim.oxbows.len()
     }
 
+    /// Overbank deposits on the erodibility grid, row by row, in channel
+    /// depths above fresh point-bar sand; `field_cols` × `field_rows` cells
+    /// of side `field_cell`. Rebuild the view after every step, like the
+    /// others.
+    pub fn deposit_ptr(&self) -> *const f32 {
+        self.sim.erodibility.deposit.as_ptr()
+    }
+    pub fn field_cols(&self) -> usize {
+        self.sim.erodibility.cols
+    }
+    pub fn field_rows(&self) -> usize {
+        self.sim.erodibility.rows
+    }
+    pub fn field_cell(&self) -> f64 {
+        self.sim.erodibility.cell
+    }
+
     /// Erodibility noise at a point, in [0, 1]; low values erode slowly.
     pub fn soil(&self, x: f64, y: f64) -> f64 {
         self.sim.erodibility.noise_at([x, y])
