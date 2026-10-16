@@ -1370,6 +1370,11 @@ mod tests {
         (sum / 150.0, loop_w, sim)
     }
 
+    /// Joins a test thread, re-raising its panic so the failure message survives.
+    fn join<T>(h: std::thread::ScopedJoinHandle<'_, T>) -> T {
+        h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+    }
+
     #[test]
     fn floods_cut_off_earlier_and_never_self_intersect() {
         // Loose point bars and overbank deposits change the planform, and
@@ -1379,42 +1384,60 @@ mod tests {
         let isolated = Params { bar_factor: 1.0, overbank: 0.0, ..Params::default() };
         let calm = Params { flood_rate: 0.0, ..isolated.clone() };
         let stormy = Params { flood_rate: 0.1, chute_ratio: 3.0, ..isolated };
-        for seed in [3, 11] {
-            let (s_calm, l_calm, calm_sim) = late_sinuosity(calm.clone(), seed);
-            let (s_storm, l_storm, sim) = late_sinuosity(stormy.clone(), seed);
-            eprintln!(
-                "seed {seed}: sinuosity {s_calm:.2} calm, {s_storm:.2} with {} floods and {} flood cutoffs of {}; \
-                 loops cut at {l_calm:.1} widths calm, {l_storm:.1} with floods",
-                sim.floods, sim.flood_cutoffs, sim.cutoffs
-            );
-            assert_eq!(calm_sim.flood_cutoffs, 0);
-            assert!(sim.flood_cutoffs >= 3, "only {} flood cutoffs", sim.flood_cutoffs);
-            assert!(l_storm < 0.9 * l_calm, "floods should cut loops off shorter");
-        }
+        // The four runs are independent, so each gets its own thread.
+        std::thread::scope(|s| {
+            let runs: Vec<_> = [3, 11]
+                .into_iter()
+                .map(|seed| {
+                    let (calm, stormy) = (calm.clone(), stormy.clone());
+                    (seed, s.spawn(move || late_sinuosity(calm, seed)), s.spawn(move || late_sinuosity(stormy, seed)))
+                })
+                .collect();
+            for (seed, calm, stormy) in runs {
+                let (s_calm, l_calm, calm_sim) = join(calm);
+                let (s_storm, l_storm, sim) = join(stormy);
+                eprintln!(
+                    "seed {seed}: sinuosity {s_calm:.2} calm, {s_storm:.2} with {} floods and {} flood cutoffs of {}; \
+                     loops cut at {l_calm:.1} widths calm, {l_storm:.1} with floods",
+                    sim.floods, sim.flood_cutoffs, sim.cutoffs
+                );
+                assert_eq!(calm_sim.flood_cutoffs, 0);
+                assert!(sim.flood_cutoffs >= 3, "only {} flood cutoffs", sim.flood_cutoffs);
+                assert!(l_storm < 0.9 * l_calm, "floods should cut loops off shorter");
+            }
+        });
     }
 
     #[test]
     fn pinches_hold_one_crossing_near_the_axis() {
         let w = Params::default().width;
         let (up, view) = (60.0 * w, 840.0);
-        for seed in [1, 2] {
-            let mut sim = Sim::new(Params::default(), [up + view + 20.0 * w, 480.0], seed, 0.5);
-            sim.pinches = vec![up, up + view];
-            for _ in 0..30 {
-                sim.step_n(1000);
-                for &px in &sim.pinches {
-                    let crossings: Vec<f64> = sim
-                        .centerline
-                        .windows(2)
-                        .filter(|s| (s[0][0] < px) != (s[1][0] < px))
-                        .map(|s| s[0][1])
-                        .collect();
-                    assert_eq!(crossings.len(), 1, "seed {seed}, step {}: crossings at x = {px}: {crossings:?}", sim.steps);
-                    let off = (crossings[0] - 240.0).abs();
-                    assert!(off < 0.5 * sim.params.pinch_width * w + w, "seed {seed}, step {}: crossing {off} off axis", sim.steps);
-                }
-            }
-        }
+        std::thread::scope(|s| {
+            let runs: Vec<_> = [1, 2]
+                .into_iter()
+                .map(|seed| {
+                    s.spawn(move || {
+                        let mut sim = Sim::new(Params::default(), [up + view + 20.0 * w, 480.0], seed, 0.5);
+                        sim.pinches = vec![up, up + view];
+                        for _ in 0..30 {
+                            sim.step_n(1000);
+                            for &px in &sim.pinches {
+                                let crossings: Vec<f64> = sim
+                                    .centerline
+                                    .windows(2)
+                                    .filter(|s| (s[0][0] < px) != (s[1][0] < px))
+                                    .map(|s| s[0][1])
+                                    .collect();
+                                assert_eq!(crossings.len(), 1, "seed {seed}, step {}: crossings at x = {px}: {crossings:?}", sim.steps);
+                                let off = (crossings[0] - 240.0).abs();
+                                assert!(off < 0.5 * sim.params.pinch_width * w + w, "seed {seed}, step {}: crossing {off} off axis", sim.steps);
+                            }
+                        }
+                    })
+                })
+                .collect();
+            runs.into_iter().for_each(join);
+        });
     }
 
     #[test]
