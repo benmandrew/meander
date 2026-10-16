@@ -10,11 +10,13 @@ pub mod geom;
 pub mod ips;
 pub mod land;
 pub mod rng;
+pub mod walls;
 
 use geom::{P, curvature, dist, resample, right_normal};
 use field::{Erodibility, Flood, Ground};
 use land::Land;
 use rng::Rng;
+use walls::Walls;
 
 /// Point spacing as a fraction of the channel width.
 pub const SPACING: f64 = 0.5;
@@ -88,7 +90,8 @@ pub struct Params {
     /// Correlation length of the jitter along the river, in channel widths.
     pub jitter_scale: f64,
     /// Width of the valley the river may migrate within, centred on the
-    /// domain, in channel widths. 0 allows the whole domain.
+    /// domain, in channel widths. 0 allows the whole domain. The walls
+    /// (see [`Sim::walls`]) wander outwards of it, never inwards.
     pub valley_width: f64,
     /// Width of the band along each domain edge over which erodibility
     /// tapers to zero, in channel widths.
@@ -445,6 +448,8 @@ pub struct Sim {
     pub bounds: P,
     /// Positions along x where the valley narrows to `pinch_width`.
     pub pinches: Vec<f64>,
+    /// The valley walls, drawn from the seed at each reset.
+    pub walls: Walls,
     pub centerline: Vec<P>,
     /// Local channel width at each centreline point, in multiples of
     /// [`Params::width`]. The outer bank retreats at the migration rate
@@ -506,28 +511,29 @@ fn smoothstep(t: f64) -> f64 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Valley width at `x`: `valley` (the whole domain height when 0), narrowing
-/// smoothly to `pinch` at each of `pinches` over `length` either side.
-fn valley_at(x: f64, height: f64, valley: f64, pinches: &[f64], pinch: f64, length: f64) -> f64 {
+/// Valley width at `x`, `valley` (the whole domain height when 0),
+/// narrowing smoothly to `pinch` at each of `pinches` over `length` either
+/// side, and the fraction of the way from `pinch` to the full width it has
+/// widened, which is 1 away from the pinches.
+fn valley_at(x: f64, height: f64, valley: f64, pinches: &[f64], pinch: f64, length: f64) -> (f64, f64) {
     let full = if valley > 0.0 { valley.min(height) } else { height };
     if pinch <= 0.0 || pinch >= full || length <= 0.0 {
-        return full;
+        return (full, 1.0);
     }
     let d = pinches.iter().fold(f64::INFINITY, |d, &px| d.min((x - px).abs()));
-    pinch + (full - pinch) * smoothstep(d / length)
+    let f = smoothstep(d / length);
+    (pinch + (full - pinch) * f, f)
 }
 
 /// Erodibility multiplier that falls smoothly from 1 to 0 within `margin` of
-/// the domain edges and of the valley walls, for a valley of width `valley`
-/// centred on the domain.
-fn edge_taper(p: P, bounds: P, margin: f64, valley: f64) -> f64 {
+/// the domain edges and of the valley floor's edges `floor`.
+fn edge_taper(p: P, bounds: P, margin: f64, floor: (f64, f64)) -> f64 {
     if margin <= 0.0 {
         return 1.0;
     }
     let ramp = |d: f64| smoothstep(d / margin);
-    let mid = 0.5 * bounds[1];
-    let y0 = (mid - 0.5 * valley).max(0.0);
-    let y1 = (mid + 0.5 * valley).min(bounds[1]);
+    let y0 = floor.0.max(0.0);
+    let y1 = floor.1.min(bounds[1]);
     ramp(p[0]) * ramp(bounds[0] - p[0]) * ramp(p[1] - y0) * ramp(y1 - p[1])
 }
 
@@ -694,6 +700,7 @@ impl Sim {
             params,
             bounds,
             pinches: Vec::new(),
+            walls: Walls::default(),
             centerline: Vec::new(),
             widths: Vec::new(),
             slope: Vec::new(),
@@ -756,6 +763,7 @@ impl Sim {
         self.centerline = pts;
         let w = self.params.width;
         self.erodibility = Erodibility::new(self.bounds, FIELD_CELL * w, NOISE_SCALE * w, seed);
+        self.walls = Walls::new(self.bounds[0] / w, seed);
         self.oxbows.clear();
         self.oxbow_version += 1;
         self.line_version += 1;
@@ -774,16 +782,32 @@ impl Sim {
         self.land.update(&self.erodibility, &self.centerline, &self.widths, &self.valley, &s);
     }
 
+    /// The valley floor's y range at `x`, between the feet of the walls,
+    /// narrowed at the pinches if `pinched`. The pinches keep bends off the
+    /// window edges and are not drawn, so the land reads the floor without
+    /// them. The walls' wander fades out at a pinch with the valley's width.
+    pub fn floor(&self, x: f64, pinched: bool) -> (f64, f64) {
+        let (p, h) = (&self.params, self.bounds[1]);
+        if p.valley_width <= 0.0 {
+            return (0.0, h);
+        }
+        let (width, f) = if pinched {
+            valley_at(x, h, p.valley_width * p.width, &self.pinches, p.pinch_width * p.width, p.pinch_length * p.width)
+        } else {
+            ((p.valley_width * p.width).min(h), 1.0)
+        };
+        let (mid, xw) = (0.5 * h, x / p.width);
+        let out = |side| f * p.width * self.walls.out(side, xw);
+        (mid - 0.5 * width - out(0), mid + 0.5 * width + out(1))
+    }
+
     /// Refresh the valley floor's y range at each erodibility grid column.
     fn read_valley(&mut self) {
-        let p = &self.params;
-        let (cell, mid) = (self.erodibility.cell, 0.5 * self.bounds[1]);
-        self.valley.clear();
-        for x in 0..self.erodibility.cols {
-            let wx = (x as f64 + 0.5) * cell;
-            let v = valley_at(wx, self.bounds[1], p.valley_width * p.width, &self.pinches, p.pinch_width * p.width, p.pinch_length * p.width);
-            self.valley.push((mid - 0.5 * v, mid + 0.5 * v));
-        }
+        let cell = self.erodibility.cell;
+        let mut valley = std::mem::take(&mut self.valley);
+        valley.clear();
+        valley.extend((0..self.erodibility.cols).map(|x| self.floor((x as f64 + 0.5) * cell, false)));
+        self.valley = valley;
     }
 
     fn land_settings(&self) -> land::Settings {
@@ -926,17 +950,10 @@ impl Sim {
     fn bank_erodibility(&self, i: usize, nrm: P, sign: f64, ground: &Ground) -> f64 {
         let p = &self.params;
         let q = self.centerline[i];
-        let valley = valley_at(
-            q[0],
-            self.bounds[1],
-            p.valley_width * p.width,
-            &self.pinches,
-            p.pinch_width * p.width,
-            p.pinch_length * p.width,
-        );
+        let floor = self.floor(q[0], true);
         let side = sign * (0.5 * self.widths[i] + BANK_BEYOND) * p.width;
         let bank = [q[0] + side * nrm[0], q[1] + side * nrm[1]];
-        edge_taper(bank, self.bounds, p.edge_margin * p.width, valley) * self.erodibility.at(bank, ground)
+        edge_taper(bank, self.bounds, p.edge_margin * p.width, floor) * self.erodibility.at(bank, ground)
     }
 
     /// Widen each bend by a flood of magnitude `u`, in proportion to its
@@ -2021,16 +2038,14 @@ mod tests {
         // as motion into it, so a reach that drifted there stayed straight.
         let mut sim = sine_sim(0.0, 40.0);
         let p = sim.params.clone();
-        let wall = 0.5 * (sim.bounds[1] + p.valley_width * p.width);
-        for q in &mut sim.centerline {
-            q[1] = wall - 2.0 * p.width;
-        }
+        let pts: Vec<P> = sim.centerline.iter().map(|q| [q[0], sim.floor(q[0], true).1 - 2.0 * p.width]).collect();
+        sim.centerline = pts;
         let (i, ground) = (sim.centerline.len() / 2, sim.ground());
         let nrm = right_normal(&sim.centerline, i);
         // The bank on the side `sign` of the normal, and its erodibility.
         let read = |sign: f64| (sim.centerline[i][1] + sign * nrm[1], sim.bank_erodibility(i, nrm, sign, &ground));
         let (toward, away) = if read(1.0).0 > read(-1.0).0 { (read(1.0).1, read(-1.0).1) } else { (read(-1.0).1, read(1.0).1) };
-        let here = edge_taper(sim.centerline[i], sim.bounds, p.edge_margin * p.width, p.valley_width * p.width);
+        let here = edge_taper(sim.centerline[i], sim.bounds, p.edge_margin * p.width, sim.floor(sim.centerline[i][0], true));
         assert!(away > here && here > toward, "away {away}, at the centreline {here}, toward {toward}");
     }
 

@@ -38,17 +38,28 @@ const LEVEE = [216, 210, 166];
 const LEVEE_LEVELS = [0.3, 0.7];
 // Simulated time between levee redraws when no flood has come.
 const LEVEE_REFRESH = 10;
-// Older, higher ground beyond the valley walls, which the river cannot
-// reach, and the darker scarp at its edge, `SCARP` widths wide. The upland
-// is translucent, so the soil patches under it still show. The wall
-// wanders up to `WALL_WANDER` widths outwards from the valley edge, as
-// seeded value noise with knots every `WALL_KNOTS` widths, and never
-// inwards, where the channel may be.
-const UPLAND = [164, 164, 118];
-const SCARP_SHADE = [128, 128, 88];
-const SCARP = 1.5;
-const WALL_WANDER = 4;
-const WALL_KNOTS = [30, 8];
+// Valley sides. Each wall is a scarp from its foot, where the floodplain
+// ends, up to its brow, where the older upland begins. The core sets the
+// foot, with the combes cut back into it (see `walls.rs`). The scarp is
+// `SCARP` widths wide, varying with its own noise, and at a combe the brow
+// cuts back `COMBE_BROW` times as deep and wide as the foot, so the
+// contours bend into a V.
+// Relief is drawn as on old survey maps: hachures run down the slope over
+// the fields, in two staggered rows `HACHURE_GAP` widths apart, heavier
+// where the slope is steeper. The light comes from the upper left, as for
+// the trees, so the wall at the top faces away from it and its hachures
+// are darker. Where `HANGER` noise passes its threshold, favoured on steep
+// stretches and in combes, the slope is a hanger wood in place of fields,
+// tapering at each end. The upland's drier soil tints the ground beyond
+// the foot, under its fields.
+const UPLAND = [190, 182, 132];
+const UPLAND_OPACITY = 0.3;
+const SCARP_SHADE = [96, 100, 66];
+const SCARP = [1.2, 4.5];
+const COMBE_BROW = 1.6;
+const HANGER = { knots: 14, threshold: 0.62 };
+const HACHURE_GAP = 0.45;
+const HACHURE_WIDTH = 0.11;
 // Vegetation on the floodplain, drawn as nested translucent regions that
 // darken with age: shrub once it binds a point bar after
 // `vegetation_time`, then young and mature forest at these fractions of
@@ -427,6 +438,21 @@ function clamp01(t) {
 function smoothstep(t) {
   t = clamp01(t);
   return t * t * (3 - 2 * t);
+}
+
+// Seeded value noise over [0, span], in [0, 1]: octaves with knots every
+// `lens[m]`, weighted 1 / (m + 1).
+function valueNoise(rand, span, lens) {
+  const octaves = lens.map((len) => Array.from({ length: Math.ceil(span / len) + 2 }, rand));
+  const total = lens.reduce((t, _, m) => t + 1 / (m + 1), 0);
+  return (x) => {
+    let u = 0;
+    lens.forEach((len, m) => {
+      const t = clamp01(x / span) * span / len, j = Math.floor(t), knots = octaves[m];
+      u += (knots[j] + (knots[j + 1] - knots[j]) * smoothstep(t - j)) / (m + 1);
+    });
+    return u / total;
+  };
 }
 
 // Seeded generator of uniform values in [0, 1) (mulberry32).
@@ -1022,6 +1048,8 @@ class SvgRenderer {
     this.forest = FOREST.flatMap(({ colour }) => Array.from(
       { length: FOREST_STEPS }, () => el('path', { fill: `rgb(${colour})` }, this.forestLayer)));
     this.forestAt = null;
+    // The upland's drier soil, under its fields.
+    this.uplandLayer = el('g', { fill: `rgb(${UPLAND})`, 'fill-opacity': UPLAND_OPACITY }, ground);
     // Fields lie over the forest, masked by the grassed ground: each fade
     // region is painted over the last in a lighter grey, so the mask
     // brightens towards the oldest ground with no seams between regions.
@@ -1030,6 +1058,8 @@ class SvgRenderer {
       const grey = Math.round(255 * (k + 1) / FIELD_FADE);
       return el('path', { 'fill-rule': 'evenodd', fill: `rgb(${grey},${grey},${grey})` }, mask);
     });
+    // No fields in the hanger woods on the valley sides.
+    this.scarpMask = el('path', { fill: 'black' }, mask);
     this.fieldLayer = el('g', { mask: 'url(#farmland)' }, ground);
     this.parcels = el('g', {}, this.fieldLayer);
     this.hedges = el('path', {
@@ -1040,6 +1070,11 @@ class SvgRenderer {
     // Whether each field drawn, by its key, is meadow.
     this.meadow = new Map();
     this.fieldsAt = null;
+    // The valley sides' hachures and hanger woods lie over the fields and
+    // under the trees, so the woods' crowns stand on them.
+    this.scarpLayer = el('g', {}, ground);
+    // Each wall's foot and brow, as distances from the window's rim.
+    this.wallLines = null;
     // 1 on each cell of the window's columns where a crown stands in a crop
     // field away from a hedge, and is not drawn on farmland.
     this.cropMask = null;
@@ -1073,8 +1108,6 @@ class SvgRenderer {
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
     this.leveeAt = null;
-    // The valley walls lie over the floodplain, which never reaches them.
-    this.walls = el('g', {}, ground);
     // Every clay plug the channel has not swept away keeps a faint marsh,
     // so old meander belts stay legible after their scars fade.
     this.plugMarsh = el('path', { fill: MARSH, 'fill-opacity': PLUG_MARSH, 'fill-rule': 'evenodd' }, ground);
@@ -1232,7 +1265,10 @@ class SvgRenderer {
       f.opacity = f.woods ? WOODS_OPACITY : (CROP_OPACITY * (0.8 + 0.4 * hash01(f.key, 9))).toFixed(2);
     }
     const mask = new Uint8Array(W * rows);
-    for (let n = 0; n < lab.length; n++) mask[n] = lab[n] > 0 && !fields[lab[n] - 1].woods;
+    for (let n = 0; n < lab.length; n++) {
+      mask[n] = lab[n] > 0 && !fields[lab[n] - 1].woods
+        && this.scarpAt((c0 + n % W + 0.5) * cell, (Math.floor(n / W) + 0.5) * cell) !== 2;
+    }
     // Trace, simplify and round each boundary once, so neighbouring fields
     // share it exactly.
     const arcs = boundaryArcs(lab, W, rows);
@@ -1297,45 +1333,130 @@ class SvgRenderer {
     return true;
   }
 
-  // Draw the upland beyond each valley wall over the window [x0, x0 + vw),
-  // with a scarp along the wall. The core narrows the valley at the window
-  // edges to keep bends off them; the walls are drawn at its full width, so
-  // that device does not show.
+  // Draw the valley sides over the window [x0, x0 + vw): the upland's tint
+  // under its fields, and on each wall the hachures and the hanger woods,
+  // with the mask that keeps fields out of the woods. The core narrows the
+  // valley at the window edges to keep bends off them; the walls are drawn
+  // at its full width, so that device does not show.
   drawWalls(river, x0, vw, h, seed) {
-    this.walls.replaceChildren();
+    this.uplandLayer.replaceChildren();
+    this.scarpLayer.replaceChildren();
+    this.wallLines = null;
+    set(this.scarpMask, 'd', '');
     const w = river.get_param('width'), valley = river.get_param('valley_width') * w;
     if (!(valley > 0 && valley < h)) return;
     const rand = random(seed ^ 0xba1e);
     const step = 0.5 * w, n = Math.ceil(vw / step) + 1;
+    const between = ([a, b], u) => a + (b - a) * u;
+    const combeData = river.wall_combes();
+    const sides = [];
+    let maskData = '';
     for (const side of [-1, 1]) {
-      const octaves = WALL_KNOTS.map((len) => Array.from({ length: Math.ceil(vw / (len * w)) + 2 }, rand));
-      // Distance of the wall from the top or bottom edge of the window.
-      const edge = new Float64Array(n);
-      for (let k = 0; k < n; k++) {
-        const x = Math.min(k * step, vw) / w;
-        let u = 0;
-        WALL_KNOTS.forEach((len, m) => {
-          const t = x / len, j = Math.floor(t), knots = octaves[m];
-          u += (knots[j] + (knots[j + 1] - knots[j]) * smoothstep(t - j)) / (m + 1);
-        });
-        edge[k] = 0.5 * (h - valley) - WALL_WANDER * w * u / 1.5;
+      const breadth = valueNoise(rand, vw, [12 * w, 4 * w]);
+      const hanger = valueNoise(rand, vw, [HANGER.knots * w, 4 * w]);
+      const combes = [];
+      for (let k = 0; k < combeData.length; k += 4) {
+        if (combeData[k] === (side < 0 ? 0 : 1)) combes.push({ x: combeData[k + 1], depth: combeData[k + 2], span: combeData[k + 3] });
       }
-      const at = (k, d) => {
-        const x = dp1(x0 + Math.min(k * step, vw));
-        return `${x} ${dp1(side < 0 ? d : h - d)}`;
-      };
-      const wall = Array.from(edge, (d, k) => at(k, d)).join(' ');
+      const deepest = combes.reduce((m, c) => Math.max(m, c.depth), w);
+      // Distances of the foot and brow from the window's top or bottom
+      // edge, and how far the slope is wooded.
+      const foot = new Float64Array(n), brow = new Float64Array(n), wood = new Float64Array(n);
+      for (let k = 0; k < n; k++) {
+        const x = x0 + Math.min(k * step, vw);
+        // Depth the combes cut back at x, with the profile of `combe_cut`.
+        const cut = (scale) => combes.reduce((m, c) => {
+          const t = Math.abs(x - c.x) / (scale * c.span);
+          return Math.max(m, scale * c.depth * (t < 1 ? (1 - t) ** 2 * (1 + 2 * t) : 0));
+        }, 0);
+        const at = river.wall_foot(side < 0 ? 0 : 1, x);
+        foot[k] = side < 0 ? at : h - at;
+        // The brow lies back from the foot with its combes filled in.
+        const edge = foot[k] + cut(1);
+        brow[k] = Math.min(foot[k] - 0.6 * SCARP[0] * w, edge - between(SCARP, breadth(x - x0)) * w - cut(COMBE_BROW));
+        // Woods favour the steeper stretches and the combes.
+        const steep = 1 - (foot[k] - brow[k]) / (SCARP[1] * w);
+        wood[k] = smoothstep((hanger(x - x0) + 0.3 * steep + 0.5 * cut(1) / deepest - HANGER.threshold) / 0.1);
+      }
+      // Edge of the wood at point k towards the foot (1) or brow (-1).
+      const woodEdge = (k, dir) => brow[k] + (0.5 + dir * 0.6 * wood[k]) * (foot[k] - brow[k]);
+      const lines = { side, foot, brow, wood, woodEdge };
+      sides.push(lines);
+      const y = (d) => dp1(side < 0 ? d : h - d);
+      const point = (k, d) => `${dp1(x0 + Math.min(k * step, vw))} ${y(d)}`;
+      const trace = (line, offset = 0) => Array.from(line, (d, k) => point(k, d + offset)).join(' ');
       const rim = side < 0 ? 0 : h;
-      el('path', {
-        d: `M${dp1(x0)} ${rim} L${wall} L${dp1(x0 + vw)} ${rim}Z`,
-        fill: `rgb(${UPLAND})`, 'fill-opacity': 0.8,
-      }, this.walls);
-      el('path', {
-        d: 'M' + Array.from(edge, (d, k) => at(k, d - 0.5 * SCARP * w)).join(' '),
-        fill: 'none', stroke: `rgb(${SCARP_SHADE})`, 'stroke-opacity': 0.45,
-        'stroke-width': SCARP * w, 'stroke-linejoin': 'round',
-      }, this.walls);
+      el('path', { d: `M${dp1(x0)} ${rim} L${trace(foot)} L${dp1(x0 + vw)} ${rim}Z` }, this.uplandLayer);
+      // Hanger woods, each tapering to a point at its ends, tinted like the
+      // woods among the fields, which they hide.
+      let woods = '';
+      for (let k = 0; k < n;) {
+        if (wood[k] <= 0) {
+          k++;
+          continue;
+        }
+        const k0 = Math.max(0, k - 1);
+        while (k < n && wood[k] > 0) k++;
+        const k1 = Math.min(n, k + 1);
+        let d = '';
+        for (let j = k0; j < k1; j++) d += `${j > k0 ? 'L' : 'M'}${point(j, woodEdge(j, 1))}`;
+        for (let j = k1 - 1; j >= k0; j--) d += `L${point(j, woodEdge(j, -1))}`;
+        woods += d + 'Z';
+      }
+      maskData += woods;
+      el('path', { d: woods, fill: `rgb(${FOREST.at(-1).colour})`, 'fill-opacity': WOODS_OPACITY }, this.scarpLayer);
+      const lit = side > 0;
+      // Hachures, sorted into three weights by steepness.
+      const strokes = [[], [], []];
+      const at = (line, x) => {
+        const t = Math.max(0, Math.min(n - 1, (x - x0) / step)), k = Math.min(n - 2, Math.floor(t));
+        return line[k] + (line[k + 1] - line[k]) * (t - k);
+      };
+      const frac = (x, d) => (d - at(brow, x)) / (at(foot, x) - at(brow, x));
+      const gap = HACHURE_GAP * w, e = 0.25 * w;
+      for (const row of [0, 1]) {
+        for (let x = x0 + (0.5 * row + rand() * 0.3) * gap; x < x0 + vw; x += gap * (0.85 + 0.3 * rand())) {
+          const s0 = 0.5 * row + 0.03 + 0.06 * rand(), s1 = 0.5 * row + 0.41 + 0.06 * rand();
+          let px = x, pd = at(brow, x) + s0 * (at(foot, x) - at(brow, x));
+          const pts = [px, pd];
+          for (let s = s0; s < s1; s += 0.08) {
+            const gx = (frac(px + e, pd) - frac(px - e, pd)) / (2 * e);
+            const gd = 1 / (at(foot, px) - at(brow, px));
+            const g2 = gx * gx + gd * gd;
+            px += 0.08 * gx / g2;
+            pd += 0.08 * gd / g2;
+            pts.push(px, pd);
+          }
+          const run = at(foot, x) - at(brow, x);
+          const weight = Math.min(2, Math.floor(3 * clamp01((SCARP[1] * w - run) / ((SCARP[1] - SCARP[0]) * w))));
+          let d = '';
+          for (let k = 0; k < pts.length; k += 2) d += `${k ? 'L' : 'M'}${dp1(pts[k])} ${y(pts[k + 1])}`;
+          strokes[weight].push(d);
+        }
+      }
+      strokes.forEach((list, k) => el('path', {
+        d: list.join(''), fill: 'none', 'stroke-linecap': 'round',
+        stroke: `rgb(${SCARP_SHADE})`,
+        'stroke-width': dp1(HACHURE_WIDTH * w * (0.6 + 0.4 * k)),
+        'stroke-opacity': lit ? 0.38 : 0.5,
+      }, this.scarpLayer));
     }
+    set(this.scarpMask, 'd', maskData);
+    this.wallLines = { x0, step, n, h, w, sides };
+  }
+
+  // 0 off the valley sides at world point (x, y), 1 on rough grass on
+  // them and 2 in a hanger wood.
+  scarpAt(x, y) {
+    const L = this.wallLines;
+    if (!L) return 0;
+    const k = Math.max(0, Math.min(L.n - 1, Math.round((x - L.x0) / L.step)));
+    for (const { side, foot, brow, wood, woodEdge } of L.sides) {
+      const d = side < 0 ? y : L.h - y;
+      if (wood[k] > 0 && d <= woodEdge(k, 1) && d >= woodEdge(k, -1)) return 2;
+      if (d <= foot[k] && d >= brow[k]) return 1;
+    }
+    return 0;
   }
 
   // Scatter soil patches over the window: broad patches whose type follows
