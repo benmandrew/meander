@@ -6,13 +6,20 @@
 <title>Meander</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
+<!-- Fetch the whole module chain and the WASM binary at once; otherwise each
+     waits for the file that imports it. The binary's preload matches the
+     fetch in pkg/meander_wasm.js, which needs crossorigin to reuse it. -->
+<link rel="modulepreload" href="ui.js">
+<link rel="modulepreload" href="pkg/meander_wasm.js">
+<link rel="preload" href="pkg/meander_wasm_bg.wasm" as="fetch" type="application/wasm" crossorigin>
+<link rel="preload" href="fonts/iosevka-slab-extended-regular.woff2" as="font" type="font/woff2" crossorigin>
 </head>
 <body>
 <svg id="bars"></svg>
 <svg id="ground"></svg>
 <svg id="view"></svg>
 <div id="year"></div>
-<div id="overlay" hidden></div>
+<div id="overlay">Loading…</div>
 <aside id="panel" hidden>
   <header>
     <h1>Meander</h1>

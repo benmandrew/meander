@@ -32,7 +32,15 @@ const STATS_EVERY = 250;
 // drawing, and idle(river, memory, state), which is called on frames that
 // draw nothing, to carry on with drawing work spread over frames. `display` holds the renderer's own settings.
 export async function startApp({ view, renderer, display }) {
-  const wasm = await init();
+  // The overlay reads "Loading…" from the page itself until the warm-up
+  // takes it over.
+  let wasm;
+  try {
+    wasm = await init();
+  } catch (e) {
+    document.getElementById('overlay').textContent = 'Could not load the simulation.';
+    throw e;
+  }
   const local = { ...SETTINGS, ...display };
   const state = { bounds: [1, 1], local };
   const river = new River();
@@ -61,6 +69,7 @@ export async function startApp({ view, renderer, display }) {
     warming = local.warmup;
     epoch = river.time();
     dirty = true;
+    $('overlay').hidden = warming <= 0;
     renderer.reset(river, state.bounds, seed);
   }
 

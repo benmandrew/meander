@@ -70,7 +70,7 @@ The floodplain features come as `Vec<f32>` copies, which also allocate: `jams` (
 
 ## web (`web/`)
 
-Plain ES modules with no bundler. `ui.js` owns the control panel, the frame loop and the warm-up (spread across frames). The panel shows only the speed slider and the mean, p95 and p99 of the JS time of the last 600 frames. The frame loop draws only when a step was taken or a setting changed, and `set` skips attribute writes whose value has not changed.
+Plain ES modules with no bundler. `ui.js` owns the control panel, the frame loop and the warm-up (spread across frames). `index.html` preloads `ui.js`, the wasm-bindgen glue and the WASM binary, so they download alongside `main.js` and not one after another, and shows "Loading…" in the overlay until the warm-up takes it over. The panel shows only the speed slider and the mean, p95 and p99 of the JS time of the last 600 frames. The frame loop draws only when a step was taken or a setting changed, and `set` skips attribute writes whose value has not changed.
 
 `main.js` draws into three stacked SVGs: `#bars` holds the old point bars, `#ground` the floodplain, and `#view` the channel and lakes. The first two are compositing layers, so a moving channel does not repaint them. The floodplain layers refresh one a frame and take turns, so a redraw spread over frames does not hold the others back.
 
