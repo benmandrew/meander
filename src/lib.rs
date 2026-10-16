@@ -1320,18 +1320,23 @@ impl Sim {
         let g = self.build_grid(d_cut * self.max_width());
         let (pts, widths) = (&self.centerline, &self.widths);
 
-        // Smallest upstream index first, then the smallest loop from it.
+        // Smallest upstream index first, then the smallest loop from it. A
+        // recent cut nearby holds a neck back unless its banks have closed
+        // to half the cutoff distance, when it would otherwise cross.
         for i in 0..n {
-            let mut best: Option<usize> = None;
+            let (mut best, mut closing) = (None, false);
             self.for_neighbours_after(pts[i], g, i + k_sep, |j| {
                 let d = 0.5 * d_cut * (widths[i] + widths[j]);
-                if best.is_none_or(|b| j < b) && geom::dist2(pts[i], pts[j]) < d * d {
-                    best = Some(j);
+                let d2 = geom::dist2(pts[i], pts[j]);
+                if d2 < d * d {
+                    closing |= d2 < 0.25 * d * d;
+                    if best.is_none_or(|b| j < b) {
+                        best = Some(j);
+                    }
                 }
             });
             if let Some(j) = best
-                && !self.near_recent(pts[i])
-                && !self.near_recent(pts[j])
+                && (closing || (!self.near_recent(pts[i]) && !self.near_recent(pts[j])))
             {
                 self.apply_cut(i, j);
                 return true;
