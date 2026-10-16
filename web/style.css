@@ -42,6 +42,18 @@ html, body {
   will-change: transform;
 }
 
+#year {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  padding: 4px 10px;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  font: 13px/1.4 ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
 #overlay {
   position: fixed;
   inset: 0;

@@ -64,6 +64,11 @@ const SIM_CONTROLS = [
   { key: 'vegetation_time', label: 'Vegetation binds bars (sim time)', min: 10, max: 1000, step: 10 },
 ];
 
+// Years per unit of simulated time. At this scale the median bank migrates
+// about 1% of a channel width per year and the fastest 10% of the channel
+// 5% or more, within the range measured on real meandering rivers.
+const YEARS_PER_UNIT = 2.5;
+
 // `renderer` provides draw(river, memory, state), reset(river, bounds, seed),
 // and capture(river, memory, state), which is called during warm-up in place
 // of drawing. `display` lists extra page-specific controls.
@@ -79,6 +84,8 @@ export async function startApp({ view, renderer, display }) {
   let owed = 0;
   // Warm-up time still to run, spread over frames so the page stays live.
   let warming = 0;
+  // Simulated time at the end of the warm-up, shown as year 0.
+  let epoch = 0;
   // Whether the view needs redrawing although the river has not moved.
   let dirty = true;
   let lastFrame;
@@ -96,6 +103,7 @@ export async function startApp({ view, renderer, display }) {
     refresh();
     owed = 0;
     warming = local.warmup;
+    epoch = river.time();
     dirty = true;
     renderer.reset(river, state.bounds, seed);
   }
@@ -181,6 +189,7 @@ export async function startApp({ view, renderer, display }) {
         warming -= chunk;
         renderer.capture(river, wasm.memory, state);
       }
+      if (warming <= 0) epoch = river.time();
       $('overlay').hidden = warming <= 0;
       $('overlay').textContent = `Developing river… ${Math.round(100 * (1 - warming / local.warmup))}%`;
       requestAnimationFrame(frame);
@@ -205,6 +214,8 @@ export async function startApp({ view, renderer, display }) {
     }
     dirty = false;
     renderer.draw(river, wasm.memory, state);
+    const year = `Year ${Math.round((river.time() - epoch) * YEARS_PER_UNIT).toLocaleString('en-GB')}`;
+    if ($('year').textContent !== year) $('year').textContent = year;
     $('stats').textContent =
       `t ${river.time().toFixed(1)}   sinuosity ${river.sinuosity().toFixed(2)}\n` +
       `points ${river.point_count()}   cutoffs ${river.cutoffs()}   oxbows and scars ${river.oxbow_count()}\n` +
