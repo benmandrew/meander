@@ -1358,7 +1358,7 @@ impl Sim {
         if self.oxbows.len() != before {
             self.oxbow_version += 1;
         }
-        if self.steps % SCROLL_REWORK_EVERY == 0 {
+        if self.steps.is_multiple_of(SCROLL_REWORK_EVERY) {
             self.rework_scrolls();
         }
         let steps = self.steps;
@@ -1703,10 +1703,10 @@ impl Sim {
         // A weir holds its points against smoothing as well as migration.
         for i in 1..n.saturating_sub(1) {
             let free = self.held.get(i).copied().unwrap_or(1.0);
-            for d in 0..2 {
-                self.centerline[i][d] +=
-                    free * k * (src[i - 1][d] + src[i + 1][d] - 2.0 * src[i][d]);
-            }
+            let (a, b, c) = (src[i - 1], src[i], src[i + 1]);
+            let p = &mut self.centerline[i];
+            p[0] += free * k * (a[0] + c[0] - 2.0 * b[0]);
+            p[1] += free * k * (a[1] + c[1] - 2.0 * b[1]);
         }
     }
 
@@ -2087,7 +2087,7 @@ impl Sim {
         let n = pts.len();
         route.windows(2).enumerate().any(|(k, s)| {
             (0..n - 1)
-                .filter(|&c| c + 1 <= i || c >= j)
+                .filter(|&c| c < i || c >= j)
                 .any(|c| segments_cross(s[0], s[1], pts[c], pts[c + 1]))
                 || route[k + 2..]
                     .windows(2)

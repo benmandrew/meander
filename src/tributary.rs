@@ -437,10 +437,10 @@ impl Sim {
         let fan_time = self.params.fan_time;
         let frac = GROWTH_EVERY as f64 * self.params.dt * self.supply() / fan_time.max(1e-9);
         for k in 0..self.tributaries.len() {
-            if (self.steps + k as u64) % JUNCTION_EVERY == 0 {
+            if (self.steps + k as u64).is_multiple_of(JUNCTION_EVERY) {
                 self.join_tributary(k);
             }
-            if fan_time > 0.0 && (self.steps + k as u64) % GROWTH_EVERY == 0 {
+            if fan_time > 0.0 && (self.steps + k as u64).is_multiple_of(GROWTH_EVERY) {
                 let t = &self.tributaries[k];
                 self.erodibility
                     .grow_cone(t.mouth, t.radius, FAN_HEIGHT * t.scale, t.scale, frac);
