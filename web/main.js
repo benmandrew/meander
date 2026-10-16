@@ -55,6 +55,10 @@ const LEVEE = [216, 210, 166];
 const LEVEE_LEVELS = [0.3, 0.7];
 // Simulated time between levee redraws when no flood has come.
 const LEVEE_REFRESH = 10;
+// Milliseconds a frame for floodplain redraws, and on a frame that draws
+// nothing else. Work beyond it carries on in the frames that follow.
+const FLOODPLAIN_BUDGET = 4;
+const FLOODPLAIN_IDLE_BUDGET = 10;
 // Valley sides. Each wall is a scarp from its foot, where the floodplain
 // ends, up to its brow, where the older upland begins. The core sets the
 // foot, with the combes cut back into it (see `walls.rs`). The scarp is
@@ -136,11 +140,11 @@ const MIN_FIELD = 2;
 // Boundaries are traced along the edges of the core's cells, simplified to
 // within `FIELD_SIMPLIFY` cells and rounded by two passes of Chaikin's
 // corner cutting. Fields are redrawn when a reorganisation finishes, at
-// most every `FIELD_REFRESH` of simulated time. A redraw works for
-// `FIELD_SLICE` ms a frame, so its 10 to 25 ms spread over several frames.
+// most every `FIELD_REFRESH` of simulated time. A redraw shares the
+// floodplain's `FLOODPLAIN_BUDGET` a frame, so its 10 to 25 ms spread over
+// several frames.
 const FIELD_SIMPLIFY = 0.7;
 const FIELD_REFRESH = 5;
-const FIELD_SLICE = 2;
 // Fields fade in as the sward thickens, over `FIELD_FADE` nested regions
 // from `grazing_time`, when a holding takes the ground, to
 // `vegetation_time`, when it is as thick as old meadow: 50 to 250 years.
@@ -317,6 +321,15 @@ const RUN = 24;
 // a thousand units of simulated time, so its outline is rebuilt every few
 // units, not every step, and moves less than a pixel at each rebuild.
 const LAKE_STEP = 1e-3;
+
+// Whether a layer last drawn at `last`, a `{ key, t }`, is due again: once
+// `key` has changed or `every` of simulated time has passed, or with
+// `both` only once both have.
+function isDue(last, key, t, every, both = false) {
+  if (!last || t < last.t) return true;
+  const changed = last.key !== key, aged = t - last.t >= every;
+  return both ? changed && aged : changed || aged;
+}
 
 function el(name, attrs, parent) {
   const e = document.createElementNS(NS, name);
@@ -1381,13 +1394,16 @@ class SvgRenderer {
     for (const shape of this.splayShapes.values()) shape.g.remove();
     this.splayShapes = new Map();
     this.millsAt = null;
-    this.wallsAt = { version: river.wall_version(), t: river.time() };
+    this.wallsAt = { key: river.wall_version(), t: river.time() };
     this.drawPebbles(river.get_param('width'), seed);
     this.plugAt = null;
     this.plugJob = null;
     this.forestAt = null;
     this.forestJob = null;
-    this.floodplainTurn = 0;
+    // The simulated time each staged layer's picture shows, and the time
+    // each floodplain layer fell due, if it waits.
+    [this.plugShown, this.fieldsShown, this.forestShown] = [null, null, null];
+    this.dueSince = [];
     // The first draw after a reset draws the floodplain whole.
     this.fresh = true;
     this.scrollAt = null;
@@ -1402,30 +1418,27 @@ class SvgRenderer {
     this.drawWalls(river, x, w, h, seed);
   }
 
-  // Draw the fields of every holding over the window when a
-  // reorganisation has finished, at most every `FIELD_REFRESH`, with their
-  // hedges, and mark the cells where crowns stand in crops. The redraw runs
-  // for `FIELD_SLICE` ms a call and carries on in the calls that follow; a
-  // redraw due while one runs waits for it. `all` runs it whole. Returns
-  // whether it did any work.
-  drawFields(river, memory, all = false) {
+  // Draw the fields of every holding over the window, with their hedges,
+  // and mark the cells where crowns stand in crops. `drawFloodplain` calls
+  // it when a reorganisation has finished, at most every `FIELD_REFRESH`.
+  // The redraw runs until the floodplain's deadline, `until`, and carries on
+  // in the calls that follow; a redraw due while one runs waits for it.
+  drawFields(river, memory) {
     if (!this.fieldJob) {
-      const t = river.time(), version = river.land_version();
-      const last = this.fieldsAt;
-      if (last && t >= last.t && (last.version === version || t - last.t < FIELD_REFRESH)) return false;
-      this.fieldsAt = { version, t };
+      this.fieldsAt = { key: river.land_version(), t: river.time() };
       this.fieldJob = this.fieldStages(river, memory);
     }
-    this.fieldUntil = all ? Infinity : performance.now() + FIELD_SLICE;
-    if (this.fieldJob.next().done) this.fieldJob = null;
-    return true;
+    if (this.fieldJob.next().done) {
+      this.fieldJob = null;
+      this.fieldsShown = this.fieldsAt.t;
+    }
   }
 
   // The stages of a field redraw, which yield whenever the call's
-  // `fieldUntil` has passed. The page is written only in the last stage, so
+  // `until` has passed. The page is written only in the last stage, so
   // no frame shows half a redraw.
   *fieldStages(river, memory) {
-    const due = () => performance.now() > this.fieldUntil;
+    const due = () => performance.now() > this.until;
     river.sync_holdings();
     // Copies, since later calls can grow memory and detach any view.
     const buf = memory.buffer;
@@ -1756,7 +1769,7 @@ class SvgRenderer {
     for (const [layer, show] of layers) {
       if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
     }
-    this.drawFloodplain(river, memory, local, this.fresh);
+    this.drawFloodplain(river, memory, local, this.fresh ? Infinity : FLOODPLAIN_BUDGET);
     this.fresh = false;
     // The floodplain features come as copies, which can grow memory too.
     const [jams, mills, leats] = [river.jams(), river.mills(), river.mill_leats()];
@@ -2051,26 +2064,20 @@ class SvgRenderer {
     }
   }
 
-  // Contour the coarse ground over the window every `COARSE_REFRESH` of
-  // simulated time. Returns whether it did.
+  // Contour the coarse ground over the window. `drawFloodplain` calls it
+  // every `COARSE_REFRESH` of simulated time.
   drawCoarse(river, memory) {
-    const t = river.time(), last = this.coarseAt;
-    if (last && t - last.t < COARSE_REFRESH && t >= last.t) return false;
-    this.coarseAt = { t };
+    this.coarseAt = { key: null, t: river.time() };
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const coarse = new Float32Array(memory.buffer, river.coarse_ptr(), cols * rows);
     const [c0, c1] = this.windowColumns(cols, cell);
     COARSE_LEVELS.forEach((level, k) => set(this.coarse[k], 'd', contourData(coarse, cols, rows, cell, c0, c1, level)));
-    return true;
   }
 
   // Draw the crevasse splays when one is laid or dropped, and fade them
   // every `LEVEE_REFRESH` of simulated time as vegetation takes them back.
-  // Returns whether it did.
   drawSplays(river, w) {
-    const t = river.time(), version = river.splay_version(), last = this.splayAt;
-    if (last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
-    this.splayAt = { version, t };
+    this.splayAt = { key: river.splay_version(), t: river.time() };
     const data = river.splays();
     const shapes = new Map();
     for (let k = 0; k < data.length; k += 7) {
@@ -2083,7 +2090,6 @@ class SvgRenderer {
     }
     for (const shape of this.splayShapes.values()) shape.g.remove();
     this.splayShapes = shapes;
-    return true;
   }
 
   // A splay: a lobe of sand from its apex, longest along the breach, with
@@ -2119,61 +2125,106 @@ class SvgRenderer {
   }
 
   // Redraw the valley walls after their bluffs have slumped, at most every
-  // `WALL_REFRESH` of simulated time. Returns whether it did.
+  // `WALL_REFRESH` of simulated time.
   redrawWalls(river) {
-    const t = river.time(), version = river.wall_version(), last = this.wallsAt;
-    if (last && (last.version === version || t - last.t < WALL_REFRESH) && t >= last.t) return false;
-    this.wallsAt = { version, t };
+    this.wallsAt = { key: river.wall_version(), t: river.time() };
     const [x, vw] = this.window;
     this.drawWalls(river, x, vw, this.size[1], this.seed);
-    return true;
   }
 
-  // Refresh at most one floodplain layer a call. Their refreshes fall due
-  // together, on the `LEVEE_REFRESH` clock and after cutoffs, and stacked
-  // in one frame they overran it; a layer that is due now waits a frame.
-  // The layers take turns, starting after the last one that refreshed, so a
-  // redraw spread over many calls does not hold back the layers after it.
-  // `all` refreshes every layer that is due, and draws the forest and the
-  // fields whole.
-  drawFloodplain(river, memory, local, all = false) {
-    const w = river.get_param('width');
-    const layers = [
-      () => local.showLevees && this.drawLevees(river, memory),
-      () => this.drawPlugs(river, memory, all),
-      () => this.drawFields(river, memory, all),
-      () => this.drawForest(river, memory, all),
-      // After the forest, whose redraw also redraws the crowns.
-      () => this.redrawTrees(),
-      () => local.showScrolls && this.drawScrolls(river, memory, w),
-      () => this.drawCoarse(river, memory),
-      () => this.drawSplays(river, w),
-      () => this.redrawWalls(river),
+  // The floodplain layers. Each has the simulated time its picture shows,
+  // whether a redraw is due or under way, and a call that draws it or
+  // carries its redraw on.
+  floodplainLayers(river, memory, local) {
+    const t = river.time(), w = river.get_param('width');
+    return [
+      {
+        shown: this.leveeAt?.t,
+        due: () => local.showLevees && isDue(this.leveeAt, river.floods(), t, LEVEE_REFRESH),
+        run: () => this.drawLevees(river, memory),
+      },
+      {
+        shown: this.plugShown,
+        due: () => this.plugJob || isDue(this.plugAt, river.cutoffs(), t, LEVEE_REFRESH),
+        run: () => this.drawPlugs(river, memory),
+      },
+      {
+        shown: this.fieldsShown,
+        due: () => this.fieldJob || isDue(this.fieldsAt, river.land_version(), t, FIELD_REFRESH, true),
+        run: () => this.drawFields(river, memory),
+      },
+      {
+        shown: this.forestShown,
+        due: () => this.forestJob || isDue(this.forestAt, this.forestKey(river), t, LEVEE_REFRESH),
+        run: () => this.drawForest(river, memory),
+      },
+      // The crowns go stale when fields finish after the forest sized them.
+      {
+        shown: this.fieldsShown,
+        due: () => this.treesStale && this.treeBlur,
+        run: () => this.redrawTrees(),
+      },
+      {
+        shown: this.scrollAt?.t,
+        due: () => local.showScrolls && isDue(this.scrollAt, river.scroll_version(), t, LEVEE_REFRESH),
+        run: () => this.drawScrolls(river, memory, w),
+      },
+      {
+        shown: this.coarseAt?.t,
+        due: () => isDue(this.coarseAt, null, t, COARSE_REFRESH),
+        run: () => this.drawCoarse(river, memory),
+      },
+      {
+        shown: this.splayAt?.t,
+        due: () => isDue(this.splayAt, river.splay_version(), t, LEVEE_REFRESH),
+        run: () => this.drawSplays(river, w),
+      },
+      {
+        shown: this.wallsAt?.t,
+        due: () => isDue(this.wallsAt, river.wall_version(), t, WALL_REFRESH, true),
+        run: () => this.redrawWalls(river),
+      },
     ];
-    // A forest redraw under way goes first, so its stages run in
-    // consecutive frames and the swept ground it clears is not held back
-    // by the turns of the other layers.
-    if (!all && this.forestJob) {
-      this.drawForest(river, memory);
-      return;
+  }
+
+  // Refresh the floodplain layers that are due, for `budget` ms a call.
+  // Their refreshes fall due together, on the `LEVEE_REFRESH` clock and
+  // after cutoffs, and stacked in one frame they overran it; what does not
+  // fit carries on in the calls that follow. A layer starts only within the
+  // budget, and a staged redraw stops at the first stage past it, so a call
+  // overruns by at most one stage. The layer whose picture is oldest goes
+  // first, so a redraw under way carries on in consecutive frames and no
+  // layer waits on another that falls due more often. Returns whether any
+  // layer did work.
+  drawFloodplain(river, memory, local, budget = FLOODPLAIN_BUDGET) {
+    this.until = performance.now() + budget;
+    const layers = this.floodplainLayers(river, memory, local);
+    const shown = (layer) => layer.shown ?? -Infinity;
+    const order = [...layers].sort((a, b) => (shown(a) - shown(b)) || 0);
+    let worked = false;
+    for (const layer of order) {
+      if (performance.now() > this.until) break;
+      if (!layer.due()) continue;
+      layer.run();
+      worked = true;
     }
-    for (let k = 0; k < layers.length; k++) {
-      const m = all ? k : (this.floodplainTurn + k) % layers.length;
-      if (layers[m]() && !all) {
-        this.floodplainTurn = m + 1;
-        return;
-      }
-    }
+    const t = river.time();
+    layers.forEach((layer, k) => {
+      this.dueSince[k] = layer.due() ? (this.dueSince[k] ?? t) : null;
+    });
+    return worked;
+  }
+
+  // Simulated time the longest-waiting floodplain redraw has been due.
+  behind(river) {
+    const t = river.time();
+    return Math.max(0, ...this.dueSince.map((since) => since === null ? 0 : t - since));
   }
 
   // Contour the overbank deposits over the window after each flood, and
   // every `LEVEE_REFRESH` of simulated time as the channel sweeps them away.
-  // Returns whether it did.
   drawLevees(river, memory) {
-    const t = river.time(), floods = river.floods();
-    const last = this.leveeAt;
-    if (last && last.floods === floods && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
-    this.leveeAt = { floods, t };
+    this.leveeAt = { key: river.floods(), t: river.time() };
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const deposit = new Float32Array(memory.buffer, river.deposit_ptr(), cols * rows);
     const [x, vw] = this.window;
@@ -2183,28 +2234,25 @@ class SvgRenderer {
     LEVEE_LEVELS.forEach((f, k) => {
       this.levees[k].setAttribute('d', top > 0 ? contourData(deposit, cols, rows, cell, c0, c1, f * top) : '');
     });
-    return true;
   }
 
   // Draw the clay plug marsh after each cutoff, and every `LEVEE_REFRESH`
   // of simulated time as it fades and the channel sweeps it away. Each
   // plug cell is weighted by its age, then blurred over 3 × 3 cells, so
   // its outline follows the lake's curve instead of the cell edges. The
-  // redraw takes one of `PLUG_LEVELS` a call, as `drawForest` takes its
-  // stages; `all` draws every level at once. Returns whether it did any
-  // work.
-  drawPlugs(river, memory, all = false) {
-    const t = river.time(), cutoffs = river.cutoffs();
-    const last = this.plugAt;
-    if (!this.plugJob && (!last || last.cutoffs !== cutoffs || t - last.t >= LEVEE_REFRESH || t < last.t)) {
-      this.plugAt = { cutoffs, t };
+  // redraw contours one of `PLUG_LEVELS` a stage, and runs stages until the
+  // floodplain's deadline, as `drawForest` does.
+  drawPlugs(river, memory) {
+    if (!this.plugJob) {
+      this.plugAt = { key: river.cutoffs(), t: river.time() };
       this.plugJob = this.plugStages(river, memory);
     }
-    if (!this.plugJob) return false;
     do {
-      if (this.plugJob.next().done) this.plugJob = null;
-    } while (all && this.plugJob);
-    return true;
+      if (this.plugJob.next().done) {
+        this.plugJob = null;
+        this.plugShown = this.plugAt.t;
+      }
+    } while (this.plugJob && performance.now() <= this.until);
   }
 
   // The stages of a plug marsh redraw: weight and blur the plug grid, then
@@ -2233,23 +2281,26 @@ class SvgRenderer {
   // Redraw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
   // after each cutoff, which clears an oxbow's footprint, and each flood,
   // which strips young shrub and lays scroll bars on the swept ground. The
-  // redraw takes one stage of `forestStages` a call, so its contours spread
-  // over the frames that follow instead of stalling one; a redraw due while
-  // one runs waits for it. `all` runs every stage at once. Returns whether
-  // it did any work.
-  drawForest(river, memory, all = false) {
-    const t = river.time(), cutoffs = river.cutoffs(), floods = river.floods();
-    const last = this.forestAt;
-    const due = !last || last.cutoffs !== cutoffs || last.floods !== floods || t - last.t >= LEVEE_REFRESH || t < last.t;
-    if (!this.forestJob && due) {
-      this.forestAt = { cutoffs, floods, t };
+  // redraw runs stages of `forestStages` until the floodplain's deadline,
+  // `until`, at least one a call, so its contours spread over the frames
+  // that follow instead of stalling one; a redraw due while one runs waits
+  // for it.
+  drawForest(river, memory) {
+    if (!this.forestJob) {
+      this.forestAt = { key: this.forestKey(river), t: river.time() };
       this.forestJob = this.forestStages(river, memory);
     }
-    if (!this.forestJob) return false;
     do {
-      if (this.forestJob.next().done) this.forestJob = null;
-    } while (all && this.forestJob);
-    return true;
+      if (this.forestJob.next().done) {
+        this.forestJob = null;
+        this.forestShown = this.forestAt.t;
+      }
+    } while (this.forestJob && performance.now() <= this.until);
+  }
+
+  // The events after which the forest is redrawn: cutoffs and floods.
+  forestKey(river) {
+    return `${river.cutoffs()} ${river.floods()}`;
   }
 
   // The stages of a forest redraw: copy and blur the age grid like the plug
@@ -2309,17 +2360,22 @@ class SvgRenderer {
   }
 
   // Redraw the crowns from the last forest redraw's growth, after new
-  // fields change which crowns stand in crops. Returns whether it did.
+  // fields change which crowns stand in crops.
   redrawTrees() {
-    if (!this.treesStale || !this.treeBlur) return false;
     this.drawTrees(this.treeBlur, ...this.treeArgs);
     this.treesStale = false;
-    return true;
   }
 
   // Carry on with work spread over frames, on a frame that draws nothing.
   idle(river, memory, { local }) {
-    this.drawFloodplain(river, memory, local);
+    this.drawFloodplain(river, memory, local, FLOODPLAIN_IDLE_BUDGET);
+  }
+
+  // Bring the floodplain up to date in one call, when the river stops. A
+  // pass finishes the redraws under way, which can leave their layers due
+  // again, so it repeats until a pass finds nothing to do.
+  settle(river, memory, { local }) {
+    for (let k = 0; k < 3 && this.drawFloodplain(river, memory, local, Infinity); k++);
   }
 
   // Scatter crowns over the window on a jittered grid, each with its own
@@ -2417,12 +2473,8 @@ class SvgRenderer {
   // Draw the scroll bars in age bands when they change, and every
   // `LEVEE_REFRESH` of simulated time as they age. A band's ridges darken
   // as vegetation takes them, and fade over the last quarter of their life.
-  // Returns whether it did.
   drawScrolls(river, memory, w) {
-    const t = river.time(), version = river.scroll_version();
-    const last = this.scrollAt;
-    if (last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
-    this.scrollAt = { version, t };
+    this.scrollAt = { key: river.scroll_version(), t: river.time() };
     river.sync_scrolls();
     // Views must be built after syncing: it can grow memory.
     const buf = memory.buffer;
@@ -2451,7 +2503,6 @@ class SvgRenderer {
     for (const path of this.ridges.values()) path.remove();
     this.ridges = ridges;
     set(this.scrollLayer, 'stroke-width', (0.15 * w).toFixed(2));
-    return true;
   }
 
   // Record the centreline without drawing, during warm-up.
