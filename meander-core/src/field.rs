@@ -310,12 +310,14 @@ impl Erodibility {
         }
     }
 
-    /// Mark cells within `radius` of the points as cut off at `time`, with
-    /// the bed `LAKE_DEPTH` below fresh bar level.
-    pub fn stamp_oxbow(&mut self, pts: &[P], radius: f64, time: f64) {
+    /// Mark cells within `half` times the width at each point (`widths`,
+    /// one per point) as cut off at `time`, with the bed `LAKE_DEPTH` below
+    /// fresh bar level.
+    pub fn stamp_oxbow(&mut self, pts: &[P], widths: &[f64], half: f64, time: f64) {
         let c = self.cell;
-        let r2 = radius * radius;
-        for p in pts {
+        for (p, &b) in pts.iter().zip(widths) {
+            let radius = half * b;
+            let r2 = radius * radius;
             let x0 = ((p[0] - radius) / c).floor().max(0.0) as usize;
             let y0 = ((p[1] - radius) / c).floor().max(0.0) as usize;
             let x1 = (((p[0] + radius) / c) as usize).min(self.cols - 1);
@@ -367,7 +369,7 @@ mod tests {
         let mut e = Erodibility::new([10.0, 10.0], 1.0, 5.0, 0);
         let at = |e: &Erodibility, time| e.at([5.0, 5.0], &ground(time));
         assert_eq!(at(&e, 10.0), 1.0);
-        e.stamp_oxbow(&[[5.0, 5.0]], 1.0, 10.0);
+        e.stamp_oxbow(&[[5.0, 5.0]], &[1.0], 1.0, 10.0);
         assert!((at(&e, 10.0) - 3.0).abs() < 1e-12);
         assert!((at(&e, 60.0) - 1.65).abs() < 1e-12);
         assert!((at(&e, 110.0) - 0.3).abs() < 1e-12);
@@ -399,7 +401,7 @@ mod tests {
     fn floods_silt_up_lakes() {
         let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
         let channel: Vec<P> = (0..80).map(|k| [k as f64 * 0.5, 20.0]).collect();
-        e.stamp_oxbow(&[[20.0, 22.25]], 0.25, 0.0);
+        e.stamp_oxbow(&[[20.0, 22.25]], &[1.0], 0.25, 0.0);
         assert_eq!(e.silt_at([20.0, 22.25]), 0.0);
         let at = |e: &Erodibility| e.at([20.0, 22.25], &ground(0.0));
         assert!((at(&e) - 3.0).abs() < 1e-9, "open water");
@@ -417,7 +419,7 @@ mod tests {
     #[test]
     fn a_splay_spreads_thinning_sand_in_a_fan() {
         let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
-        e.stamp_oxbow(&[[20.0, 32.0]], 1.0, 0.0);
+        e.stamp_oxbow(&[[20.0, 32.0]], &[1.0], 1.0, 0.0);
         e.stamp_splay([20.0, 20.0], [0.0, 1.0], 15.0, 0.7, 0.25, 5.0);
         let h = |p: P| e.deposit_at(p);
         assert!(h([20.0, 22.0]) > h([20.0, 28.0]) && h([20.0, 28.0]) > 0.0, "thins outwards");
@@ -430,7 +432,7 @@ mod tests {
     #[test]
     fn swept_ground_is_loose_until_vegetated() {
         let mut e = Erodibility::new([10.0, 10.0], 1.0, 5.0, 0);
-        e.stamp_oxbow(&[[5.0, 5.0]], 1.0, 10.0);
+        e.stamp_oxbow(&[[5.0, 5.0]], &[1.0], 1.0, 10.0);
         e.sweep(&[[5.5, 5.5]], 10.0);
         let at = |time| e.at([5.5, 5.5], &ground(time));
         assert!((at(10.0) - 2.0).abs() < 1e-12, "the channel replaces the oxbow fill with sand");

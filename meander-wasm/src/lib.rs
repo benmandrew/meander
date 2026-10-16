@@ -36,6 +36,9 @@ pub struct River {
     oxbow_lengths: Vec<f32>,
     /// Arc length along each oxbow as cut off to the start of its piece.
     oxbow_offsets_along: Vec<f32>,
+    /// Width of the channel each oxbow was cut from at each of its points,
+    /// in multiples of the `width` parameter, matching `oxbow_line`.
+    oxbow_widths: Vec<f32>,
     /// Land height at each oxbow point, in [0, 1], matching `oxbow_line`.
     oxbow_heights: Vec<f32>,
     /// Fraction of the lake depth filled with flood silt at each oxbow
@@ -73,6 +76,7 @@ impl River {
             oxbow_scar_ages: Vec::new(),
             oxbow_lengths: Vec::new(),
             oxbow_offsets_along: Vec::new(),
+            oxbow_widths: Vec::new(),
             oxbow_heights: Vec::new(),
             oxbow_silts: Vec::new(),
             oxbows_synced: None,
@@ -124,9 +128,9 @@ impl River {
 
     /// Copy the centreline and oxbow polylines into flat buffers, and the
     /// oxbow fills, scar ages, birth lengths, offsets along the original
-    /// oxbow, and the land height and silt at each oxbow point. What depends
-    /// only on the oxbows' shape is copied only when it changes; see
-    /// `oxbow_version`.
+    /// oxbow, and the channel width, land height and silt at each oxbow
+    /// point. What depends only on the oxbows' shape is copied only when it
+    /// changes; see `oxbow_version`.
     pub fn sync(&mut self) {
         self.sync_line();
         let sim = &self.sim;
@@ -137,7 +141,9 @@ impl River {
             self.oxbow_lengths.clear();
             self.oxbow_offsets_along.clear();
             self.oxbow_heights.clear();
+            self.oxbow_widths.clear();
             for o in &sim.oxbows {
+                self.oxbow_widths.extend(o.widths.iter().map(|&b| b as f32));
                 self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
                 self.oxbow_line.extend(o.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
                 self.oxbow_heights.extend(o.points.iter().map(|&p| sim.erodibility.height(p) as f32));
@@ -255,6 +261,9 @@ impl River {
     }
     pub fn oxbow_offsets_along_ptr(&self) -> *const f32 {
         self.oxbow_offsets_along.as_ptr()
+    }
+    pub fn oxbow_widths_ptr(&self) -> *const f32 {
+        self.oxbow_widths.as_ptr()
     }
     pub fn oxbow_heights_ptr(&self) -> *const f32 {
         self.oxbow_heights.as_ptr()

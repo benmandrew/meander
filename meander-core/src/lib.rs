@@ -318,6 +318,9 @@ impl Params {
 #[derive(Clone, Debug)]
 pub struct Oxbow {
     pub points: Vec<P>,
+    /// Width of the channel at each point when it was cut off, in
+    /// multiples of [`Params::width`].
+    pub widths: Vec<f64>,
     pub born: f64,
     /// Arc length when the oxbow was cut off. Pieces split from it keep
     /// it, so the drawn lake plugs at a rate that does not jump when the
@@ -337,10 +340,11 @@ pub struct Oxbow {
 }
 
 impl Oxbow {
-    /// A fresh lake along the points, cut off at `born`.
-    pub fn lake(points: Vec<P>, born: f64, entry: f64) -> Self {
+    /// A fresh lake along the points, with the channel's widths there,
+    /// cut off at `born`.
+    pub fn lake(points: Vec<P>, widths: Vec<f64>, born: f64, entry: f64) -> Self {
         let length = geom::length(&points);
-        Self { points, born, length, offset: 0.0, fill: 0.0, filled_at: f64::INFINITY, entry }
+        Self { points, widths, born, length, offset: 0.0, fill: 0.0, filled_at: f64::INFINITY, entry }
     }
 
     pub fn is_lake(&self) -> bool {
@@ -1193,7 +1197,7 @@ impl Sim {
             changed = true;
             for &(a, b) in &pieces {
                 let offset = o.offset + geom::length(&pts[..=a]);
-                kept.push(Oxbow { points: pts[a..b].to_vec(), offset, ..o });
+                kept.push(Oxbow { points: pts[a..b].to_vec(), widths: o.widths[a..b].to_vec(), offset, ..o });
             }
         }
         self.oxbows = kept;
@@ -1213,7 +1217,7 @@ impl Sim {
             let mut inflow = 0.0;
             if o.offset == 0.0 && o.entry > 0.0 && length > 0.0 {
                 let gap = self.centerline.iter().map(|&c| geom::dist2(o.points[0], c)).fold(f64::INFINITY, f64::min);
-                inflow = u * p.bedload_fill * o.entry * (-(gap.sqrt() - half).max(0.0) / length).exp();
+                inflow = u * p.bedload_fill * o.entry * (-(gap.sqrt() - half * o.widths[0]).max(0.0) / length).exp();
             }
             let silt = self.erodibility.lake_silt(&o.points);
             o.fill = (o.fill + inflow).max(silt).min(1.0);
@@ -1394,12 +1398,13 @@ impl Sim {
         let norms = (geom::dist2(a, c) * geom::dist2(a, b)).sqrt();
         let entry = if norms > 0.0 { ((main[0] * branch[0] + main[1] * branch[1]) / norms).max(0.0) } else { 0.0 };
         let mid = geom::lerp(self.centerline[i], self.centerline[j], 0.5);
+        let loop_widths = self.widths[i..=j].to_vec();
         self.centerline.drain(i + 1..j);
         self.widths.drain(i + 1..j);
         self.line_version += 1;
         self.oxbow_version += 1;
-        self.erodibility.stamp_oxbow(&loop_pts, 0.5 * self.params.width, self.time);
-        self.oxbows.push(Oxbow::lake(loop_pts, self.time, entry));
+        self.erodibility.stamp_oxbow(&loop_pts, &loop_widths, 0.5 * self.params.width, self.time);
+        self.oxbows.push(Oxbow::lake(loop_pts, loop_widths, self.time, entry));
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));
         self.cutoffs += 1;
     }
@@ -1587,8 +1592,9 @@ mod tests {
         // entrance lies on the channel at a small diversion angle.
         let lake = |x0: f64, y: f64| -> Vec<P> { (0..30).map(|k| [(x0 + 0.5 * k as f64) * w, mid + y * w]).collect() };
         for (pts, entry) in [(lake(100.0, 2.0), 0.0), (lake(150.0, 10.0), 0.0), (lake(200.0, 0.0), 0.9)] {
-            sim.erodibility.stamp_oxbow(&pts, 0.5 * w, 0.0);
-            sim.oxbows.push(Oxbow::lake(pts, 0.0, entry));
+            let widths = vec![1.0; pts.len()];
+            sim.erodibility.stamp_oxbow(&pts, &widths, 0.5 * w, 0.0);
+            sim.oxbows.push(Oxbow::lake(pts, widths, 0.0, entry));
         }
         // The third lake runs along the channel; keep only its entrance there.
         sim.oxbows[2].points.iter_mut().skip(1).for_each(|q| q[1] += 3.0 * w);
@@ -1704,8 +1710,8 @@ mod tests {
         // A vertical oxbow across the channel, and one well clear of it.
         let across: Vec<P> = (-20..=20).map(|k| [100.0 * w, mid + 0.5 * k as f64 * w]).collect();
         let clear: Vec<P> = (0..20).map(|k| [(150 + k) as f64 * w, mid + 20.0 * w]).collect();
-        sim.oxbows.push(Oxbow::lake(across, 0.0, 0.0));
-        sim.oxbows.push(Oxbow::lake(clear.clone(), 0.0, 0.0));
+        sim.oxbows.push(Oxbow::lake(across, vec![1.0; 41], 0.0, 0.0));
+        sim.oxbows.push(Oxbow::lake(clear.clone(), vec![1.0; 20], 0.0, 0.0));
         sim.step();
         assert_eq!(sim.oxbows.len(), 3, "the crossed oxbow splits in two");
         assert_eq!(sim.oxbows[2].points, clear);
@@ -1715,6 +1721,7 @@ mod tests {
         let (a, b) = (&sim.oxbows[0], &sim.oxbows[1]);
         for o in [a, b] {
             let m = o.points.len();
+            assert_eq!(o.widths.len(), m, "a piece keeps its share of the widths");
             assert!(o.points[1..m - 1].iter().all(|&q| gap(q) >= 0.5 * w));
         }
         assert!(gap(a.points[a.points.len() - 1]) < 0.5 * w && gap(b.points[0]) < 0.5 * w);
@@ -1727,7 +1734,7 @@ mod tests {
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         // The channel runs between two points a quarter width either side.
         let across: Vec<P> = (-20..20).map(|k| [100.0 * w, mid + (0.5 * k as f64 + 0.25) * w]).collect();
-        sim.oxbows.push(Oxbow::lake(across, 0.0, 0.0));
+        sim.oxbows.push(Oxbow::lake(across, vec![1.0; 40], 0.0, 0.0));
         sim.step();
         assert_eq!(sim.oxbows.len(), 2, "the crossed oxbow splits in two");
         assert_eq!(sim.oxbows[0].points.len() + sim.oxbows[1].points.len(), 40);
@@ -1791,6 +1798,10 @@ mod tests {
         sim.line_version += 1;
         assert!(sim.cutoff(), "banks 1.5 widths wide overlap");
         assert_eq!(sim.widths.len(), sim.centerline.len());
+        let o = &sim.oxbows[0];
+        assert!(o.widths.len() == o.points.len() && o.widths.iter().all(|&b| b == 1.5), "the lake keeps the channel's width");
+        let side = [o.points[o.points.len() / 2][0], o.points[o.points.len() / 2][1] + 0.65 * w];
+        assert!(sim.erodibility.lake_silt_at(side).is_some(), "the footprint spans the wider channel");
     }
 
     #[test]
@@ -1799,7 +1810,7 @@ mod tests {
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         // Under the water on the channel side, but clear of the centreline.
         let beside: Vec<P> = (0..20).map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 0.3 * w]).collect();
-        sim.oxbows.push(Oxbow::lake(beside.clone(), 0.0, 0.0));
+        sim.oxbows.push(Oxbow::lake(beside.clone(), vec![1.0; 20], 0.0, 0.0));
         sim.step();
         assert_eq!(sim.oxbows.len(), 1);
         assert_eq!(sim.oxbows[0].points, beside);

@@ -223,9 +223,12 @@ function blobData(rand, cx, cy, rx, ry) {
 // each, and the parabola gives each pool a round tip there. A plugged end
 // is a round cap when young, lengthening with `age` in [0, 1] to a crescent
 // tip. An end cut by the channel stays a round cap, hidden under the water.
-function lakeData(pts, heights, silts, start, end, from, to, half, level, relief, age) {
+function lakeData(pts, heights, silts, widths, start, end, from, to, half, level, relief, age) {
   const m = end - start;
   if (m < 2 || level <= 0) return '';
+  let mean = 0;
+  for (let k = 0; k < m; k++) mean += widths[start + k] / m;
+  const wide = half * mean;
   const s = new Float64Array(m), tx = new Float64Array(m), ty = new Float64Array(m);
   const depth = new Float64Array(m);
   let silt = 0;
@@ -256,7 +259,12 @@ function lakeData(pts, heights, silts, start, end, from, to, half, level, relief
     return [j, (at - s[j]) / (s[j + 1] - s[j] || 1)];
   };
   const depthAt = (j, u) => depth[j] + (depth[j + 1] - depth[j]) * u;
-  const width = (d) => half * Math.sqrt(Math.min(1, Math.max(0, d)));
+  // Half-width at fraction `u` along segment `j`, at depth `d`: `half`
+  // times the width of the channel the lake was cut from.
+  const width = (j, u, d) => {
+    const b = widths[start + j] + (widths[start + j + 1] - widths[start + j]) * u;
+    return half * b * Math.sqrt(Math.min(1, Math.max(0, d)));
+  };
 
   // Wet runs [u, v] of [a, b]. The depth is linear between points, so each
   // crossing is exact.
@@ -287,14 +295,14 @@ function lakeData(pts, heights, silts, start, end, from, to, half, level, relief
   let path = '';
   j = 0;
   for (const [u0, v0] of runs) {
-    if (v0 - u0 < half) continue;
+    if (v0 - u0 < wide) continue;
     // Each end: a round cap of the local width at a plugged or cut end, or
     // a parabolic tip where the bed rises above the water, sampled densely
     // near the tip.
     const end = (at, plugged) => {
-      if (at !== a && at !== b) return { len: half, cap: false };
+      if (at !== a && at !== b) return { len: wide, cap: false };
       const [jj, uu] = locate(at, 0);
-      const r = width(depthAt(jj, uu));
+      const r = width(jj, uu, depthAt(jj, uu));
       return { len: plugged ? r * (1 + 3 * age) : r, cap: true };
     };
     const [ea, eb] = [end(u0, from > 0), end(v0, to < s[m - 1])];
@@ -311,7 +319,7 @@ function lakeData(pts, heights, silts, start, end, from, to, half, level, relief
       const i = 2 * (start + j);
       const x = pts[i] + (pts[i + 2] - pts[i]) * f, y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * f;
       const nx = -(ty[j] + (ty[j + 1] - ty[j]) * f), ny = tx[j] + (tx[j + 1] - tx[j]) * f;
-      const h = shape * width(depthAt(j, f)) / (Math.hypot(nx, ny) || 1);
+      const h = shape * width(j, f, depthAt(j, f)) / (Math.hypot(nx, ny) || 1);
       left.push((x + nx * h).toFixed(1) + ' ' + (y + ny * h).toFixed(1));
       right.push((x - nx * h).toFixed(1) + ' ' + (y - ny * h).toFixed(1));
     };
@@ -631,6 +639,7 @@ class SvgRenderer {
     const oxLen = new Float32Array(buf, river.oxbow_lengths_ptr(), n);
     const oxAlong = new Float32Array(buf, river.oxbow_offsets_along_ptr(), n);
     const oxHeight = new Float32Array(buf, river.oxbow_heights_ptr(), oxPts.length / 2);
+    const oxWidth = new Float32Array(buf, river.oxbow_widths_ptr(), oxPts.length / 2);
     const oxSilt = new Float32Array(buf, river.oxbow_silts_ptr(), oxPts.length / 2);
     const widths = new Float32Array(buf, river.widths_ptr(), line.length / 2);
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
@@ -650,7 +659,6 @@ class SvgRenderer {
     // narrowing.
     resize(this.scars, n, this.scarLayer);
     resize(this.lakes, n, this.lakeLayer);
-    set(this.scarLayer, 'stroke-width', w);
     for (let k = 0; k < n; k++) {
       const age = oxFill[k];
       const scar = this.scars[k], lake = this.lakes[k];
@@ -658,10 +666,15 @@ class SvgRenderer {
       // so a piece's ends and length identify its shape.
       const [s0, s1] = [2 * oxOff[k], 2 * oxOff[k + 1]];
       const shape = `${s1 - s0} ${oxPts[s0]} ${oxPts[s0 + 1]} ${oxPts[s1 - 2]} ${oxPts[s1 - 1]}`;
+      // Mean width of the channel the oxbow was cut from.
+      let wm = 0;
+      for (let i = oxOff[k]; i < oxOff[k + 1]; i++) wm += oxWidth[i];
+      wm *= w / Math.max(1, oxOff[k + 1] - oxOff[k]);
       if (scar.shape !== shape) {
         scar.shape = shape;
         set(scar, 'd', pathData(oxPts, oxOff[k], oxOff[k + 1]));
       }
+      set(scar, 'stroke-width', dp1(wm));
       const fade = 1 - smoothstep(oxScar[k] / scarLife);
       set(scar, 'stroke-opacity', (0.45 * smoothstep(age) * fade).toFixed(2));
       if (age >= 1) {
@@ -672,21 +685,21 @@ class SvgRenderer {
         lake.inputs = null;
         continue;
       }
-      const reeds = 0.1 * w + 0.15 * w * age;
+      const reeds = 0.1 * wm + 0.15 * wm * age;
       // Half-width where the bed is at its mean height.
-      const hw = 0.5 * w * (1 - local.oxbowShrink * age) - 0.5 * reeds;
+      const hw = 0.5 * wm * (1 - local.oxbowShrink * age) - 0.5 * reeds;
       // The plugs advance from the ends of the oxbow as cut off, which a
       // piece split off by the channel may lack.
       const plug = PLUG * age * oxLen[k];
       const [from, to] = [plug - oxAlong[k], oxLen[k] - plug - oxAlong[k]];
-      const level = hw > 0 ? (hw / (0.5 * w)) ** 2 : 0;
+      const level = hw > 0 ? (hw / (0.5 * wm)) ** 2 : 0;
       // Floods and the channel change the silt without reshaping the oxbow.
       let silt = 0;
       for (let i = oxOff[k]; i < oxOff[k + 1]; i++) silt += oxSilt[i];
       const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief}`;
       if (lake.inputs !== inputs) {
         lake.inputs = inputs;
-        set(lake, 'd', lakeData(oxPts, oxHeight, oxSilt, oxOff[k], oxOff[k + 1], from, to,
+        set(lake, 'd', lakeData(oxPts, oxHeight, oxSilt, oxWidth, oxOff[k], oxOff[k + 1], from, to,
           0.5 * w, level, local.oxbowRelief, age));
       }
       set(lake, 'fill', mix(WATER, MURKY, smoothstep(1.5 * age)));

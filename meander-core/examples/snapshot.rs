@@ -27,7 +27,7 @@ fn svg(sim: &Sim, x0: f64, w: f64) -> String {
             "<path d='{}' fill='none' stroke='#5b8a9a' stroke-opacity='{:.2}' stroke-width='{:.2}' stroke-linejoin='round' stroke-linecap='round'/>",
             path(&o.points),
             1.0 - age,
-            sim.params.width * (1.0 - 0.7 * age)
+            o.widths.iter().sum::<f64>() / o.widths.len() as f64 * sim.params.width * (1.0 - 0.7 * age)
         );
     }
     // The channel as round-capped segments at the local width.
