@@ -1142,6 +1142,62 @@ impl Sim {
         }
     }
 
+    /// Merge the older oxbows into a lake just cut off along `pts`, with the
+    /// channel's widths `widths` there: the parts of them under its water
+    /// become part of it. A channel can run over a lake without its
+    /// centreline coming within `REWORK_RADIUS` of it, which hides the lake
+    /// until the cut leaves both in the open. Each piece left reaches one
+    /// point under the new lake, so their water joins, as a piece the
+    /// channel splits reaches under the channel.
+    fn absorb_oxbows(&mut self, pts: &[P], widths: &[f64]) {
+        let half = 0.5 * self.params.width;
+        let reach = half * widths.iter().fold(MIN_WIDTH, |a, &b| a.max(b));
+        let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+        for p in pts {
+            for d in 0..2 {
+                lo[d] = lo[d].min(p[d] - reach);
+                hi[d] = hi[d].max(p[d] + reach);
+            }
+        }
+        let wet = |q: P| {
+            (lo[0]..=hi[0]).contains(&q[0])
+                && (lo[1]..=hi[1]).contains(&q[1])
+                && pts.windows(2).zip(widths.windows(2)).any(|(s, b)| {
+                    let r = half * b[0].max(b[1]);
+                    geom::seg_dist2(q, s[0], s[1]) < r * r
+                })
+        };
+        let oxbows = std::mem::take(&mut self.oxbows);
+        let mut kept = Vec::with_capacity(oxbows.len());
+        for o in oxbows {
+            let under: Vec<bool> = o.points.iter().map(|&q| wet(q)).collect();
+            if !under.contains(&true) {
+                kept.push(o);
+                continue;
+            }
+            // Runs of points clear of the new lake, with the point under it
+            // either side.
+            let n = o.points.len();
+            let mut k = 0;
+            while k < n {
+                if under[k] {
+                    k += 1;
+                    continue;
+                }
+                let start = k;
+                while k < n && !under[k] {
+                    k += 1;
+                }
+                let (a, b) = (start.saturating_sub(1), (k + 1).min(n));
+                if b - a >= MIN_OXBOW_POINTS {
+                    let offset = o.offset + geom::length(&o.points[..=a]);
+                    kept.push(Oxbow { points: o.points[a..b].to_vec(), widths: o.widths[a..b].to_vec(), offset, ..o });
+                }
+            }
+        }
+        self.oxbows = kept;
+    }
+
     /// Fill each lake by one flood of magnitude `u`: bedload through an
     /// entrance near the channel, by [`Params::bedload_fill`], and the silt
     /// the flood laid on its bed, whichever fills it further.
@@ -1255,6 +1311,7 @@ impl Sim {
         self.line_version += 1;
         self.oxbow_version += 1;
         self.erodibility.stamp_oxbow(&loop_pts, &loop_widths, 0.5 * self.params.width, self.time);
+        self.absorb_oxbows(&loop_pts, &loop_widths);
         self.oxbows.push(Oxbow::lake(loop_pts, loop_widths, self.time, entry));
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));
         self.cutoffs += 1;
@@ -1624,6 +1681,38 @@ mod tests {
         assert!(o.widths.len() == o.points.len() && o.widths.iter().all(|&b| b == 1.5), "the lake keeps the channel's width");
         let side = [o.points[o.points.len() / 2][0], o.points[o.points.len() / 2][1] + 0.65 * w];
         assert!(sim.erodibility.lake_silt_at(side).is_some(), "the footprint spans the wider channel");
+    }
+
+    #[test]
+    fn a_cutoff_absorbs_the_lake_under_it() {
+        // The hairpin of `a_neck_closes_when_the_banks_meet`, with an old
+        // lake running out from its upper leg.
+        let mut sim = sine_sim(0.0, 40.0);
+        sim.params.cutoff_dist = 1.0;
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        let r = 0.65 * w;
+        let mut pts: Vec<P> = (0..30).map(|k| [(100.0 + 0.5 * k as f64) * w, mid]).collect();
+        let x = pts[29][0];
+        pts.extend((1..4).map(|k| {
+            let t = std::f64::consts::PI * k as f64 / 4.0;
+            [x + r * t.sin(), mid + r - r * t.cos()]
+        }));
+        pts.extend((0..30).rev().map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 2.0 * r]));
+        sim.centerline = pts;
+        sim.widths = vec![1.5; sim.centerline.len()];
+        let old: Vec<P> = (0..=10).map(|k| [105.0 * w, mid + 2.0 * r + 0.5 * k as f64 * w]).collect();
+        let clear: Vec<P> = (0..20).map(|k| [(150 + k) as f64 * w, mid + 20.0 * w]).collect();
+        sim.oxbows.push(Oxbow::lake(old.clone(), vec![1.0; 11], 0.0, 0.0));
+        sim.oxbows.push(Oxbow::lake(clear.clone(), vec![1.0; 20], 0.0, 0.0));
+        assert!(sim.cutoff());
+        assert_eq!(sim.oxbows.len(), 3);
+        assert_eq!(sim.oxbows[1].points, clear, "a lake clear of the cut is left whole");
+        // The new lake is 0.75 widths in half-width, so it covers the first
+        // two points; the piece left reaches back to the second.
+        let piece = &sim.oxbows[0];
+        assert_eq!(piece.points, old[1..]);
+        assert_eq!(piece.widths.len(), piece.points.len());
+        assert!((piece.offset - 0.5 * w).abs() < 1e-9);
     }
 
     #[test]

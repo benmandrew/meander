@@ -516,12 +516,16 @@ class SvgRenderer {
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
     // Both are filled outlines at the local width, which a stroke cannot vary.
+    // Every lake's reed fringe lies under the water of all of them, so lakes
+    // that meet join as one body of water.
     this.bank = el('g', { fill: '#b8a678' }, svg);
-    this.lakeLayer = el('g', { 'stroke-linejoin': 'round', stroke: REEDS }, svg);
+    this.reedLayer = el('g', { fill: 'none', 'stroke-linejoin': 'round', stroke: REEDS }, svg);
+    this.lakeLayer = el('g', {}, svg);
     this.water = el('g', { fill: `rgb(${WATER})` }, svg);
     this.bankRuns = [];
     this.waterRuns = [];
     this.lakes = [];
+    this.reeds = [];
     this.scars = [];
     this.bands = [];
     // Bands dropped since the last draw, still to be removed from the page.
@@ -632,9 +636,10 @@ class SvgRenderer {
     // narrowing.
     resize(this.scars, n, this.scarLayer);
     resize(this.lakes, n, this.lakeLayer);
+    resize(this.reeds, n, this.reedLayer);
     for (let k = 0; k < n; k++) {
       const age = oxFill[k];
-      const scar = this.scars[k], lake = this.lakes[k];
+      const scar = this.scars[k], lake = this.lakes[k], reed = this.reeds[k];
       // The channel splits an oxbow into pieces of its original polyline,
       // so a piece's ends and length identify its shape.
       const [s0, s1] = [2 * oxOff[k], 2 * oxOff[k + 1]];
@@ -655,6 +660,7 @@ class SvgRenderer {
         // to this element when the channel splits or drops an oxbow before
         // it. Forget its inputs, or it would stay blank.
         set(lake, 'd', '');
+        set(reed, 'd', '');
         lake.inputs = null;
         continue;
       }
@@ -666,18 +672,25 @@ class SvgRenderer {
       const plug = PLUG * age * oxLen[k];
       const [from, to] = [plug - oxAlong[k], oxLen[k] - plug - oxAlong[k]];
       const level = hw > 0 ? (hw / (0.5 * wm)) ** 2 : 0;
+      // The water covers the inner half of the fringe, which is stroked at
+      // twice its width, so the outline lies half a fringe inside `hw`.
+      const inset = hw > 0 ? Math.max(0, 1 - 0.5 * reeds / hw) : 0;
       // Floods and the channel change the silt without reshaping the oxbow.
       let silt = 0;
       for (let i = oxOff[k]; i < oxOff[k + 1]; i++) silt += oxSilt[i];
       const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief}`;
       if (lake.inputs !== inputs) {
         lake.inputs = inputs;
-        set(lake, 'd', lakeData(oxPts, oxHeight, oxSilt, oxWidth, oxOff[k], oxOff[k + 1], from, to,
-          0.5 * w, level, local.oxbowRelief, age));
+        const d = lakeData(oxPts, oxHeight, oxSilt, oxWidth, oxOff[k], oxOff[k + 1], from, to,
+          0.5 * w * inset, level, local.oxbowRelief, age);
+        set(lake, 'd', d);
+        set(reed, 'd', d);
       }
+      const opacity = clamp01(5 * (1 - age)).toFixed(2);
       set(lake, 'fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
-      set(lake, 'opacity', clamp01(5 * (1 - age)).toFixed(2));
-      set(lake, 'stroke-width', reeds.toFixed(2));
+      set(lake, 'opacity', opacity);
+      set(reed, 'opacity', opacity);
+      set(reed, 'stroke-width', (2 * reeds).toFixed(2));
     }
 
     resize(this.bankRuns, bankRuns.length, this.bank);
