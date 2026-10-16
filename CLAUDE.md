@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A live browser simulation of a meandering river: a Rust core compiled to WASM, drawn as SVG. The panel shows only a speed slider; the simulation runs on its `Params` defaults.
 
+The simulation runs over years, not weeks. One unit of simulated time is 2.5 years (`YEARS_PER_UNIT` in `ui.js`), the warm-up alone is about 1,250 years, and forest takes about 3,400 years to mature. Describe every change, in code comments and in prose, on that timescale.
+
 ## Commands
 
 The Nix flake supplies every tool below. `.envrc` loads its dev shell through direnv (run `direnv allow` once), or enter it with `nix develop`. The shell's `wasm-bindgen-cli` version is read from `Cargo.lock`, so after bumping the `wasm-bindgen` crate, nixpkgs must carry the matching `wasm-bindgen-cli_0_2_N`.
