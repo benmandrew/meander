@@ -176,6 +176,15 @@ pub struct Params {
     /// `vegetation_time`, so holdings follow the channel onto bars long
     /// before shrub binds them.
     pub grazing_time: f64,
+    /// Time the upland clearance begins. Fine sediment from cleared
+    /// slopes multiplies overbank deposition and the filling of lakes by
+    /// [`Sim::supply`].
+    pub clearance_start: f64,
+    /// Time over which the supply rises to `clearance_supply`.
+    pub clearance_time: f64,
+    /// Sediment supply once the upland is cleared, as a multiple of the
+    /// wooded upland's. 1 disables.
+    pub clearance_supply: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -245,6 +254,9 @@ impl Default for Params {
             holding_area: HOLDING_AREA,
             reorganise_time: REORGANISE_TIME,
             grazing_time: GRAZING_TIME,
+            clearance_start: CLEARANCE_START,
+            clearance_time: CLEARANCE_TIME,
+            clearance_supply: CLEARANCE_SUPPLY,
             physics: true,
             friction,
             aspect,
@@ -303,6 +315,9 @@ impl Params {
         "holding_area",
         "reorganise_time",
         "grazing_time",
+        "clearance_start",
+        "clearance_time",
+        "clearance_supply",
         "physics",
         "friction",
         "aspect",
@@ -357,6 +372,9 @@ impl Params {
             "holding_area" => &mut self.holding_area,
             "reorganise_time" => &mut self.reorganise_time,
             "grazing_time" => &mut self.grazing_time,
+            "clearance_start" => &mut self.clearance_start,
+            "clearance_time" => &mut self.clearance_time,
+            "clearance_supply" => &mut self.clearance_supply,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -632,6 +650,17 @@ const SCROLL_REWORK_EVERY: u64 = 10;
 const LEVEE_LENGTH: f64 = 2.0;
 const LEVEE_HEIGHT: f64 = 0.25;
 
+/// Default upland clearance; see [`Params`]. It begins 100 units, 250
+/// years, after the default warm-up of 500, and the supply triples over
+/// the 1,000 years that follow, as the post-medieval alluvium of English
+/// valleys shows sediment yields rising severalfold after clearance.
+const CLEARANCE_START: f64 = 600.0;
+const CLEARANCE_TIME: f64 = 400.0;
+const CLEARANCE_SUPPLY: f64 = 3.0;
+/// Overbank deposit, as a fraction of the flood level, above which a
+/// scroll bar's ridge is buried and dropped.
+const BURY: f64 = 0.95;
+
 /// Longest chute a flood can cut, in channel widths.
 pub const CHUTE_CHORD: f64 = 5.0;
 
@@ -863,10 +892,14 @@ impl Sim {
                 self.resample(ds);
             }
             self.widen(magnitude);
+            // Clearance raises the silt the flood carries. How far it
+            // spreads from the bank is set by how fast it settles, which
+            // clearance leaves alone.
+            let supply = self.supply();
             let p = &self.params;
             let flood = Flood {
                 half: 0.5 * p.width,
-                amount: magnitude * p.overbank,
+                amount: magnitude * p.overbank * supply,
                 length: p.levee_length * p.width,
                 stage: p.levee_height,
                 scour: magnitude * p.scour_reach * p.width,
@@ -890,7 +923,9 @@ impl Sim {
         let s = self.land_settings();
         self.land.tick(&self.erodibility, &self.centerline, &self.widths, &self.valley, &s, phase);
         self.rework_oxbows();
-        let (time, rate) = (self.time, self.params.dt / self.params.oxbow_lifetime.max(1e-9));
+        // Clearance fills lakes faster with the fine sediment it washes in.
+        let supply = self.supply();
+        let (time, rate) = (self.time, supply * self.params.dt / self.params.oxbow_lifetime.max(1e-9));
         // A lake fills at least as far as the silt on its bed, read every
         // step: the channel changes it between floods by sweeping some of
         // its cells, and applying that only at the next flood would change
@@ -916,6 +951,21 @@ impl Sim {
         }
         let steps = self.steps;
         self.recent_cuts.retain(|&(_, until)| until > steps);
+    }
+
+    /// Sediment supply from the upland, as a multiple of the wooded
+    /// upland's: 1 until `clearance_start`, rising smoothly to
+    /// `clearance_supply` over `clearance_time`.
+    pub fn supply(&self) -> f64 {
+        let p = &self.params;
+        let t = if p.clearance_time > 0.0 {
+            (self.time - p.clearance_start) / p.clearance_time
+        } else if self.time >= p.clearance_start {
+            1.0
+        } else {
+            0.0
+        };
+        1.0 + (p.clearance_supply - 1.0) * smoothstep(t)
     }
 
     /// Resample the centreline to spacing close to `ds`.
@@ -1625,6 +1675,7 @@ impl Sim {
     /// The silt the flood lays on its bed is read in [`Sim::step`]. Both
     /// settle into the fill over `SETTLE_TIME`.
     fn fill_lakes(&mut self, u: f64) {
+        let supply = self.supply();
         let p = &self.params;
         let (half, length) = (0.5 * p.width, p.levee_length * p.width);
         for o in self.oxbows.iter_mut().filter(|o| o.is_lake()) {
@@ -1632,7 +1683,7 @@ impl Sim {
             let mut inflow = 0.0;
             if o.offset == 0.0 && o.entry > 0.0 && length > 0.0 {
                 let gap = self.centerline.iter().map(|&c| geom::dist2(o.points[0], c)).fold(f64::INFINITY, f64::min);
-                inflow = u * p.bedload_fill * o.entry * (-(gap.sqrt() - half * o.widths[0]).max(0.0) / length).exp();
+                inflow = supply * u * p.bedload_fill * o.entry * (-(gap.sqrt() - half * o.widths[0]).max(0.0) / length).exp();
             }
             o.settling = (o.settling + inflow).min(1.0 - o.fill);
         }
@@ -1685,8 +1736,10 @@ impl Sim {
         }
     }
 
-    /// Drop scroll bars past their lifetime and the parts of the rest
-    /// within half a width of the channel, which has eroded them.
+    /// Drop scroll bars past their lifetime, the parts of the rest within
+    /// half a width of the channel, which has eroded them, and the parts
+    /// buried under overbank deposits within [`BURY`] of the flood level,
+    /// where the swales between the ridges have filled.
     fn rework_scrolls(&mut self) {
         let (time, life) = (self.time, self.params.scroll_lifetime);
         let before = self.scrolls.len();
@@ -1697,8 +1750,10 @@ impl Sim {
             let g = self.build_grid(w);
             let scrolls = std::mem::take(&mut self.scrolls);
             let mut kept = Vec::with_capacity(scrolls.len());
+            let buried = BURY * self.params.levee_height;
+            let field = &self.erodibility;
             for sc in scrolls {
-                let wet = |q: P| self.near_channel(q, 0.5 * w, g);
+                let wet = |q: P| field.deposit_at(q) > buried || self.near_channel(q, 0.5 * w, g);
                 if !sc.points.iter().any(|&q| wet(q)) {
                     kept.push(sc);
                     continue;
@@ -2180,6 +2235,29 @@ mod tests {
         assert_eq!(piece.points, old[1..]);
         assert_eq!(piece.widths.len(), piece.points.len());
         assert!((piece.offset - 0.5 * w).abs() < 1e-9);
+    }
+
+    #[test]
+    fn clearance_raises_the_supply_and_the_silt_floods_lay() {
+        let mut sim = sine_sim(0.0, 40.0);
+        let p = sim.params.clone();
+        sim.time = p.clearance_start - 1.0;
+        assert_eq!(sim.supply(), 1.0);
+        sim.time = p.clearance_start + 0.5 * p.clearance_time;
+        assert!((sim.supply() - 0.5 * (1.0 + p.clearance_supply)).abs() < 1e-9);
+        sim.time = p.clearance_start + p.clearance_time + 1.0;
+        assert_eq!(sim.supply(), p.clearance_supply);
+        // The same flood, before and after clearance.
+        let run = |time: f64| {
+            let mut sim = sine_sim(0.0, 40.0);
+            (sim.params.flood_rate, sim.time) = (1.0 / sim.params.dt, time);
+            sim.step();
+            let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+            [1.5, 5.0].map(|y| sim.erodibility.deposit_at([100.0 * w, mid + y * w]))
+        };
+        let (before, after) = (run(0.0), run(2000.0));
+        assert!(after[0] > before[0], "more silt by the bank: {after:?} against {before:?}");
+        assert!(after[1] > 2.0 * before[1], "and carried farther out: {after:?} against {before:?}");
     }
 
     /// A channel along x with a bend 10 widths high between x = 110 and
