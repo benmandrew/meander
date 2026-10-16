@@ -53,13 +53,17 @@ const WALL_KNOTS = [30, 8];
 // darken with age: shrub once it binds a point bar after
 // `vegetation_time`, then young and mature forest at these fractions of
 // `forest_time` after that. Ground the channel never reached is mature
-// forest.
+// forest. Each level fades in over `FOREST_STEPS` nested regions across
+// the second half of the age gap before it, which reach `FOREST_OPACITY`
+// together. With one region, ground the channel swept within a short time
+// would cross the level at once and darken in a single frame.
 const FOREST = [
   { at: 0, colour: [150, 170, 104] },
   { at: 0.35, colour: [112, 140, 84] },
   { at: 0.85, colour: [84, 116, 70] },
 ];
 const FOREST_OPACITY = 0.16;
+const FOREST_STEPS = 6;
 // Opacity of the marsh that stays on the clay plug of an old oxbow after
 // its lake and scar have gone, until the channel sweeps it away.
 const PLUG_MARSH = 0.25;
@@ -780,8 +784,10 @@ class SvgRenderer {
     this.barLayer = el('g', line, ground);
     // Shrub and forest lie over the bars and under the scroll bars, so the
     // ridges show through the trees.
-    this.forestLayer = el('g', { 'fill-rule': 'evenodd', 'fill-opacity': FOREST_OPACITY }, ground);
-    this.forest = FOREST.map(({ colour }) => el('path', { fill: `rgb(${colour})` }, this.forestLayer));
+    const stepOpacity = 1 - (1 - FOREST_OPACITY) ** (1 / FOREST_STEPS);
+    this.forestLayer = el('g', { 'fill-rule': 'evenodd', 'fill-opacity': stepOpacity.toFixed(4) }, ground);
+    this.forest = FOREST.flatMap(({ colour }) => Array.from(
+      { length: FOREST_STEPS }, () => el('path', { fill: `rgb(${colour})` }, this.forestLayer)));
     this.forestAt = null;
     // Scroll bars: one group for each age band, with one path for each
     // ridge, so trimming a ridge repaints only the ground around it.
@@ -1107,7 +1113,12 @@ class SvgRenderer {
     const blur = this.blur(age, cols, rows, c0, c1);
     const [shrub, forest] = [river.get_param('vegetation_time'), river.get_param('forest_time')];
     FOREST.forEach(({ at }, k) => {
-      set(this.forest[k], 'd', contourData(blur, cols, rows, cell, c0, c1, shrub + at * forest));
+      const age = shrub + at * forest;
+      const start = 0.5 * (age + (k ? shrub + FOREST[k - 1].at * forest : 0));
+      for (let s = 0; s < FOREST_STEPS; s++) {
+        const level = start + (age - start) * (s + 1) / FOREST_STEPS;
+        set(this.forest[k * FOREST_STEPS + s], 'd', contourData(blur, cols, rows, cell, c0, c1, level));
+      }
     });
   }
 
