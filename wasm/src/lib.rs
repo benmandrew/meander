@@ -57,7 +57,7 @@ pub struct River {
     /// 1 on each erodibility cell that was cut off as an oxbow and has not
     /// been swept by the channel since, 0 elsewhere.
     plugs: Vec<f32>,
-    /// Age of the vegetation on each erodibility cell; see `sync_forest`.
+    /// Growth of the vegetation on each erodibility cell; see `sync_forest`.
     forest: Vec<f32>,
 }
 
@@ -277,26 +277,19 @@ impl River {
         self.plugs.as_ptr()
     }
 
-    /// Copy the age of the vegetation on each erodibility cell into a flat
-    /// buffer, the same shape as `deposit_ptr`: the time since the channel
-    /// last swept it, up to `vegetation_time` + `forest_time` for mature
+    /// Copy the growth of the vegetation on each erodibility cell into a
+    /// flat buffer, the same shape as `deposit_ptr`: 0 where the channel
+    /// has just swept, up to `vegetation_time` + `forest_time` for mature
     /// forest and ground it has never reached, and 0 on oxbow ground.
     /// Rebuild every view after calling this, since it can grow memory.
     pub fn sync_forest(&mut self) {
-        let (sim, p) = (&self.sim, &self.sim.params);
-        let full = p.vegetation_time + p.forest_time;
-        let field = &sim.erodibility;
+        let p = &self.sim.params;
+        let full = (p.vegetation_time + p.forest_time) as f32;
+        let field = &self.sim.erodibility;
         self.forest.clear();
-        self.forest.extend(field.cut_at.iter().zip(&field.swept_at).map(|(&cut, &swept)| {
-            let age = if cut.is_finite() {
-                0.0
-            } else if swept.is_finite() {
-                (sim.time - swept).clamp(0.0, full)
-            } else {
-                full
-            };
-            age as f32
-        }));
+        self.forest.extend(
+            field.cut_at.iter().zip(&field.growth).map(|(&cut, &g)| if cut.is_finite() { 0.0 } else { g.min(full) }),
+        );
     }
     pub fn forest_ptr(&self) -> *const f32 {
         self.forest.as_ptr()

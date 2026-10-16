@@ -30,6 +30,13 @@ pub const LAKE_DEPTH: f64 = 1.0;
 /// deposit; exp(−4) is under 2% of the deposit at the bank.
 const LEVEE_REACH: f64 = 4.0;
 
+/// Growth rates of vegetation, as multiples of the rate the vegetation
+/// and forest times assume: on fresh point-bar sand, which floods cover
+/// often, and on ground raised by the growth height or more, which they
+/// seldom reach.
+const BARE_GROWTH: f32 = 0.6;
+const HIGH_GROWTH: f32 = 1.6;
+
 fn lattice(seed: u64, x: i64, y: i64) -> f64 {
     let mut h = seed ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     h ^= h >> 33;
@@ -66,19 +73,20 @@ pub struct Ground {
     /// Multiplier once the lake has filled, as a clay plug.
     pub clay: f64,
     /// Multiplier on ground the channel has just left, as bare point-bar
-    /// sand. It moves to `shrub` over `vegetation`.
+    /// sand. It moves to `shrub` as growth reaches `vegetation`.
     pub bar: f64,
-    /// Time vegetation takes to bind a point bar.
+    /// Growth at which vegetation binds a point bar.
     pub vegetation: f64,
     /// Multiplier once shrub has bound a point bar. It moves to 1, the
-    /// mature forest of the old floodplain, over `forest`.
+    /// mature forest of the old floodplain, over a further `forest` of
+    /// growth.
     pub shrub: f64,
-    /// Time shrub takes to grow into mature forest.
+    /// Growth shrub needs to become mature forest.
     pub forest: f64,
 }
 
 /// Erodibility multiplier on a grid. Built from noise at reset. Cells the
-/// channel crosses are stamped with the time it last swept them, and their
+/// channel crosses are reset to bare sand with no growth, and their
 /// multiplier moves from the bar factor to the shrub factor as vegetation
 /// binds the sand, then to 1 as forest grows.
 /// Oxbow footprints are stamped with their cutoff time, and their multiplier
@@ -91,8 +99,12 @@ pub struct Erodibility {
     pub noise: Vec<f32>,
     /// Time each cell was cut off as part of an oxbow, or infinity.
     pub cut_at: Vec<f64>,
-    /// Time the channel last swept each cell, or minus infinity.
-    pub swept_at: Vec<f64>,
+    /// Vegetation on each cell, as the simulated time it would have taken
+    /// to grow at the rate the vegetation and forest times assume: 0 where
+    /// the channel has just swept, infinity where it never has. It grows
+    /// faster on higher ground (see [`Erodibility::grow`]), and floods
+    /// strip it while it is young (see [`Erodibility::scour`]).
+    pub growth: Vec<f32>,
     /// Height of overbank deposits above fresh point-bar sand, in channel
     /// depths. The channel resets it to 0 where it sweeps, and a cutoff
     /// sets it to −`LAKE_DEPTH` over the oxbow footprint.
@@ -125,7 +137,7 @@ impl Erodibility {
             rows,
             noise,
             cut_at: vec![f64::INFINITY; cells],
-            swept_at: vec![f64::NEG_INFINITY; cells],
+            growth: vec![f32::INFINITY; cells],
             deposit: vec![0.0; cells],
             near: Vec::new(),
             nearest: Vec::new(),
@@ -157,8 +169,8 @@ impl Erodibility {
     /// times a factor for the ground's history. Inside an oxbow footprint it
     /// moves linearly from `g.lake` to `g.clay` over `g.lake_life`, or
     /// faster as floods silt the lake up (see [`Erodibility::silt_at`]); on a
-    /// point bar, from `g.bar` to `g.shrub` over `g.vegetation`, then to 1
-    /// over `g.forest`. A bank raised by
+    /// point bar, from `g.bar` to `g.shrub` as growth reaches
+    /// `g.vegetation`, then to 1 over a further `g.forest`. A bank raised by
     /// overbank deposits of height h, in channel depths, holds 1 + h times
     /// the material of a bank at bar level, so it erodes 1 / (1 + h) as
     /// fast.
@@ -166,15 +178,15 @@ impl Erodibility {
         let i = self.index(p);
         let n = 1.0 + g.heterogeneity * 2.0 * (self.noise[i] as f64 - 0.5);
         let since = |t: f64, life: f64| ((g.time - t) / life.max(1e-9)).clamp(0.0, 1.0);
-        let (cut, swept) = (self.cut_at[i], self.swept_at[i]);
+        let cut = self.cut_at[i];
         let c = if cut.is_finite() {
             let silt = (1.0 + self.deposit[i] as f64 / LAKE_DEPTH).clamp(0.0, 1.0);
             g.lake + (g.clay - g.lake) * since(cut, g.lake_life).max(silt)
-        } else if swept.is_finite() {
-            let shrub = g.bar + (g.shrub - g.bar) * since(swept, g.vegetation);
-            shrub + (1.0 - shrub) * since(swept + g.vegetation, g.forest)
         } else {
-            1.0
+            // Never-swept ground has infinite growth and a multiplier of 1.
+            let growth = self.growth[i] as f64;
+            let shrub = g.bar + (g.shrub - g.bar) * (growth / g.vegetation.max(1e-9)).clamp(0.0, 1.0);
+            shrub + (1.0 - shrub) * ((growth - g.vegetation) / g.forest.max(1e-9)).clamp(0.0, 1.0)
         };
         n.max(0.05) * c / (1.0 + (self.deposit[i] as f64).max(0.0))
     }
@@ -225,9 +237,42 @@ impl Erodibility {
         if amount <= 0.0 || length <= 0.0 || stage <= 0.0 {
             return;
         }
-        let c = self.cell;
         let widest = widths.iter().fold(1.0f64, |a, &b| a.max(b));
-        let reach = widest * half + LEVEE_REACH * length;
+        self.find_nearest(pts, widest * half + LEVEE_REACH * length);
+        for ((h, &d2), &k) in self.deposit.iter_mut().zip(&self.near).zip(&self.nearest) {
+            let (d, bank) = ((d2 as f64).sqrt(), half * widths[k as usize]);
+            if d.is_finite() && d >= bank {
+                let room = (1.0 - *h as f64 / stage).max(0.0);
+                *h += (amount * (-(d - bank) / length).exp() * room) as f32;
+            }
+        }
+    }
+
+    /// Strip young vegetation beside a channel along the points, of
+    /// half-width `half` times the width at each point, as a flood's current
+    /// does. Growth below `young` is scaled by the distance from the bank
+    /// over `reach`, so it falls to 0 at the bank and is untouched `reach`
+    /// beyond it. Older vegetation holds.
+    pub fn scour(&mut self, pts: &[P], widths: &[f64], half: f64, reach: f64, young: f64) {
+        if reach <= 0.0 {
+            return;
+        }
+        let widest = widths.iter().fold(1.0f64, |a, &b| a.max(b));
+        self.find_nearest(pts, widest * half + reach);
+        let young = young as f32;
+        for ((g, &d2), &k) in self.growth.iter_mut().zip(&self.near).zip(&self.nearest) {
+            let (d, bank) = ((d2 as f64).sqrt(), half * widths[k as usize]);
+            if d.is_finite() && d >= bank && *g < young {
+                *g *= ((d - bank) / reach).min(1.0) as f32;
+            }
+        }
+    }
+
+    /// Fill the scratch `near` with the squared distance from each cell to
+    /// the nearest of the points within `reach`, or infinity, and `nearest`
+    /// with that point's index.
+    fn find_nearest(&mut self, pts: &[P], reach: f64) {
+        let c = self.cell;
         let r2 = (reach * reach) as f32;
         self.near.clear();
         self.near.resize(self.deposit.len(), f32::INFINITY);
@@ -252,21 +297,49 @@ impl Erodibility {
                 }
             }
         }
-        for ((h, &d2), &k) in self.deposit.iter_mut().zip(&self.near).zip(&self.nearest) {
-            let (d, bank) = ((d2 as f64).sqrt(), half * widths[k as usize]);
-            if d.is_finite() && d >= bank {
-                let room = (1.0 - *h as f64 / stage).max(0.0);
-                *h += (amount * (-(d - bank) / length).exp() * room) as f32;
+    }
+
+    /// Raise the ground under each point by `height` channel depths, as the
+    /// ridge of a scroll bar does, scaled like a flood's deposit by the room
+    /// left under the flood level `stage`. Oxbow footprints are left alone.
+    pub fn raise(&mut self, pts: &[P], height: f64, stage: f64) {
+        if height <= 0.0 || stage <= 0.0 {
+            return;
+        }
+        let mut last = usize::MAX;
+        for &p in pts {
+            let i = self.index(p);
+            if i != last && self.cut_at[i].is_infinite() {
+                let h = &mut self.deposit[i];
+                *h += (height * (1.0 - *h as f64 / stage).max(0.0)) as f32;
             }
+            last = i;
         }
     }
 
-    /// Mark the cell under each point as swept by the channel at `time`. The
-    /// channel replaces any oxbow fill there with fresh point-bar sand.
-    pub fn sweep(&mut self, pts: &[P], time: f64) {
+    /// Grow the vegetation on every cell by `dt` of simulated time, times a
+    /// rate set by the cell's overbank deposit: `BARE_GROWTH` on fresh bar
+    /// sand, rising linearly to `HIGH_GROWTH` at a deposit of `height`
+    /// channel depths. A `height` of 0 grows every cell at rate 1.
+    pub fn grow(&mut self, dt: f64, height: f64) {
+        let dt = dt as f32;
+        if height <= 0.0 {
+            self.growth.iter_mut().for_each(|g| *g += dt);
+            return;
+        }
+        let k = (HIGH_GROWTH - BARE_GROWTH) / height as f32;
+        for (g, &h) in self.growth.iter_mut().zip(&self.deposit) {
+            *g += dt * (BARE_GROWTH + k * h.max(0.0)).min(HIGH_GROWTH);
+        }
+    }
+
+    /// Mark the cell under each point as swept by the channel, with no
+    /// growth. The channel replaces any oxbow fill there with fresh
+    /// point-bar sand.
+    pub fn sweep(&mut self, pts: &[P]) {
         for &p in pts {
             let i = self.index(p);
-            self.swept_at[i] = time;
+            self.growth[i] = 0.0;
             self.cut_at[i] = f64::INFINITY;
             self.deposit[i] = 0.0;
         }
@@ -342,14 +415,50 @@ mod tests {
     #[test]
     fn a_point_bar_grows_shrub_then_forest() {
         let mut e = Erodibility::new([10.0, 10.0], 1.0, 5.0, 0);
-        let g = |time| Ground { shrub: 1.5, forest: 200.0, ..ground(time) };
-        let at = |e: &Erodibility, time| e.at([5.0, 5.0], &g(time));
-        e.sweep(&[[5.0, 5.0]], 10.0);
-        assert!((at(&e, 10.0) - 2.0).abs() < 1e-12, "bare sand");
-        assert!((at(&e, 60.0) - 1.5).abs() < 1e-12, "shrub");
-        assert!((at(&e, 160.0) - 1.25).abs() < 1e-12, "young forest");
-        assert!((at(&e, 260.0) - 1.0).abs() < 1e-12, "mature forest");
-        assert!((at(&e, 1000.0) - 1.0).abs() < 1e-12);
+        let g = Ground { shrub: 1.5, forest: 200.0, ..ground(0.0) };
+        let at = |e: &Erodibility| e.at([5.0, 5.0], &g);
+        assert_eq!(at(&e), 1.0, "never swept");
+        e.sweep(&[[5.0, 5.0]]);
+        assert!((at(&e) - 2.0).abs() < 1e-12, "bare sand");
+        e.grow(50.0, 0.0);
+        assert!((at(&e) - 1.5).abs() < 1e-12, "shrub");
+        e.grow(100.0, 0.0);
+        assert!((at(&e) - 1.25).abs() < 1e-12, "young forest");
+        e.grow(100.0, 0.0);
+        assert!((at(&e) - 1.0).abs() < 1e-12, "mature forest");
+        e.grow(1000.0, 0.0);
+        assert!((at(&e) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn raised_ground_vegetates_first() {
+        let mut e = Erodibility::new([10.0, 10.0], 1.0, 5.0, 0);
+        let (low, high) = ([2.5, 5.5], [7.5, 5.5]);
+        e.sweep(&[low, high]);
+        e.raise(&[high, high], 0.1, 1.0);
+        assert!((e.deposit_at(high) - 0.1).abs() < 1e-6, "a ridge raises its cell once");
+        e.grow(10.0, 0.1);
+        let growth = |p| e.growth[e.index(p)];
+        assert!((growth(low) - 10.0 * BARE_GROWTH).abs() < 1e-4);
+        assert!((growth(high) - 10.0 * HIGH_GROWTH).abs() < 1e-4);
+    }
+
+    #[test]
+    fn floods_strip_young_growth_beside_the_bank() {
+        let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
+        let channel: Vec<P> = (0..80).map(|k| [k as f64 * 0.5, 20.0]).collect();
+        let (old, young, far) = ([10.0, 21.25], [20.0, 21.25], [30.0, 25.25]);
+        e.sweep(&[old]);
+        e.grow(200.0, 0.0);
+        e.sweep(&[young, far]);
+        e.grow(10.0, 0.0);
+        e.scour(&channel, &vec![1.0; channel.len()], 1.0, 2.0, 50.0);
+        let growth = |p| e.growth[e.index(p)];
+        // The cell centre lies a quarter cell along from the nearest point.
+        let d = (1.25f64 * 1.25 + 0.25 * 0.25).sqrt();
+        assert!((growth(young) as f64 - 10.0 * (d - 1.0) / 2.0).abs() < 1e-4, "scaled by the distance from the bank");
+        assert_eq!(growth(old), 210.0, "established vegetation holds");
+        assert_eq!(growth(far), 10.0, "beyond the reach");
     }
 
     #[test]
@@ -368,7 +477,7 @@ mod tests {
         assert!(h(&e, 21.25) <= 1.0 && h(&e, 21.25) > 0.95, "levee {}", h(&e, 21.25));
         let at = |e: &Erodibility, y| e.at([20.0, y], &ground(0.0));
         assert!((at(&e, 21.25) - 1.0 / (1.0 + h(&e, 21.25))).abs() < 1e-9);
-        e.sweep(&[[20.0, 21.25]], 0.0);
+        e.sweep(&[[20.0, 21.25]]);
         assert_eq!(h(&e, 21.25), 0.0, "the channel clears the levee it crosses");
     }
 
@@ -395,11 +504,13 @@ mod tests {
     fn swept_ground_is_loose_until_vegetated() {
         let mut e = Erodibility::new([10.0, 10.0], 1.0, 5.0, 0);
         e.stamp_oxbow(&[[5.0, 5.0]], &[1.0], 1.0, 10.0);
-        e.sweep(&[[5.5, 5.5]], 10.0);
-        let at = |time| e.at([5.5, 5.5], &ground(time));
-        assert!((at(10.0) - 2.0).abs() < 1e-12, "the channel replaces the oxbow fill with sand");
-        assert!((at(35.0) - 1.5).abs() < 1e-12);
-        assert!((at(100.0) - 1.0).abs() < 1e-12);
+        e.sweep(&[[5.5, 5.5]]);
+        let at = |e: &Erodibility| e.at([5.5, 5.5], &ground(10.0));
+        assert!((at(&e) - 2.0).abs() < 1e-12, "the channel replaces the oxbow fill with sand");
+        e.grow(25.0, 0.0);
+        assert!((at(&e) - 1.5).abs() < 1e-12);
+        e.grow(75.0, 0.0);
+        assert!((at(&e) - 1.0).abs() < 1e-12);
         assert!((e.at([4.5, 5.5], &ground(10.0)) - 3.0).abs() < 1e-12, "only the swept cell changes");
     }
 }

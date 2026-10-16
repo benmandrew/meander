@@ -130,6 +130,18 @@ pub struct Params {
     /// highest ground overbank deposits can build. A bank raised by h
     /// erodes 1 / (1 + h) as fast.
     pub levee_height: f64,
+    /// Overbank deposit, in channel depths, at which vegetation grows
+    /// fastest. Ground the floods seldom cover grows shrub and forest
+    /// sooner than bare bar sand beside the water; 0 grows every cell at the
+    /// rate `vegetation_time` and `forest_time` assume.
+    pub vegetation_height: f64,
+    /// Distance past the bank, in channel widths, over which a flood of
+    /// magnitude 1 strips shrub younger than `vegetation_time`. It scales
+    /// with the magnitude. 0 disables.
+    pub scour_reach: f64,
+    /// Height a scroll bar's ridge raises the ground, in channel depths, so
+    /// vegetation takes to the ridges first. 0 disables.
+    pub scroll_height: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -190,6 +202,9 @@ impl Default for Params {
             overbank: OVERBANK,
             levee_length: LEVEE_LENGTH,
             levee_height: LEVEE_HEIGHT,
+            vegetation_height: VEGETATION_HEIGHT,
+            scour_reach: SCOUR_REACH,
+            scroll_height: SCROLL_HEIGHT,
             physics: true,
             friction,
             aspect,
@@ -239,6 +254,9 @@ impl Params {
         "overbank",
         "levee_length",
         "levee_height",
+        "vegetation_height",
+        "scour_reach",
+        "scroll_height",
         "physics",
         "friction",
         "aspect",
@@ -284,6 +302,9 @@ impl Params {
             "overbank" => &mut self.overbank,
             "levee_length" => &mut self.levee_length,
             "levee_height" => &mut self.levee_height,
+            "vegetation_height" => &mut self.vegetation_height,
+            "scour_reach" => &mut self.scour_reach,
+            "scroll_height" => &mut self.scroll_height,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -480,6 +501,12 @@ const VEGETATION_TIME: f64 = 100.0;
 /// 1.5 times as fast through cleared farmland as through it.
 const SHRUB_FACTOR: f64 = 1.15;
 const FOREST_TIME: f64 = 1500.0;
+/// Default vegetation growth and flood scour; see [`Params`].
+const VEGETATION_HEIGHT: f64 = 0.05;
+const SCOUR_REACH: f64 = 1.5;
+const SCROLL_HEIGHT: f64 = 0.05;
+/// Steps between vegetation growth updates, a pass over the whole grid.
+const GROWTH_EVERY: u64 = 10;
 
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
@@ -506,8 +533,10 @@ const SCROLL_MIN_RATE: f64 = 0.05;
 /// Scroll bars and pieces with fewer points than this are dropped.
 const MIN_SCROLL_POINTS: usize = 6;
 
-/// Steps between checks for scroll bars under the channel. They do not
-/// affect the dynamics, so the check need not run every step.
+/// Steps between checks for scroll bars under the channel. The ridges
+/// they raise stay in the ground until the channel sweeps it, so dropping
+/// a drawn scroll bar does not affect the dynamics and the check need not
+/// run every step.
 const SCROLL_REWORK_EVERY: u64 = 10;
 const LEVEE_LENGTH: f64 = 2.0;
 const LEVEE_HEIGHT: f64 = 0.25;
@@ -676,12 +705,18 @@ impl Sim {
             self.widen(magnitude);
             let p = &self.params;
             self.erodibility.flood(&self.centerline, &self.widths, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
+            let reach = magnitude * p.scour_reach * p.width;
+            self.erodibility.scour(&self.centerline, &self.widths, 0.5 * p.width, reach, p.vegetation_time);
             self.fill_lakes(magnitude);
             self.add_scrolls();
         }
-        self.erodibility.sweep(&self.centerline, self.time);
+        self.erodibility.sweep(&self.centerline);
         self.time += self.params.dt;
         self.steps += 1;
+        if self.steps.is_multiple_of(GROWTH_EVERY) {
+            let p = &self.params;
+            self.erodibility.grow(GROWTH_EVERY as f64 * p.dt, p.vegetation_height);
+        }
         self.rework_oxbows();
         let (time, rate) = (self.time, self.params.dt / self.params.oxbow_lifetime.max(1e-9));
         // A lake fills at least as far as the silt on its bed, read every
@@ -1289,6 +1324,10 @@ impl Sim {
             }
         }
         if !added.is_empty() {
+            let p = &self.params;
+            for s in &added {
+                self.erodibility.raise(&s.points, p.scroll_height, p.levee_height);
+            }
             self.scrolls.extend(added);
             self.scroll_version += 1;
         }
