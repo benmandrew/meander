@@ -337,6 +337,9 @@ pub struct Oxbow {
     pub offset: f64,
     /// Fraction of the lake filled, in [0, 1].
     pub fill: f64,
+    /// Fill that floods have brought into the lake and that has yet to
+    /// settle into `fill`, which it does over about `SETTLE_TIME`.
+    pub settling: f64,
     /// Time the lake filled and became a scar, or infinity.
     pub filled_at: f64,
     /// Cosine of the diversion angle between the new channel and the
@@ -350,7 +353,7 @@ impl Oxbow {
     /// cut off at `born`.
     pub fn lake(points: Vec<P>, widths: Vec<f64>, born: f64, entry: f64) -> Self {
         let length = geom::length(&points);
-        Self { points, widths, born, length, offset: 0.0, fill: 0.0, filled_at: f64::INFINITY, entry }
+        Self { points, widths, born, length, offset: 0.0, fill: 0.0, settling: 0.0, filled_at: f64::INFINITY, entry }
     }
 
     pub fn is_lake(&self) -> bool {
@@ -487,6 +490,9 @@ const BREACH_DIST: f64 = 2.5;
 const CHUTE_RATIO: f64 = 4.0;
 const OVERBANK: f64 = 0.3;
 const OXBOW_LIFETIME: f64 = 1200.0;
+/// Time over which the fill a flood brings into a lake settles, as the
+/// e-folding time. At the default speed it is under two seconds on screen.
+const SETTLE_TIME: f64 = 10.0;
 const BEDLOAD_FILL: f64 = 0.2;
 const SCROLL_LIFETIME: f64 = 1000.0;
 
@@ -678,8 +684,17 @@ impl Sim {
         self.steps += 1;
         self.rework_oxbows();
         let (time, rate) = (self.time, self.params.dt / self.params.oxbow_lifetime.max(1e-9));
+        // A lake fills at least as far as the silt on its bed, read every
+        // step: the channel changes it between floods by sweeping some of
+        // its cells, and applying that only at the next flood would change
+        // every lake at once.
+        let settle = (self.params.dt / SETTLE_TIME).min(1.0);
+        let field = &self.erodibility;
         for o in self.oxbows.iter_mut().filter(|o| o.is_lake()) {
-            o.fill = (o.fill + rate).min(1.0);
+            o.settling = o.settling.max(field.lake_silt(&o.points).min(1.0) - o.fill);
+            let d = settle * o.settling;
+            o.settling -= d;
+            o.fill = (o.fill + rate + d).min(1.0);
             if o.fill >= 1.0 {
                 o.filled_at = time;
             }
@@ -1218,9 +1233,10 @@ impl Sim {
         self.oxbows = kept;
     }
 
-    /// Fill each lake by one flood of magnitude `u`: bedload through an
-    /// entrance near the channel, by [`Params::bedload_fill`], and the silt
-    /// the flood laid on its bed, whichever fills it further.
+    /// Fill each lake by the bedload one flood of magnitude `u` carries
+    /// through an entrance near the channel, by [`Params::bedload_fill`].
+    /// The silt the flood lays on its bed is read in [`Sim::step`]. Both
+    /// settle into the fill over `SETTLE_TIME`.
     fn fill_lakes(&mut self, u: f64) {
         let p = &self.params;
         let (half, length) = (0.5 * p.width, p.levee_length * p.width);
@@ -1231,11 +1247,7 @@ impl Sim {
                 let gap = self.centerline.iter().map(|&c| geom::dist2(o.points[0], c)).fold(f64::INFINITY, f64::min);
                 inflow = u * p.bedload_fill * o.entry * (-(gap.sqrt() - half * o.widths[0]).max(0.0) / length).exp();
             }
-            let silt = self.erodibility.lake_silt(&o.points);
-            o.fill = (o.fill + inflow).max(silt).min(1.0);
-            if o.fill >= 1.0 {
-                o.filled_at = self.time;
-            }
+            o.settling = (o.settling + inflow).min(1.0 - o.fill);
         }
     }
 
