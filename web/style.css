@@ -1,4 +1,26 @@
+/* Iosevka Slab Extended, the code font of benmandrew.com, used for all text.
+   Subset to the characters the page uses, with no layout features or hinting:
+   pyftsubset --unicodes=U+0020-007E,U+00B0,U+00D7,U+00E9,U+0393,U+03A9,
+   U+03B1,U+2013,U+2026,U+2212,U+221A,U+2630 --layout-features= --no-hinting
+   --desubroutinize --flavor=woff2. A new non-ASCII character in a label needs
+   adding here. Licence in fonts/. */
+@font-face {
+  font-family: "Iosevka Slab Extended";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/iosevka-slab-extended-regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Iosevka Slab Extended";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/iosevka-slab-extended-bold.woff2") format("woff2");
+}
+
 :root {
+  --mono: "Iosevka Slab Extended", ui-monospace, SFMono-Regular, Menlo, monospace;
   --panel-bg: rgba(250, 247, 238, 0.95);
   --panel-fg: #2b2a26;
   --muted: #6d6a60;
@@ -23,7 +45,7 @@ html, body {
   height: 100%;
   overflow: hidden;
   background: #cfc6a4;
-  font: 13px/1.4 system-ui, -apple-system, sans-serif;
+  font: 13px/1.4 var(--mono);
   color: var(--panel-fg);
 }
 
@@ -49,7 +71,6 @@ html, body {
   padding: 4px 10px;
   background: var(--panel-bg);
   border: 1px solid var(--border);
-  font: 13px/1.4 ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
 }
@@ -70,7 +91,8 @@ html, body {
   position: fixed;
   top: 12px;
   right: 12px;
-  width: 280px;
+  width: 360px;
+  max-width: calc(100% - 24px);
   max-height: calc(100% - 24px);
   overflow-y: auto;
   padding: 12px 14px;
@@ -149,6 +171,7 @@ button:hover { border-color: var(--accent); }
 .slider {
   display: grid;
   grid-template-columns: 1fr auto;
+  column-gap: 10px;
   margin-top: 6px;
 }
 
@@ -180,7 +203,7 @@ button:hover { border-color: var(--accent); }
 
 #stats {
   margin: 14px 0 0;
-  font: 11px/1.5 ui-monospace, monospace;
+  font: 11px/1.5 var(--mono);
   color: var(--muted);
   white-space: pre-wrap;
 }
