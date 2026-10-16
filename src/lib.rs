@@ -170,7 +170,7 @@ impl Default for Params {
             valley_width: 45.0,
             edge_margin: 8.0,
             pinch_width: 6.0,
-            pinch_length: 20.0,
+            pinch_length: 30.0,
             heterogeneity: 0.5,
             clay_factor: 0.35,
             lake_factor: 3.0,
