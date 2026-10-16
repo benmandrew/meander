@@ -111,6 +111,12 @@ const MIN_FIELD = 2;
 // most every `FIELD_REFRESH` of simulated time.
 const FIELD_SIMPLIFY = 0.7;
 const FIELD_REFRESH = 5;
+// Fields fade in as the sward thickens, over `FIELD_FADE` nested regions
+// from `grazing_time`, when a holding takes the ground, to
+// `vegetation_time`, when it is as thick as old meadow: 50 to 250 years.
+// The regions are redrawn with the forest, every `LEVEE_REFRESH`, so each
+// redraw moves the fade by about one region, not the fields' whole edge.
+const FIELD_FADE = 8;
 // Land use follows flood risk, as on a medieval floodplain: meadow and
 // pasture on ground at risk `MEADOW_RISK` or more, which floods too often
 // to plough, and arable on the drier ground. `WOODLAND` of the fields stay
@@ -118,6 +124,10 @@ const FIELD_REFRESH = 5;
 const MEADOWS = [[146, 168, 104], [184, 188, 128]];
 const ARABLE = [[168, 182, 110], [212, 198, 138], [166, 146, 108]];
 const MEADOW_RISK = 0.35;
+// A field changes use only once its risk passes `MEADOW_RISK` by
+// `USE_MARGIN`, so a field near the threshold keeps its colour while the
+// channel moves.
+const USE_MARGIN = 0.05;
 const CROP_OPACITY = 0.5;
 const WOODLAND = 0.12;
 const WOODS_OPACITY = 0.35;
@@ -991,16 +1001,23 @@ class SvgRenderer {
     this.forest = FOREST.flatMap(({ colour }) => Array.from(
       { length: FOREST_STEPS }, () => el('path', { fill: `rgb(${colour})` }, this.forestLayer)));
     this.forestAt = null;
-    // Fields lie over the forest, clipped to the grassed ground.
-    const clip = el('clipPath', { id: 'farmland' }, el('defs', {}, ground));
-    this.farmland = el('path', { 'clip-rule': 'evenodd' }, clip);
-    this.fieldLayer = el('g', { 'clip-path': 'url(#farmland)' }, ground);
+    // Fields lie over the forest, masked by the grassed ground: each fade
+    // region is painted over the last in a lighter grey, so the mask
+    // brightens towards the oldest ground with no seams between regions.
+    const mask = el('mask', { id: 'farmland', 'color-interpolation': 'sRGB' }, el('defs', {}, ground));
+    this.farmland = Array.from({ length: FIELD_FADE }, (_, k) => {
+      const grey = Math.round(255 * (k + 1) / FIELD_FADE);
+      return el('path', { 'fill-rule': 'evenodd', fill: `rgb(${grey},${grey},${grey})` }, mask);
+    });
+    this.fieldLayer = el('g', { mask: 'url(#farmland)' }, ground);
     this.parcels = el('g', {}, this.fieldLayer);
     this.hedges = el('path', {
       fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${HEDGE})`, 'stroke-opacity': 0.8,
     }, this.fieldLayer);
     // Path element of each field drawn, by its key.
     this.fieldPaths = new Map();
+    // Whether each field drawn, by its key, is meadow.
+    this.meadow = new Map();
     this.fieldsAt = null;
     // 1 on each cell of the window's columns where a crown stands in a crop
     // field away from a hedge, and is not drawn on farmland.
@@ -1091,6 +1108,7 @@ class SvgRenderer {
     this.scrollAt = null;
     this.fieldsAt = null;
     this.cropMask = null;
+    this.meadow = new Map();
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
     this.drawSoils(river, x, w, h, seed);
@@ -1177,11 +1195,15 @@ class SvgRenderer {
       }
     }
     // Land use by mean flood risk, and whether crowns stand in the field.
+    const meadowNow = new Map();
     for (const f of fields) {
       f.risk /= Math.max(1, f.cells);
       const u = hash01(f.key, 7);
       f.woods = u < WOODLAND;
-      const uses = f.risk >= MEADOW_RISK ? MEADOWS : ARABLE;
+      const was = this.meadow.get(f.key);
+      const meadow = f.risk >= MEADOW_RISK + (was === undefined ? 0 : was ? -USE_MARGIN : USE_MARGIN);
+      meadowNow.set(f.key, meadow);
+      const uses = meadow ? MEADOWS : ARABLE;
       f.colour = f.woods ? FOREST.at(-1).colour : uses[Math.floor(hash01(f.key, 8) * uses.length)];
       f.opacity = f.woods ? WOODS_OPACITY : (CROP_OPACITY * (0.8 + 0.4 * hash01(f.key, 9))).toFixed(2);
     }
@@ -1243,6 +1265,7 @@ class SvgRenderer {
       set(path, 'fill-opacity', field.opacity);
     });
     for (const path of this.fieldPaths.values()) path.remove();
+    this.meadow = meadowNow;
     this.fieldPaths = kept;
     set(this.hedges, 'd', hedgeData);
     set(this.hedges, 'stroke-width', dp1(HEDGE_WIDTH * w));
@@ -1506,7 +1529,11 @@ class SvgRenderer {
         set(this.forest[k * FOREST_STEPS + s], 'd', contourData(blur, cols, rows, cell, c0, c1, level));
       }
     });
-    set(this.farmland, 'd', contourData(blur, cols, rows, cell, c0, c1, river.get_param('grazing_time')));
+    const graze = river.get_param('grazing_time');
+    this.farmland.forEach((path, k) => {
+      const level = graze + (shrub - graze) * k / FIELD_FADE;
+      set(path, 'd', contourData(blur, cols, rows, cell, c0, c1, level));
+    });
     if (this.treeBlur?.length !== blur.length) this.treeBlur = new Float32Array(blur.length);
     this.treeBlur.set(blur);
     this.treeArgs = [cols, rows, cell, shrub, forest, river.get_param('width'), river.get_param('grazing_time')];
