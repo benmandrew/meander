@@ -256,52 +256,6 @@ impl Erodibility {
         }
     }
 
-    /// Whether the channel has passed within about half a width of `p`
-    /// since `time`: whether any cell within one and a half cells of `p`
-    /// was swept after it.
-    pub fn swept_since(&self, p: P, time: f64) -> bool {
-        let c = self.cell;
-        let x = ((p[0] / c).max(0.0) as usize).min(self.cols - 1);
-        let y = ((p[1] / c).max(0.0) as usize).min(self.rows - 1);
-        let near = |x: usize, y: usize| {
-            let (dx, dy) = ((x as f64 + 0.5) * c - p[0], (y as f64 + 0.5) * c - p[1]);
-            dx * dx + dy * dy <= 2.25 * c * c
-        };
-        (y.saturating_sub(1)..=(y + 1).min(self.rows - 1)).any(|y| {
-            (x.saturating_sub(1)..=(x + 1).min(self.cols - 1))
-                .any(|x| near(x, y) && self.swept_at[y * self.cols + x] > time)
-        })
-    }
-
-    /// Lay a crevasse splay: a fan of sand from `apex` along the unit vector
-    /// `dir`, out to `length`, spreading `spread` across per unit along. It
-    /// is `thickness` channel depths deep at the apex and thins to nothing
-    /// at its rim. Dry ground it covers becomes fresh sand swept at `time`;
-    /// in a lake the sand fills the bed instead.
-    pub fn stamp_splay(&mut self, apex: P, dir: P, length: f64, spread: f64, thickness: f64, time: f64) {
-        let c = self.cell;
-        let x0 = ((apex[0] - length) / c).floor().max(0.0) as usize;
-        let y0 = ((apex[1] - length) / c).floor().max(0.0) as usize;
-        let x1 = (((apex[0] + length).max(0.0) / c) as usize).min(self.cols - 1);
-        let y1 = (((apex[1] + length).max(0.0) / c) as usize).min(self.rows - 1);
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                let v = [(x as f64 + 0.5) * c - apex[0], (y as f64 + 0.5) * c - apex[1]];
-                let along = v[0] * dir[0] + v[1] * dir[1];
-                let across = (v[0] * dir[1] - v[1] * dir[0]).abs();
-                let r2 = v[0] * v[0] + v[1] * v[1];
-                if along <= 0.0 || across > spread * along || r2 >= length * length {
-                    continue;
-                }
-                let i = y * self.cols + x;
-                self.deposit[i] += (thickness * (1.0 - r2.sqrt() / length)) as f32;
-                if self.cut_at[i].is_infinite() {
-                    self.swept_at[i] = time;
-                }
-            }
-        }
-    }
-
     /// Mark cells within `radius` of the points as cut off at `time`, with
     /// the bed `LAKE_DEPTH` below fresh bar level.
     pub fn stamp_oxbow(&mut self, pts: &[P], radius: f64, time: f64) {
@@ -404,19 +358,6 @@ mod tests {
         }
         assert_eq!(e.silt_at([20.0, 22.25]), 1.0);
         assert!(e.deposit_at([20.0, 22.25]) <= 0.25, "fills no higher than the flood level");
-    }
-
-    #[test]
-    fn a_splay_spreads_thinning_sand_in_a_fan() {
-        let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
-        e.stamp_oxbow(&[[20.0, 32.0]], 1.0, 0.0);
-        e.stamp_splay([20.0, 20.0], [0.0, 1.0], 15.0, 0.7, 0.25, 5.0);
-        let h = |p: P| e.deposit_at(p);
-        assert!(h([20.0, 22.0]) > h([20.0, 28.0]) && h([20.0, 28.0]) > 0.0, "thins outwards");
-        assert!(h([24.0, 28.0]) > 0.0 && h([28.0, 24.0]) == 0.0, "only inside the fan");
-        assert_eq!(h([20.0, 18.0]), 0.0, "nothing behind the apex");
-        assert!((e.at([20.0, 22.0], &ground(5.0)) - 2.0 / (1.0 + h([20.0, 22.0]))).abs() < 1e-6, "loose sand");
-        assert!(e.silt_at([20.0, 32.0]) > 0.0 && e.cut_at[e.index([20.0, 32.0])] == 0.0, "a lake silts up");
     }
 
     #[test]
