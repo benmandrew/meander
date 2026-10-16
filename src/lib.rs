@@ -704,7 +704,8 @@ impl Sim {
 
     /// Erodibility of the bank of point `i` on the side `sign` of its right
     /// normal `nrm`, read [`BANK_BEYOND`] past the bank and tapered at the
-    /// domain edges and valley walls.
+    /// domain edges and valley walls. The taper is read at the bank too, so
+    /// a reach beside a wall can still move away from it.
     fn bank_erodibility(&self, i: usize, nrm: P, sign: f64, ground: &Ground) -> f64 {
         let p = &self.params;
         let q = self.centerline[i];
@@ -718,7 +719,7 @@ impl Sim {
         );
         let side = sign * (0.5 * self.widths[i] + BANK_BEYOND) * p.width;
         let bank = [q[0] + side * nrm[0], q[1] + side * nrm[1]];
-        edge_taper(q, self.bounds, p.edge_margin * p.width, valley) * self.erodibility.at(bank, ground)
+        edge_taper(bank, self.bounds, p.edge_margin * p.width, valley) * self.erodibility.at(bank, ground)
     }
 
     /// Widen each bend by a flood of magnitude `u`, in proportion to its
@@ -1580,6 +1581,25 @@ mod tests {
         for sc in &sim.scrolls {
             assert!(sc.points.iter().all(|&q| gap(q) >= 0.5 * w));
         }
+    }
+
+    #[test]
+    fn a_reach_beside_a_valley_wall_can_leave_it() {
+        // Tapering at the centreline slowed motion away from a wall as much
+        // as motion into it, so a reach that drifted there stayed straight.
+        let mut sim = sine_sim(0.0, 40.0);
+        let p = sim.params.clone();
+        let wall = 0.5 * (sim.bounds[1] + p.valley_width * p.width);
+        for q in &mut sim.centerline {
+            q[1] = wall - 2.0 * p.width;
+        }
+        let (i, ground) = (sim.centerline.len() / 2, sim.ground());
+        let nrm = right_normal(&sim.centerline, i);
+        // The bank on the side `sign` of the normal, and its erodibility.
+        let read = |sign: f64| (sim.centerline[i][1] + sign * nrm[1], sim.bank_erodibility(i, nrm, sign, &ground));
+        let (toward, away) = if read(1.0).0 > read(-1.0).0 { (read(1.0).1, read(-1.0).1) } else { (read(-1.0).1, read(1.0).1) };
+        let here = edge_taper(sim.centerline[i], sim.bounds, p.edge_margin * p.width, p.valley_width * p.width);
+        assert!(away > here && here > toward, "away {away}, at the centreline {here}, toward {toward}");
     }
 
     #[test]
