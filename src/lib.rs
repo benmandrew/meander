@@ -185,6 +185,12 @@ pub struct Params {
     /// Sediment supply once the upland is cleared, as a multiple of the
     /// wooded upland's. 1 disables.
     pub clearance_supply: f64,
+    /// Resistance vegetation lends a point bar against a flood's chute.
+    /// A chute must cross a bend whose arc length is `1 + chute_vegetation
+    /// · v` times what bare sand needs, where v is the bar's mean growth
+    /// over `vegetation_time` along the chord, up to 2, plus its overbank
+    /// deposit over `levee_height`. 0 lets a chute cross any bar.
+    pub chute_vegetation: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -257,6 +263,7 @@ impl Default for Params {
             clearance_start: CLEARANCE_START,
             clearance_time: CLEARANCE_TIME,
             clearance_supply: CLEARANCE_SUPPLY,
+            chute_vegetation: CHUTE_VEGETATION,
             physics: true,
             friction,
             aspect,
@@ -318,6 +325,7 @@ impl Params {
         "clearance_start",
         "clearance_time",
         "clearance_supply",
+        "chute_vegetation",
         "physics",
         "friction",
         "aspect",
@@ -375,6 +383,7 @@ impl Params {
             "clearance_start" => &mut self.clearance_start,
             "clearance_time" => &mut self.clearance_time,
             "clearance_supply" => &mut self.clearance_supply,
+            "chute_vegetation" => &mut self.chute_vegetation,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -660,6 +669,8 @@ const CLEARANCE_SUPPLY: f64 = 3.0;
 /// Overbank deposit, as a fraction of the flood level, above which a
 /// scroll bar's ridge is buried and dropped.
 const BURY: f64 = 0.95;
+/// Default chute resistance; see [`Params`].
+const CHUTE_VEGETATION: f64 = 1.0;
 
 /// Longest chute a flood can cut, in channel widths.
 pub const CHUTE_CHORD: f64 = 5.0;
@@ -966,6 +977,25 @@ impl Sim {
             0.0
         };
         1.0 + (p.clearance_supply - 1.0) * smoothstep(t)
+    }
+
+    /// Resistance a point bar puts up against a chute along `a`–`b`: the
+    /// mean along the chord of its vegetation's growth over
+    /// `vegetation_time`, up to 2, plus its overbank deposit over
+    /// `levee_height`. Bare bar sand puts up none.
+    fn chute_resistance(&self, a: P, b: P) -> f64 {
+        let p = &self.params;
+        let field = &self.erodibility;
+        let samples = ((geom::dist(a, b) / field.cell).ceil() as usize).max(1);
+        let veg = p.vegetation_time.max(1e-9);
+        let stage = p.levee_height.max(1e-9);
+        let total: f64 = (0..=samples)
+            .map(|k| {
+                let c = geom::lerp(a, b, k as f64 / samples as f64);
+                (field.growth_at(c) / veg).min(2.0) + field.deposit_at(c).max(0.0) / stage
+            })
+            .sum();
+        total / (samples + 1) as f64
     }
 
     /// Resample the centreline to spacing close to `ds`.
@@ -1333,10 +1363,11 @@ impl Sim {
         let reach2 = reach * reach;
         let (pts, widths) = (&self.centerline, &self.widths);
 
-        // Best pair from each upstream point, as (ratio, i, j).
-        let mut found: Vec<(f64, usize, usize)> = Vec::new();
+        // Best pair from each upstream point, as (ratio, i, j, whether the
+        // banks meet).
+        let mut found: Vec<(f64, usize, usize, bool)> = Vec::new();
         for i in 0..n {
-            let mut best: Option<(f64, usize)> = None;
+            let mut best: Option<(f64, usize, bool)> = None;
             self.for_neighbours_after(pts[i], g, i + k_sep, |j| {
                 let d2 = geom::dist2(pts[i], pts[j]);
                 if d2 >= reach2 {
@@ -1344,19 +1375,25 @@ impl Sim {
                 }
                 let ratio = (j - i) as f64 * ds / d2.sqrt().max(1e-9);
                 let local = 0.5 * neck * (widths[i] + widths[j]);
-                if (d2 < local * local || ratio >= min_ratio) && best.is_none_or(|(r, _)| ratio > r) {
-                    best = Some((ratio, j));
+                let neck = d2 < local * local;
+                if (neck || ratio >= min_ratio) && best.is_none_or(|(r, _, _)| ratio > r) {
+                    best = Some((ratio, j, neck));
                 }
             });
-            if let Some((ratio, j)) = best {
-                found.push((ratio, i, j));
+            if let Some((ratio, j, neck)) = best {
+                found.push((ratio, i, j, neck));
             }
         }
         found.sort_by(|a, b| b.0.total_cmp(&a.0));
 
-        for &(_, i, j) in &found {
+        let veg = self.params.chute_vegetation;
+        for &(ratio, i, j, neck) in &found {
             let (a, b) = (pts[i], pts[j]);
             if self.near_recent(a) || self.near_recent(b) {
+                continue;
+            }
+            // A chute must cross a bar that vegetation has not bound.
+            if !neck && veg > 0.0 && ratio < min_ratio * (1.0 + veg * self.chute_resistance(a, b)) {
                 continue;
             }
             let crosses = (0..n - 1)
@@ -2258,6 +2295,40 @@ mod tests {
         let (before, after) = (run(0.0), run(2000.0));
         assert!(after[0] > before[0], "more silt by the bank: {after:?} against {before:?}");
         assert!(after[1] > 2.0 * before[1], "and carried farther out: {after:?} against {before:?}");
+    }
+
+    /// A narrow bend: up from the line, across 4 widths, and back down.
+    fn narrow_bend() -> Sim {
+        let mut sim = sine_sim(0.0, 40.0);
+        sim.params.cutoff_dist = 1.0;
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        let at = |x: f64, y: f64| [x * w, mid + y * w];
+        let mut pts: Vec<P> = (0..=20).map(|k| at(100.0 + 0.5 * k as f64, 0.0)).collect();
+        pts.extend((1..=20).map(|k| at(110.0, 0.5 * k as f64)));
+        pts.extend((1..=8).map(|k| at(110.0 + 0.5 * k as f64, 10.0)));
+        pts.extend((1..=20).map(|k| at(114.0, 10.0 - 0.5 * k as f64)));
+        pts.extend((1..=20).map(|k| at(114.0 + 0.5 * k as f64, 0.0)));
+        sim.centerline = pts;
+        sim.widths = vec![1.0; sim.centerline.len()];
+        sim.line_version += 1;
+        sim
+    }
+
+    #[test]
+    fn a_chute_crosses_bare_bar_but_not_vegetated() {
+        let mut bare = narrow_bend();
+        let (w, mid) = (bare.params.width, bare.bounds[1] / 2.0);
+        let bar: Vec<P> =
+            (0..=16).flat_map(|i| (0..=40).map(move |j| [(110.0 + 0.25 * i as f64) * w, mid + 0.25 * j as f64 * w])).collect();
+        bare.erodibility.sweep(&bar);
+        let (a, b) = ([110.5 * w, mid + 5.0 * w], [113.5 * w, mid + 5.0 * w]);
+        assert_eq!(bare.chute_resistance(a, b), 0.0, "fresh bar sand");
+        assert!(bare.flood_cutoff(0.99), "a chute crosses the bare bar");
+        let mut wooded = narrow_bend();
+        assert_eq!(wooded.chute_resistance(a, b), 2.0, "old floodplain forest");
+        assert!(!wooded.flood_cutoff(0.99), "the forest holds the bar");
+        wooded.params.chute_vegetation = 0.0;
+        assert!(wooded.flood_cutoff(0.99), "unless vegetation is ignored");
     }
 
     /// A channel along x with a bend 10 widths high between x = 110 and

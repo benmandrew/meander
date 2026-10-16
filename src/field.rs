@@ -220,6 +220,11 @@ impl Erodibility {
         n.max(0.05) * c / (1.0 + (self.deposit[i] as f64).max(0.0))
     }
 
+    /// Vegetation growth at `p`; see [`Erodibility::growth`].
+    pub fn growth_at(&self, p: P) -> f64 {
+        self.growth[self.index(p)] as f64
+    }
+
     /// Overbank deposit at `p`, in channel depths.
     pub fn deposit_at(&self, p: P) -> f64 {
         self.deposit[self.index(p)] as f64
