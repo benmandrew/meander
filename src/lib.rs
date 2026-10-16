@@ -11,7 +11,7 @@ pub mod ips;
 pub mod rng;
 
 use geom::{P, curvature, dist, resample, right_normal};
-use field::{Erodibility, Ground};
+use field::{Erodibility, Flood, Ground};
 use rng::Rng;
 
 /// Point spacing as a fraction of the channel width.
@@ -769,9 +769,15 @@ impl Sim {
             }
             self.widen(magnitude);
             let p = &self.params;
-            self.erodibility.flood(&self.centerline, &self.widths, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
-            let reach = magnitude * p.scour_reach * p.width;
-            self.erodibility.scour(&self.centerline, &self.widths, 0.5 * p.width, reach, p.vegetation_time);
+            let flood = Flood {
+                half: 0.5 * p.width,
+                amount: magnitude * p.overbank,
+                length: p.levee_length * p.width,
+                stage: p.levee_height,
+                scour: magnitude * p.scour_reach * p.width,
+                young: p.vegetation_time,
+            };
+            self.erodibility.flood(&self.centerline, &self.widths, &flood);
             self.fill_lakes(magnitude);
             self.add_scrolls();
         }
