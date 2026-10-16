@@ -13,6 +13,39 @@ fn svg(sim: &Sim, x0: f64, w: f64) -> String {
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='{x0} 0 {w} {h}' width='{w}' height='{h}'>\
          <rect x='{x0}' width='{w}' height='{h}' fill='#d9d2b6'/>"
     );
+    // Landholdings: each a tint seeded by its index, with its boundary
+    // with other holdings in dark green and its farmstead as a dot.
+    let land = &sim.land;
+    let (cols, c) = (land.cols, land.cell);
+    let tint = |o: u32| {
+        let h = (o as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
+        format!("rgb({},{},{})", 150 + (h & 63), 160 + ((h >> 6) & 63), 110 + ((h >> 12) & 63))
+    };
+    for y in 0..land.rows {
+        for x in 0..cols {
+            let o = land.owner[y * cols + x];
+            if o != meander_core::land::NONE {
+                let _ = write!(s, "<rect x='{:.1}' y='{:.1}' width='{c:.1}' height='{c:.1}' fill='{}'/>", x as f64 * c, y as f64 * c, tint(o));
+            }
+        }
+    }
+    let mut edges = String::new();
+    for y in 0..land.rows {
+        for x in 0..cols {
+            let o = land.owner[y * cols + x];
+            let (fx, fy) = (x as f64 * c, y as f64 * c);
+            if x + 1 < cols && land.owner[y * cols + x + 1] != o {
+                let _ = write!(edges, "M{:.1},{fy:.1}v{c:.1}", fx + c);
+            }
+            if y + 1 < land.rows && land.owner[(y + 1) * cols + x] != o {
+                let _ = write!(edges, "M{fx:.1},{:.1}h{c:.1}", fy + c);
+            }
+        }
+    }
+    let _ = write!(s, "<path d='{edges}' stroke='#3c5a2c' stroke-width='0.8' fill='none'/>");
+    for h in land.holdings.iter().flatten() {
+        let _ = write!(s, "<circle cx='{:.1}' cy='{:.1}' r='3' fill='#7a3b2a'/>", h.seat[0], h.seat[1]);
+    }
     let path = |pts: &[[f64; 2]]| {
         let mut d = String::new();
         for (i, p) in pts.iter().enumerate() {
@@ -100,13 +133,17 @@ fn main() {
     // Time each lake took to fill, by its birth time and length.
     let mut lake_lives: Vec<((u64, u64), f64)> = Vec::new();
     let t0 = std::time::Instant::now();
+    // Time of each step, to check the work is spread evenly.
+    let mut times: Vec<f64> = Vec::with_capacity(steps);
     for k in 0..=steps / every {
-        if k > 0 {
-            sim.step_n(every);
+        for _ in 0..if k > 0 { every } else { 0 } {
+            let t = std::time::Instant::now();
+            sim.step();
+            times.push(t.elapsed().as_secs_f64() * 1e3);
         }
         let reach = reach_sinuosity(&mut sim);
         println!(
-            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  reach {:4.2}  tight {:4.2}  cutoffs {:4} ({:4} in {:4} floods)  oxbows {:3}  width {}",
+            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  reach {:4.2}  tight {:4.2}  cutoffs {:4} ({:4} in {:4} floods)  oxbows {:3}  holdings {:3} ({:4} reorganised)  width {}",
             sim.steps,
             sim.time,
             sim.centerline.len(),
@@ -117,6 +154,8 @@ fn main() {
             sim.flood_cutoffs,
             sim.floods,
             sim.oxbows.len(),
+            sim.land.count(),
+            sim.land.reorganisations,
             {
                 let [lo, mid, hi, gentle, sharp] = width_stats(&sim);
                 format!("{lo:.2}/{mid:.2}/{hi:.2} gentle {gentle:.2} sharp {sharp:.2}")
@@ -136,5 +175,10 @@ fn main() {
         let q = |f: f64| lives[((lives.len() - 1) as f64 * f) as usize];
         println!("{} lakes filled; time to fill: quartiles {:.0} {:.0} {:.0}", lives.len(), q(0.25), q(0.5), q(0.75));
     }
-    println!("{:.2} ms/step", t0.elapsed().as_secs_f64() * 1e3 / steps as f64);
+    println!("{:.3} ms/step", t0.elapsed().as_secs_f64() * 1e3 / steps as f64);
+    times.sort_by(f64::total_cmp);
+    if !times.is_empty() {
+        let q = |f: f64| times[((times.len() - 1) as f64 * f) as usize];
+        println!("step time: median {:.3}  99% {:.3}  99.9% {:.3}  max {:.3} ms", q(0.5), q(0.99), q(0.999), q(1.0));
+    }
 }

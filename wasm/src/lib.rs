@@ -59,6 +59,8 @@ pub struct River {
     plugs: Vec<f32>,
     /// Growth of the vegetation on each erodibility cell; see `sync_forest`.
     forest: Vec<f32>,
+    /// Six values for each landholding slot; see `sync_holdings`.
+    holdings: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -86,6 +88,7 @@ impl River {
             scroll_ages: Vec::new(),
             plugs: Vec::new(),
             forest: Vec::new(),
+            holdings: Vec::new(),
         }
     }
 
@@ -293,6 +296,43 @@ impl River {
     }
     pub fn forest_ptr(&self) -> *const f32 {
         self.forest.as_ptr()
+    }
+
+    /// Landholding of each erodibility cell, the same shape as
+    /// `deposit_ptr`: an index into the slots of `sync_holdings`, or
+    /// 2^32 − 1 where no holding has the cell.
+    pub fn land_owner_ptr(&self) -> *const u32 {
+        self.sim.land.owner.as_ptr()
+    }
+    /// Flood risk of each erodibility cell in [0, 1], the same shape as
+    /// `deposit_ptr`: 1 at the water's edge and 0 on the upland.
+    pub fn land_risk_ptr(&self) -> *const f32 {
+        self.sim.land.risk.as_ptr()
+    }
+    /// Changes whenever a reorganisation of the holdings finishes, and after
+    /// each survey of the ground the channel took and left.
+    pub fn land_version(&self) -> f64 {
+        self.sim.land.version as f64
+    }
+    /// Copy the landholdings into a flat buffer of six values per slot:
+    /// 1 if a holding has the slot and 0 if not, the farmstead's x and y,
+    /// the unit long axis's x and y, and the field layout seed. Rebuild
+    /// every view after calling this, since it can grow memory.
+    pub fn sync_holdings(&mut self) {
+        self.holdings.clear();
+        for slot in &self.sim.land.holdings {
+            match slot {
+                Some(h) => self.holdings.extend([1.0, h.seat[0] as f32, h.seat[1] as f32, h.axis[0] as f32, h.axis[1] as f32, h.seed as f32]),
+                None => self.holdings.extend([0.0; 6]),
+            }
+        }
+    }
+    pub fn holdings_ptr(&self) -> *const f32 {
+        self.holdings.as_ptr()
+    }
+    /// Number of holding slots in `sync_holdings`.
+    pub fn holding_slots(&self) -> usize {
+        self.holdings.len() / 6
     }
 
     /// Erodibility noise at a point, in [0, 1]; low values erode slowly.

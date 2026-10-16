@@ -322,13 +322,19 @@ impl Erodibility {
     /// sand, rising linearly to `HIGH_GROWTH` at a deposit of `height`
     /// channel depths. A `height` of 0 grows every cell at rate 1.
     pub fn grow(&mut self, dt: f64, height: f64) {
+        self.grow_rows(dt, height, 0, self.rows);
+    }
+
+    /// [`Erodibility::grow`] on rows [y0, y1) only.
+    pub fn grow_rows(&mut self, dt: f64, height: f64, y0: usize, y1: usize) {
         let dt = dt as f32;
+        let (lo, hi) = (y0 * self.cols, y1.min(self.rows) * self.cols);
         if height <= 0.0 {
-            self.growth.iter_mut().for_each(|g| *g += dt);
+            self.growth[lo..hi].iter_mut().for_each(|g| *g += dt);
             return;
         }
         let k = (HIGH_GROWTH - BARE_GROWTH) / height as f32;
-        for (g, &h) in self.growth.iter_mut().zip(&self.deposit) {
+        for (g, &h) in self.growth[lo..hi].iter_mut().zip(&self.deposit[lo..hi]) {
             *g += dt * (BARE_GROWTH + k * h.max(0.0)).min(HIGH_GROWTH);
         }
     }

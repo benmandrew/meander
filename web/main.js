@@ -84,35 +84,50 @@ const TREE_LIGHT = [150, 176, 108];
 // for each kind of mark, so the browser rasterises only the strips a tile
 // meets and a strip whose trees have not changed keeps its path data.
 const TREE_STRIP = 8;
-// Farmland: the old floodplain is cleared into fields wherever it has
-// grown to mature forest, the last of `FOREST`. Fields are clipped to that
-// ground, so the channel cuts them as it migrates and the young ground of
-// the meander belt stays wooded. Crowns in a crop parcel are not drawn on
-// farmland. They lie in strips across the valley,
-// `FIELD_STRIP` widths deep, each cut into parcels `FIELD_LENGTH` widths
-// long whose sides lean by up to `FIELD_LEAN` of the strip's depth. The
-// edges between strips bend at knots every `FIELD_KNOT` widths, by up to
-// `FIELD_BEND` widths either way, under half the shallowest strip so
-// edges never cross.
+// Farmland: the core shares the ground between landholdings, each worked
+// from a farmstead (see `land.rs`), and each holding is laid out in
+// fields. Fields are drawn only where grass has taken the ground, after
+// `grazing_time`, which is where holdings take it up, so the channel cuts
+// them as it migrates and they follow it onto the bars it leaves. Most fields on
+// the young ground of the meander belt flood too often to plough and are
+// meadow (see `MEADOW_RISK`). A holding's fields lie
+// in strips along its long axis, measured from its farmstead,
+// `FIELD_STRIP` widths across, each cut into fields `FIELD_LENGTH` widths
+// long whose ends lean by up to `FIELD_LEAN` of the strip's width. The
+// strips bend by up to `FIELD_BEND` widths either way over a wavelength of
+// `FIELD_WAVE` widths, under half the narrowest strip so edges never cross.
+// The layout stays put until the holding reorganises and its shape turns,
+// when the core draws it a new seed. Fields smaller than `MIN_FIELD`
+// square widths join a neighbour in the same holding.
 const FIELD_STRIP = [5, 11];
 const FIELD_LENGTH = [4, 14];
 const FIELD_LEAN = 0.35;
-const FIELD_KNOT = [15, 35];
+const FIELD_WAVE = [15, 35];
 const FIELD_BEND = 1.5;
-// Crops over the soil: pasture, young and ripe cereal, ploughed earth and
-// hay meadow. `WOODLAND` of the parcels stay as woods.
-const CROPS = [[146, 168, 104], [168, 182, 110], [212, 198, 138], [166, 146, 108], [184, 188, 128]];
+const MIN_FIELD = 2;
+// Boundaries are traced along the edges of the core's cells, simplified to
+// within `FIELD_SIMPLIFY` cells and rounded by two passes of Chaikin's
+// corner cutting. Fields are redrawn when a reorganisation finishes, at
+// most every `FIELD_REFRESH` of simulated time.
+const FIELD_SIMPLIFY = 0.7;
+const FIELD_REFRESH = 5;
+// Land use follows flood risk, as on a medieval floodplain: meadow and
+// pasture on ground at risk `MEADOW_RISK` or more, which floods too often
+// to plough, and arable on the drier ground. `WOODLAND` of the fields stay
+// as woods.
+const MEADOWS = [[146, 168, 104], [184, 188, 128]];
+const ARABLE = [[168, 182, 110], [212, 198, 138], [166, 146, 108]];
+const MEADOW_RISK = 0.35;
 const CROP_OPACITY = 0.5;
 const WOODLAND = 0.12;
 const WOODS_OPACITY = 0.35;
-// Hedges along `HEDGE_EDGE` of the strip edges, between knots, and
-// `HEDGE_SIDE` of the parcel sides, `HEDGE_WIDTH` widths thick. Crowns
-// within `HEDGE_TREES` widths of a hedge stand in it as hedgerow trees.
+// Hedges along `HEDGE_EDGE` of the boundaries between holdings and
+// `HEDGE_SIDE` of those between fields of one holding, `HEDGE_WIDTH`
+// widths thick. Crowns beside a hedge stand in it as hedgerow trees.
 const HEDGE = [84, 108, 66];
-const HEDGE_EDGE = 0.85;
+const HEDGE_EDGE = 0.9;
 const HEDGE_SIDE = 0.55;
 const HEDGE_WIDTH = 0.18;
-const HEDGE_TREES = 0.3;
 // Opacity of the marsh that stays on the clay plug of an old oxbow after
 // its lake and scar have gone, until the channel sweeps it away.
 const PLUG_MARSH = 0.25;
@@ -413,6 +428,138 @@ function random(seed) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+// Seeded hash of whole numbers, which may exceed 32 bits, to [0, 1).
+function hash01(...values) {
+  let h = 0x811c9dc5;
+  for (const v of values) {
+    h = Math.imul(h ^ (v >>> 0), 0x01000193);
+    h = Math.imul(h ^ Math.floor(v / 4294967296), 0x01000193);
+    h ^= h >>> 15;
+  }
+  return (Math.imul(h, 0x2c1b3c6d) >>> 0) / 4294967296;
+}
+
+// Points [x0, y0, x1, y1, …] of a polyline with its end points kept and the
+// interior simplified to within `tol` (Douglas–Peucker).
+function simplify(pts, tol) {
+  const n = pts.length / 2;
+  if (n < 3) return pts;
+  const keep = new Uint8Array(n);
+  keep[0] = keep[n - 1] = 1;
+  const stack = [[0, n - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop();
+    const [ax, ay, bx, by] = [pts[2 * a], pts[2 * a + 1], pts[2 * b], pts[2 * b + 1]];
+    const [dx, dy] = [bx - ax, by - ay];
+    const len2 = dx * dx + dy * dy;
+    let [far, farD] = [-1, tol * tol];
+    for (let k = a + 1; k < b; k++) {
+      const [px, py] = [pts[2 * k] - ax, pts[2 * k + 1] - ay];
+      const t = len2 > 0 ? clamp01((px * dx + py * dy) / len2) : 0;
+      const d = (px - t * dx) ** 2 + (py - t * dy) ** 2;
+      if (d > farD) [far, farD] = [k, d];
+    }
+    if (far >= 0) {
+      keep[far] = 1;
+      stack.push([a, far], [far, b]);
+    }
+  }
+  const out = [];
+  for (let k = 0; k < n; k++) if (keep[k]) out.push(pts[2 * k], pts[2 * k + 1]);
+  return out;
+}
+
+// One pass of Chaikin's corner cutting over a polyline, keeping its end
+// points, or over a closed ring whose last point repeats its first.
+function chaikin(pts, closed) {
+  const n = pts.length / 2;
+  if (n < 3) return pts;
+  const out = closed ? [] : [pts[0], pts[1]];
+  for (let k = 0; k + 1 < n; k++) {
+    const [ax, ay, bx, by] = [pts[2 * k], pts[2 * k + 1], pts[2 * k + 2], pts[2 * k + 3]];
+    if (closed || k > 0) out.push(0.75 * ax + 0.25 * bx, 0.75 * ay + 0.25 * by);
+    if (closed || k + 2 < n) out.push(0.25 * ax + 0.75 * bx, 0.25 * ay + 0.75 * by);
+  }
+  if (closed) out.push(out[0], out[1]);
+  else out.push(pts[2 * n - 2], pts[2 * n - 1]);
+  return out;
+}
+
+// A flat x, y array with its points in reverse order.
+function reversePoints(pts) {
+  const out = new Array(pts.length);
+  for (let k = 0; k < pts.length; k += 2) [out[pts.length - 2 - k], out[pts.length - 1 - k]] = [pts[k], pts[k + 1]];
+  return out;
+}
+
+// Path data for a polyline given as a flat x, y array.
+function pointsData(pts) {
+  let d = 'M' + dp1(pts[0]) + ' ' + dp1(pts[1]);
+  for (let k = 2; k < pts.length; k += 2) d += (k === 2 ? 'L' : ' ') + dp1(pts[k]) + ' ' + dp1(pts[k + 1]);
+  return d;
+}
+
+// Trace the boundaries of a map of labels, `W` × `H` cells row by row with
+// 0 for no label and outside the map, along the cell edges. Each boundary
+// between two junctions of three or more regions, or round a region that
+// meets no junction, is one arc: its corners as [i0, j0, i1, j1, …] on the
+// grid of cell corners, its end corners `start` and `end` as ids
+// j·(W + 1) + i, the label `a` on its left as it runs, the label `b` on its
+// right, and the cells on its left. A region's outline is the arcs it lies
+// left of, run forwards, and the arcs it lies right of, run backwards.
+function boundaryArcs(lab, W, H) {
+  const L = (i, j) => (i < 0 || j < 0 || i >= W || j >= H ? 0 : lab[j * W + i]);
+  const CW = W + 1, nh = W * (H + 1);
+  // Edge ids: j·W + i for the edge from corner (i, j) rightwards, and
+  // nh + j·CW + i for the edge from corner (i, j) downwards.
+  const edges = new Uint8Array(nh + CW * H);
+  for (let j = 0; j <= H; j++) for (let i = 0; i < W; i++) edges[j * W + i] = L(i, j - 1) !== L(i, j);
+  for (let j = 0; j < H; j++) for (let i = 0; i <= W; i++) edges[nh + j * CW + i] = L(i - 1, j) !== L(i, j);
+  const incident = (i, j, out) => {
+    out.length = 0;
+    if (i > 0 && edges[j * W + i - 1]) out.push(j * W + i - 1, i - 1, j);
+    if (i < W && edges[j * W + i]) out.push(j * W + i, i + 1, j);
+    if (j > 0 && edges[nh + (j - 1) * CW + i]) out.push(nh + (j - 1) * CW + i, i, j - 1);
+    if (j < H && edges[nh + j * CW + i]) out.push(nh + j * CW + i, i, j + 1);
+    return out.length / 3;
+  };
+  const used = new Uint8Array(edges.length);
+  const arcs = [], around = [], step = [];
+  // Run from corner (i, j) along edge `e` to corner (ni, nj), and on until
+  // a junction or back to the start.
+  const walk = (i, j, e, ni, nj) => {
+    const [dx, dy] = [ni - i, nj - j];
+    const side = (s) => L(Math.floor(i + 0.5 * dx + 0.5 * s * dy), Math.floor(j + 0.5 * dy - 0.5 * s * dx));
+    const arc = { pts: [i, j], start: j * CW + i, a: side(1), b: side(-1), cells: [] };
+    for (;;) {
+      used[e] = 1;
+      const [ex, ey] = [ni - i, nj - j];
+      const [ci, cj] = [Math.floor(i + 0.5 * ex + 0.5 * ey), Math.floor(j + 0.5 * ey - 0.5 * ex)];
+      if (ci >= 0 && cj >= 0 && ci < W && cj < H) arc.cells.push(cj * W + ci);
+      [i, j] = [ni, nj];
+      arc.pts.push(i, j);
+      if (incident(i, j, around) !== 2) break;
+      let next = -1;
+      for (let k = 0; k < around.length; k += 3) if (!used[around[k]]) next = k;
+      if (next < 0) break;
+      [e, ni, nj] = [around[next], around[next + 1], around[next + 2]];
+    }
+    arc.end = j * CW + i;
+    arcs.push(arc);
+  };
+  for (let j = 0; j <= H; j++) {
+    for (let i = 0; i <= W; i++) {
+      if (incident(i, j, step) <= 2) continue;
+      for (let k = 0; k < step.length; k += 3) if (!used[step[k]]) walk(i, j, step[k], step[k + 1], step[k + 2]);
+    }
+  }
+  // What is left is closed loops, each with an edge along a row.
+  for (let j = 0; j <= H; j++) {
+    for (let i = 0; i < W; i++) if (edges[j * W + i] && !used[j * W + i]) walk(i, j, j * W + i, i + 1, j);
+  }
+  return arcs;
 }
 
 // Path data for a circle.
@@ -844,10 +991,23 @@ class SvgRenderer {
     this.forest = FOREST.flatMap(({ colour }) => Array.from(
       { length: FOREST_STEPS }, () => el('path', { fill: `rgb(${colour})` }, this.forestLayer)));
     this.forestAt = null;
-    // Fields lie over the forest, clipped to the mature forest's region.
+    // Fields lie over the forest, clipped to the grassed ground.
     const clip = el('clipPath', { id: 'farmland' }, el('defs', {}, ground));
     this.farmland = el('path', { 'clip-rule': 'evenodd' }, clip);
     this.fieldLayer = el('g', { 'clip-path': 'url(#farmland)' }, ground);
+    this.parcels = el('g', {}, this.fieldLayer);
+    this.hedges = el('path', {
+      fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${HEDGE})`, 'stroke-opacity': 0.8,
+    }, this.fieldLayer);
+    // Path element of each field drawn, by its key.
+    this.fieldPaths = new Map();
+    this.fieldsAt = null;
+    // 1 on each cell of the window's columns where a crown stands in a crop
+    // field away from a hedge, and is not drawn on farmland.
+    this.cropMask = null;
+    // The forest's blurred growth the trees were last sized by, so they can
+    // be redrawn when the fields change.
+    this.treeBlur = null;
     // Scroll bars: one group for each age band, with one path for each
     // ridge, so trimming a ridge repaints only the ground around it.
     this.scrollLayer = el('g', round, ground);
@@ -929,112 +1089,165 @@ class SvgRenderer {
     this.plugAt = null;
     this.forestAt = null;
     this.scrollAt = null;
+    this.fieldsAt = null;
+    this.cropMask = null;
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
     this.drawSoils(river, x, w, h, seed);
-    // The trees read the fields' parcels and hedges.
-    this.drawFields(river, x, w, h, seed);
     this.placeTrees(river, x, w, h, seed);
     this.drawWalls(river, x, w, h, seed);
   }
 
-  // Lay out the fields over the valley floor in the window [x0, x0 + vw),
-  // with their hedges. They never change; the farmland clip does.
-  drawFields(river, x0, vw, h, seed) {
-    this.fieldLayer.replaceChildren();
-    const rand = random(seed ^ 0xf1e1d);
-    const w = river.get_param('width'), valley = river.get_param('valley_width') * w;
-    // The upland is farmed too, and shows faintly through its tint, so the
-    // fields meet the wandering scarp wherever it lies. The strip edges
-    // nearest the valley edges are straight, along the valley's line.
-    const [y0, y1] = [0, h];
-    const valleyEdges = valley > 0 && valley < h ? [0.5 * (h - valley), 0.5 * (h + valley)] : [];
-    const between = ([a, b]) => (a + (b - a) * rand()) * w;
-    const [xa, xb] = [x0 - FIELD_LENGTH[1] * w, x0 + vw + FIELD_LENGTH[1] * w];
-    // Strip edges as knots [x, y], straight along the valley walls.
-    const edge = (y, bend) => {
-      const knots = [];
-      for (let x = xa; ; x += between(FIELD_KNOT)) {
-        knots.push([Math.min(x, xb), y + bend * (2 * rand() - 1) * FIELD_BEND * w]);
-        if (x >= xb) return knots;
+  // Draw the fields of every holding over the window when a
+  // reorganisation has finished, at most every `FIELD_REFRESH`, with their
+  // hedges, and mark the cells where crowns stand in crops.
+  drawFields(river, memory) {
+    const t = river.time(), version = river.land_version();
+    const last = this.fieldsAt;
+    if (last && t >= last.t && (last.version === version || t - last.t < FIELD_REFRESH)) return false;
+    this.fieldsAt = { version, t };
+    river.sync_holdings();
+    // Views must be built after syncing: it can grow memory.
+    const buf = memory.buffer;
+    const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
+    const owner = new Uint32Array(buf, river.land_owner_ptr(), cols * rows);
+    const risk = new Float32Array(buf, river.land_risk_ptr(), cols * rows);
+    const hold = new Float32Array(buf, river.holdings_ptr(), 6 * river.holding_slots());
+    const w = river.get_param('width');
+    const [c0, c1] = this.windowColumns(cols, cell);
+    const W = c1 - c0;
+    // Each holding's layout: its strips' width, phase and bend.
+    const layouts = [];
+    for (let k = 0; 6 * k < hold.length; k++) {
+      if (!hold[6 * k]) {
+        layouts.push(null);
+        continue;
       }
-    };
-    const ys = [y0], straight = new Set([y0, y1, ...valleyEdges]);
-    for (const end of [...valleyEdges, y1]) {
-      while (end - ys.at(-1) > (FIELD_STRIP[0] + FIELD_STRIP[1]) * w) ys.push(ys.at(-1) + between(FIELD_STRIP));
-      ys.push(end);
+      const seed = hold[6 * k + 5], rand = random(seed);
+      const between = ([a, b]) => (a + (b - a) * rand()) * w;
+      layouts.push({
+        seed, x: hold[6 * k + 1], y: hold[6 * k + 2], ax: hold[6 * k + 3], ay: hold[6 * k + 4],
+        strip: between(FIELD_STRIP), phase: rand(), wave: between(FIELD_WAVE) / (2 * Math.PI), bend: 2 * Math.PI * rand(),
+      });
     }
-    const edges = ys.map((y) => edge(y, straight.has(y) ? 0 : 1));
-    const yAt = (knots, x) => {
-      let k = 1;
-      while (k < knots.length - 1 && knots[k][0] < x) k++;
-      const [[ax, ay], [bx, by]] = [knots[k - 1], knots[k]];
-      return ay + (by - ay) * clamp01((x - ax) / (bx - ax));
-    };
-    // Knots of `knots` strictly between x = a and x = b, in that order.
-    const inner = (knots, a, b) => {
-      const pts = knots.filter(([x]) => x > Math.min(a, b) && x < Math.max(a, b));
-      return a < b ? pts : pts.reverse();
-    };
-    const xy = ([x, y]) => `${dp1(x)} ${dp1(y)}`;
-    // Crop parcels and hedge segments, for the trees to read.
-    this.crops = [];
-    this.hedges = [];
-    const hedge = (a, b) => this.hedges.push([a, b]);
-    // No hedge runs along the window's top and bottom edges.
-    for (const knots of edges.slice(1, -1)) {
-      for (let k = 1; k < knots.length; k++) {
-        if (rand() < HEDGE_EDGE) hedge(knots[k - 1], knots[k]);
-      }
-    }
-    const parcels = el('g', {}, this.fieldLayer);
-    for (let s = 0; s + 1 < edges.length; s++) {
-      const [top, bottom] = [edges[s], edges[s + 1]];
-      const depth = ys[s + 1] - ys[s];
-      const lean = (2 * rand() - 1) * FIELD_LEAN;
-      // Each side runs from (x, top) to (x + skew, bottom).
-      const side = (x) => [x, x + (lean + 0.1 * (2 * rand() - 1)) * depth];
-      let a = side(xa - between([0, FIELD_LENGTH[1]]));
-      while (a[0] < xb) {
-        const b = side(a[0] + between(FIELD_LENGTH));
-        const ring = [
-          [a[0], yAt(top, a[0])], ...inner(top, a[0], b[0]), [b[0], yAt(top, b[0])],
-          [b[1], yAt(bottom, b[1])], ...inner(bottom, b[1], a[1]), [a[1], yAt(bottom, a[1])],
-        ];
-        const woods = rand() < WOODLAND;
-        if (!woods) this.crops.push(ring);
-        el('path', {
-          d: `M${ring.map(xy).join('L')}Z`,
-          fill: `rgb(${woods ? FOREST.at(-1).colour : CROPS[Math.floor(rand() * CROPS.length)]})`,
-          'fill-opacity': woods ? WOODS_OPACITY : (CROP_OPACITY * (0.8 + 0.4 * rand())).toFixed(2),
-        }, parcels);
-        if (rand() < HEDGE_SIDE) hedge([b[0], yAt(top, b[0])], [b[1], yAt(bottom, b[1])]);
-        a = b;
+    // Label each cell with its field, keyed by holding, strip and place
+    // along the strip.
+    const lab = new Int32Array(W * rows);
+    const fields = [], index = new Map();
+    for (let j = 0; j < rows; j++) {
+      const y = (j + 0.5) * cell;
+      for (let i = 0; i < W; i++) {
+        const g = j * cols + c0 + i, o = owner[g];
+        const L = layouts[o];
+        if (!L) continue;
+        const [dx, dy] = [(c0 + i + 0.5) * cell - L.x, y - L.y];
+        const u = dx * L.ax + dy * L.ay;
+        const v = dy * L.ax - dx * L.ay + FIELD_BEND * w * Math.sin(u / L.wave + L.bend);
+        const k = Math.floor(v / L.strip + L.phase);
+        const across = v / L.strip + L.phase - k;
+        const len = (FIELD_LENGTH[0] + (FIELD_LENGTH[1] - FIELD_LENGTH[0]) * hash01(L.seed, k + 4096, 1)) * w;
+        const lean = (2 * hash01(L.seed, k + 4096, 2) - 1) * FIELD_LEAN * L.strip;
+        const m = Math.floor((u + lean * across) / len + hash01(L.seed, k + 4096, 3));
+        const key = (o * 4096 + (k + 2048)) * 4096 + (m + 2048);
+        let f = index.get(key);
+        if (f === undefined) {
+          f = fields.length + 1;
+          index.set(key, f);
+          fields.push({ key, o, cells: 0, risk: 0 });
+        }
+        lab[j * W + i] = f;
+        fields[f - 1].cells++;
+        fields[f - 1].risk += risk[g];
       }
     }
-    el('path', {
-      d: this.hedges.map(([a, b]) => `M${xy(a)}L${xy(b)}`).join(''),
-      fill: 'none', 'stroke-linecap': 'round', stroke: `rgb(${HEDGE})`,
-      'stroke-width': dp1(HEDGE_WIDTH * w), 'stroke-opacity': 0.8,
-    }, this.fieldLayer);
-  }
-
-  // Whether a crown at (x, y) stands in a crop parcel, away from its hedges.
-  inCrop(x, y, w) {
-    const reach2 = (HEDGE_TREES * w) ** 2;
-    for (const [[ax, ay], [bx, by]] of this.hedges) {
-      const [dx, dy] = [bx - ax, by - ay];
-      const t = clamp01(((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1));
-      if ((x - ax - t * dx) ** 2 + (y - ay - t * dy) ** 2 < reach2) return false;
-    }
-    return this.crops.some((ring) => {
-      let inside = false;
-      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-        const [[xi, yi], [xj, yj]] = [ring[i], ring[j]];
-        if ((yi > y) !== (yj > y) && x < xi + (xj - xi) * (y - yi) / (yj - yi)) inside = !inside;
+    // Fold slivers into a neighbouring field of the same holding.
+    const small = MIN_FIELD * w * w / (cell * cell);
+    for (let n = 0; n < lab.length; n++) {
+      const f = lab[n];
+      if (!f || fields[f - 1].cells >= small) continue;
+      const [i, j] = [n % W, Math.floor(n / W)];
+      for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        const [ni, nj] = [i + di, j + dj];
+        if (ni < 0 || nj < 0 || ni >= W || nj >= rows) continue;
+        const g = lab[nj * W + ni];
+        if (g && g !== f && fields[g - 1].o === fields[f - 1].o && fields[g - 1].cells >= small) {
+          lab[n] = g;
+          break;
+        }
       }
-      return inside;
+    }
+    // Land use by mean flood risk, and whether crowns stand in the field.
+    for (const f of fields) {
+      f.risk /= Math.max(1, f.cells);
+      const u = hash01(f.key, 7);
+      f.woods = u < WOODLAND;
+      const uses = f.risk >= MEADOW_RISK ? MEADOWS : ARABLE;
+      f.colour = f.woods ? FOREST.at(-1).colour : uses[Math.floor(hash01(f.key, 8) * uses.length)];
+      f.opacity = f.woods ? WOODS_OPACITY : (CROP_OPACITY * (0.8 + 0.4 * hash01(f.key, 9))).toFixed(2);
+    }
+    const mask = new Uint8Array(W * rows);
+    for (let n = 0; n < lab.length; n++) mask[n] = lab[n] > 0 && !fields[lab[n] - 1].woods;
+    // Trace, simplify and round each boundary once, so neighbouring fields
+    // share it exactly.
+    const arcs = boundaryArcs(lab, W, rows);
+    const outlines = new Map();
+    let hedgeData = '';
+    for (const arc of arcs) {
+      const world = arc.pts.map((v, k) => (k % 2 ? v : c0 + v) * cell);
+      const closed = arc.start === arc.end;
+      let pts = simplify(world, FIELD_SIMPLIFY * cell);
+      pts = chaikin(chaikin(pts, closed), closed);
+      for (const [f, forward] of [[arc.a, true], [arc.b, false]]) {
+        if (!f) continue;
+        if (!outlines.has(f)) outlines.set(f, []);
+        outlines.get(f).push(forward
+          ? { start: arc.start, end: arc.end, pts }
+          : { start: arc.end, end: arc.start, pts: reversePoints(pts) });
+      }
+      if (!arc.a || !arc.b) continue;
+      const [fa, fb] = [fields[arc.a - 1], fields[arc.b - 1]];
+      const pair = hash01(Math.min(fa.key, fb.key), Math.max(fa.key, fb.key));
+      if (pair >= (fa.o === fb.o ? HEDGE_SIDE : HEDGE_EDGE)) continue;
+      hedgeData += pointsData(pts);
+      for (const n of arc.cells) mask[n] = 0;
+    }
+    // Chain each field's arcs into rings, end to start.
+    const kept = new Map();
+    outlines.forEach((list, f) => {
+      const field = fields[f - 1];
+      const from = new Map();
+      for (const piece of list) {
+        if (!from.has(piece.start)) from.set(piece.start, []);
+        from.get(piece.start).push(piece);
+      }
+      let d = '';
+      for (const first of list) {
+        if (first.used) continue;
+        const ring = [...first.pts];
+        first.used = true;
+        let at = first.end;
+        while (at !== first.start) {
+          const next = from.get(at)?.find((piece) => !piece.used);
+          if (!next) break;
+          next.used = true;
+          for (let k = 2; k < next.pts.length; k++) ring.push(next.pts[k]);
+          at = next.end;
+        }
+        if (ring.length >= 6) d += pointsData(ring) + 'Z';
+      }
+      const path = this.fieldPaths.get(field.key) ?? el('path', {}, this.parcels);
+      this.fieldPaths.delete(field.key);
+      kept.set(field.key, path);
+      set(path, 'd', d);
+      set(path, 'fill', `rgb(${field.colour})`);
+      set(path, 'fill-opacity', field.opacity);
     });
+    for (const path of this.fieldPaths.values()) path.remove();
+    this.fieldPaths = kept;
+    set(this.hedges, 'd', hedgeData);
+    set(this.hedges, 'stroke-width', dp1(HEDGE_WIDTH * w));
+    this.cropMask = { mask, c0, W };
+    return true;
   }
 
   // Draw the upland beyond each valley wall over the window [x0, x0 + vw),
@@ -1124,7 +1337,9 @@ class SvgRenderer {
     }
     if (local.showLevees) this.drawLevees(river, memory);
     this.drawPlugs(river, memory);
-    this.drawForest(river, memory);
+    const fields = this.drawFields(river, memory);
+    // New fields change which crowns stand in crops.
+    if (!this.drawForest(river, memory) && fields && this.treeBlur) this.drawTrees(this.treeBlur, ...this.treeArgs);
     if (local.showScrolls) this.drawScrolls(river, memory, w);
 
     river.sync();
@@ -1275,7 +1490,7 @@ class SvgRenderer {
   drawForest(river, memory) {
     const t = river.time(), cutoffs = river.cutoffs();
     const last = this.forestAt;
-    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
     this.forestAt = { cutoffs, t };
     river.sync_forest();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
@@ -1291,8 +1506,12 @@ class SvgRenderer {
         set(this.forest[k * FOREST_STEPS + s], 'd', contourData(blur, cols, rows, cell, c0, c1, level));
       }
     });
-    set(this.farmland, 'd', this.forest.at(-1).getAttribute('d'));
-    this.drawTrees(blur, cols, rows, cell, shrub, forest, river.get_param('width'));
+    set(this.farmland, 'd', contourData(blur, cols, rows, cell, c0, c1, river.get_param('grazing_time')));
+    if (this.treeBlur?.length !== blur.length) this.treeBlur = new Float32Array(blur.length);
+    this.treeBlur.set(blur);
+    this.treeArgs = [cols, rows, cell, shrub, forest, river.get_param('width'), river.get_param('grazing_time')];
+    this.drawTrees(this.treeBlur, ...this.treeArgs);
+    return true;
   }
 
   // Scatter crowns over the window on a jittered grid, each with its own
@@ -1319,26 +1538,25 @@ class SvgRenderer {
           const a = turn + 2 * Math.PI * (k + 0.3 * rand()) / TREE_LOBES, off = 0.35 + 0.15 * rand();
           lobes.push([off * Math.cos(a), off * Math.sin(a), 0.5 + 0.2 * rand()]);
         }
-        const crop = this.inCrop(cx, cy, w);
-        this.treeStrips[s].crowns.push({ x: cx, y: cy, at: rand(), size: 0.6 + 0.4 * rand(), tone, lobes, crop });
+        this.treeStrips[s].crowns.push({ x: cx, y: cy, at: rand(), size: 0.6 + 0.4 * rand(), tone, lobes });
       }
     }
   }
 
   // Size each crown by the blurred growth of the cell under it, and
   // rebuild the paths of each strip.
-  drawTrees(blur, cols, rows, cell, shrub, forest, w) {
+  drawTrees(blur, cols, rows, cell, shrub, forest, w, farm) {
     const [from, to] = [shrub + FOREST[1].at * forest, shrub + FOREST[2].at * forest];
     const grow = Math.max(1e-6, TREE_GROW * forest);
-    // Farmland's level, as in the clip of the fields.
-    const farm = shrub + FOREST.at(-1).at * forest;
     const light = this.treeKinds.length - 1;
+    const crop = this.cropMask;
     for (const { crowns, paths } of this.treeStrips) {
       const d = paths.map(() => []);
       for (const c of crowns) {
         const i = Math.floor(c.x / cell), j = Math.floor(c.y / cell);
         if (i < 0 || i >= cols || j < 0 || j >= rows) continue;
-        if (c.crop && blur[j * cols + i] > farm) continue;
+        const k = i - (crop?.c0 ?? 0);
+        if (crop && k >= 0 && k < crop.W && crop.mask[j * crop.W + k] && blur[j * cols + i] > farm) continue;
         const start = from + c.at * (to - from);
         const r = TREE_RADIUS * w * c.size * clamp01((blur[j * cols + i] - start) / grow);
         if (r < TREE_MIN * w) continue;

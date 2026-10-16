@@ -8,10 +8,12 @@
 pub mod field;
 pub mod geom;
 pub mod ips;
+pub mod land;
 pub mod rng;
 
 use geom::{P, curvature, dist, resample, right_normal};
 use field::{Erodibility, Ground};
+use land::Land;
 use rng::Rng;
 
 /// Point spacing as a fraction of the channel width.
@@ -159,6 +161,18 @@ pub struct Params {
     /// Height a scroll bar's ridge raises the ground, in channel depths, so
     /// vegetation takes to the ridges first. 0 disables.
     pub scroll_height: f64,
+    /// Area a landholding settles to, in square channel widths. One that
+    /// grows past twice this divides between heirs; one that shrinks below
+    /// 0.3 of it is absorbed by its neighbours. See [`land`].
+    pub holding_area: f64,
+    /// Mean time between one landholding's reorganisations, when its
+    /// boundaries can move. Holdings reorganise one at a time.
+    pub reorganise_time: f64,
+    /// Growth at which grass has taken a point bar well enough to graze or
+    /// mow, after which a landholding can take the ground. Below
+    /// `vegetation_time`, so holdings follow the channel onto bars long
+    /// before shrub binds them.
+    pub grazing_time: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -225,6 +239,9 @@ impl Default for Params {
             vegetation_height: VEGETATION_HEIGHT,
             scour_reach: SCOUR_REACH,
             scroll_height: SCROLL_HEIGHT,
+            holding_area: HOLDING_AREA,
+            reorganise_time: REORGANISE_TIME,
+            grazing_time: GRAZING_TIME,
             physics: true,
             friction,
             aspect,
@@ -280,6 +297,9 @@ impl Params {
         "vegetation_height",
         "scour_reach",
         "scroll_height",
+        "holding_area",
+        "reorganise_time",
+        "grazing_time",
         "physics",
         "friction",
         "aspect",
@@ -331,6 +351,9 @@ impl Params {
             "vegetation_height" => &mut self.vegetation_height,
             "scour_reach" => &mut self.scour_reach,
             "scroll_height" => &mut self.scroll_height,
+            "holding_area" => &mut self.holding_area,
+            "reorganise_time" => &mut self.reorganise_time,
+            "grazing_time" => &mut self.grazing_time,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -442,6 +465,9 @@ pub struct Sim {
     /// Counts changes to `scrolls`, so a renderer can skip redrawing them.
     pub scroll_version: u64,
     pub erodibility: Erodibility,
+    /// Landholdings on the floodplain, on the erodibility grid. They read
+    /// the river and never change it.
+    pub land: Land,
     pub time: f64,
     pub steps: u64,
     pub cutoffs: u64,
@@ -465,6 +491,9 @@ pub struct Sim {
     grid_fill: Vec<u32>,
     cell_of: Vec<u32>,
     contacts: Vec<(Contact, Contact)>,
+    /// Valley floor's y range at each erodibility grid column, refreshed
+    /// at the start of each survey of the land.
+    valley: Vec<(f64, f64)>,
     /// Counts changes to the centreline within a step, so the grid built
     /// for one pass can serve the next if the centreline has not moved.
     line_version: u64,
@@ -547,8 +576,21 @@ const FOREST_TIME: f64 = 1500.0;
 const VEGETATION_HEIGHT: f64 = 0.05;
 const SCOUR_REACH: f64 = 1.5;
 const SCROLL_HEIGHT: f64 = 0.05;
-/// Steps between vegetation growth updates, a pass over the whole grid.
+/// Steps between vegetation growth updates of a cell. Each step grows one
+/// of this many bands of rows, so the cost is the same at every step.
 const GROWTH_EVERY: u64 = 10;
+/// Default landholdings; see [`Params`]. A medieval holding changed hands
+/// about once a generation, some 30 years, but its hedges and headlands
+/// mostly stayed put, and dated hedges show field boundaries lasting
+/// centuries. A holding redraws its boundaries every 150 years on average
+/// (60 units of 2.5 years). With a channel 40 m wide, 250 square widths is
+/// 40 ha, about the hide of 120 acres that supported a household.
+const HOLDING_AREA: f64 = 250.0;
+const REORGANISE_TIME: f64 = 60.0;
+/// Grass and willow take a fresh bar within a few years, and new alluvium
+/// was grazed, then mown, within a generation or two of the river leaving
+/// it: 20 units, 50 years.
+const GRAZING_TIME: f64 = 20.0;
 
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
@@ -660,6 +702,7 @@ impl Sim {
             scrolls: Vec::new(),
             scroll_version: 0,
             erodibility: Erodibility::new([1.0, 1.0], 1.0, 1.0, 0),
+            land: Land::new(&Erodibility::new([1.0, 1.0], 1.0, 1.0, 0), 0),
             time: 0.0,
             steps: 0,
             cutoffs: 0,
@@ -678,6 +721,7 @@ impl Sim {
             grid_fill: Vec::new(),
             cell_of: Vec::new(),
             contacts: Vec::new(),
+            valley: Vec::new(),
             line_version: 0,
             grid_for: None,
         };
@@ -724,6 +768,33 @@ impl Sim {
         self.floods = 0;
         self.flood_cutoffs = 0;
         self.captures = 0;
+        self.land = Land::new(&self.erodibility, seed);
+        self.read_valley();
+        let s = self.land_settings();
+        self.land.update(&self.erodibility, &self.centerline, &self.widths, &self.valley, &s);
+    }
+
+    /// Refresh the valley floor's y range at each erodibility grid column.
+    fn read_valley(&mut self) {
+        let p = &self.params;
+        let (cell, mid) = (self.erodibility.cell, 0.5 * self.bounds[1]);
+        self.valley.clear();
+        for x in 0..self.erodibility.cols {
+            let wx = (x as f64 + 0.5) * cell;
+            let v = valley_at(wx, self.bounds[1], p.valley_width * p.width, &self.pinches, p.pinch_width * p.width, p.pinch_length * p.width);
+            self.valley.push((mid - 0.5 * v, mid + 0.5 * v));
+        }
+    }
+
+    fn land_settings(&self) -> land::Settings {
+        let p = &self.params;
+        land::Settings {
+            time: self.time,
+            width: p.width,
+            holding_area: p.holding_area,
+            reorganise_time: p.reorganise_time,
+            grazing_time: p.grazing_time,
+        }
     }
 
     /// Target point spacing Δs, in world units.
@@ -778,10 +849,16 @@ impl Sim {
         self.erodibility.sweep(&self.centerline);
         self.time += self.params.dt;
         self.steps += 1;
-        if self.steps.is_multiple_of(GROWTH_EVERY) {
-            let p = &self.params;
-            self.erodibility.grow(GROWTH_EVERY as f64 * p.dt, p.vegetation_height);
+        let (p, rows) = (&self.params, self.erodibility.rows as u64);
+        let band = self.steps % GROWTH_EVERY;
+        let (y0, y1) = (band * rows / GROWTH_EVERY, (band + 1) * rows / GROWTH_EVERY);
+        self.erodibility.grow_rows(GROWTH_EVERY as f64 * p.dt, p.vegetation_height, y0 as usize, y1 as usize);
+        let phase = self.steps % land::SURVEY_STEPS;
+        if phase == 0 {
+            self.read_valley();
         }
+        let s = self.land_settings();
+        self.land.tick(&self.erodibility, &self.centerline, &self.widths, &self.valley, &s, phase);
         self.rework_oxbows();
         let (time, rate) = (self.time, self.params.dt / self.params.oxbow_lifetime.max(1e-9));
         // A lake fills at least as far as the silt on its bed, read every
