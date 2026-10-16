@@ -157,7 +157,7 @@ impl Default for Params {
             alpha,
             peak_radius: 2.5,
             dt: 0.1,
-            smoothing: 0.1,
+            smoothing: 0.03,
             cutoff_dist: 1.0,
             cutoff_min_sep: 20,
             max_step: 0.15,
