@@ -445,7 +445,7 @@ const FIELD_CELL: f64 = 0.5;
 const BANK_BEYOND: f64 = 0.25;
 
 /// Default width parameters; see [`Params`].
-const WIDTH_TIME: f64 = 10.0;
+const WIDTH_TIME: f64 = 3.0;
 const BAR_PUSH: f64 = 0.6;
 const FLOOD_WIDENING: f64 = 1.0;
 
