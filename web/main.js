@@ -67,6 +67,25 @@ const BANK_EDGE = 0.53;
 const BAR_RIM = 0.45;
 const BAR_RADIUS = 3;
 const WET_SAND = [190, 170, 120];
+// Depth in the channel. Pools lie against the outer bank of each bend,
+// `POOL_LAG` widths downstream of the apex, in nested crescents reaching
+// `POOL_LEVELS` of the width in from the bank at a bend of radius
+// `BAR_RADIUS` widths or tighter. Riffles are shallow lenses where the flow
+// crosses between two bends, `RIFFLE_WIDTH` of the width across and
+// fading over `RIFFLE_LENGTH` widths either side of the crossing; both
+// bends must be tighter than `RIFFLE_RADIUS` widths.
+const POOL_LAG = 1;
+const POOL_LEVELS = [0.5, 0.25];
+const POOL_COLOURS = [[50, 106, 146], [38, 88, 124]];
+const RIFFLE_WIDTH = 0.75;
+const RIFFLE_LENGTH = 2;
+const RIFFLE_RADIUS = 8;
+const SHALLOW = [96, 154, 182];
+// Where the channel is wider than `MID_BAR_FROM` widths, a sand bar splits
+// the flow, growing to `MID_BAR` of the width across at `MID_BAR_FULL`.
+const MID_BAR_FROM = 1.5;
+const MID_BAR_FULL = 1.8;
+const MID_BAR = 0.4;
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -78,6 +97,8 @@ const CAP_STEPS = 8;
 const PLUG = 0.4;
 // Widest local channel width, as in the core's `MAX_WIDTH`.
 const MAX_WIDTH = 2;
+// Centreline point spacing in widths, as in the core's `SPACING`.
+const SPACING = 0.5;
 // Length, as a multiple of the lake's half-width, that a plugged end's cap
 // grows by over the lake's lifetime, so plugged ends stay blunt.
 const PLUG_TIP = 0.5;
@@ -180,19 +201,101 @@ function channelRuns(pts, widths, frame, scale, bar = null) {
 
 // Width of the wet sand of the point bar beyond the inner bank at each
 // point, in world units: `BAR_RIM` widths at a bend of radius `BAR_RADIUS`
-// widths or tighter, falling to nothing on a straight reach. The curvature
-// is smoothed along the river first, so the bar does not flicker with the
+// widths or tighter, falling to nothing on a straight reach. `bend` is the
+// curvature smoothed along the river, so the bar does not flicker with the
 // point-to-point noise in it.
-function barRim(frame, w) {
-  const { curv } = frame;
-  const n = curv.length;
-  let k = Float64Array.from(curv, Math.abs);
+function barRim(bend, w) {
+  return bend.map((c) => BAR_RIM * w * smoothstep(Math.abs(c) * w * BAR_RADIUS));
+}
+
+// `values` smoothed along the river by four [1, 2, 1] passes.
+function smoothed(values) {
+  const n = values.length;
+  let v = Float64Array.from(values);
   for (let pass = 0; pass < 4; pass++) {
-    const prev = k;
-    k = new Float64Array(n);
-    for (let i = 0; i < n; i++) k[i] = 0.25 * prev[Math.max(0, i - 1)] + 0.5 * prev[i] + 0.25 * prev[Math.min(n - 1, i + 1)];
+    const prev = v;
+    v = new Float64Array(n);
+    for (let i = 0; i < n; i++) v[i] = 0.25 * prev[Math.max(0, i - 1)] + 0.5 * prev[i] + 0.25 * prev[Math.min(n - 1, i + 1)];
   }
-  return k.map((c) => BAR_RIM * w * smoothstep(c * w * BAR_RADIUS));
+  return v;
+}
+
+// Closed path data for a band along the river over points [start, end),
+// between signed offsets `a[i]` and `b[i]` along the left normal.
+function bandData(pts, frame, a, b, start, end) {
+  const { nx, ny } = frame;
+  const left = [], right = [];
+  for (let i = start; i < end; i++) {
+    const [x, y] = [pts[2 * i], pts[2 * i + 1]];
+    left.push(dp1(x + a[i] * nx[i]) + ' ' + dp1(y + a[i] * ny[i]));
+    right.push(dp1(x + b[i] * nx[i]) + ' ' + dp1(y + b[i] * ny[i]));
+  }
+  return 'M' + left.join(' ') + 'L' + right.reverse().join(' ') + 'Z';
+}
+
+// Bands between offsets `a` and `b` over the stretches where they are
+// apart, one path data string each, skipping points where they meet.
+function bandRuns(pts, frame, a, b) {
+  const n = pts.length / 2, runs = [];
+  let start = -1;
+  for (let i = 0; i <= n; i++) {
+    const open = i < n && Math.abs(a[i] - b[i]) > 0.01;
+    if (open && start < 0) start = Math.max(0, i - 1);
+    if (!open && start >= 0) {
+      runs.push(bandData(pts, frame, a, b, start, Math.min(n, i + 1)));
+      start = -1;
+    }
+  }
+  return runs;
+}
+
+// Pools, riffles and mid-channel bars, as lists of path data: one list per
+// pool level, then riffles, then bars. `bend` is the smoothed signed
+// curvature, `widths` the local width in world units, `w` the reference
+// width.
+function channelDepth(pts, widths, frame, bend, w) {
+  const n = bend.length;
+  const lag = Math.round(POOL_LAG / SPACING);
+  const pools = POOL_LEVELS.map((level) => {
+    const a = new Float64Array(n), b = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      // The bank on the outside of the bend upstream, and the pool's
+      // reach in from it.
+      const k = bend[Math.max(0, i - lag)], half = 0.5 * widths[i];
+      const out = k > 0 ? -1 : 1;
+      const reach = level * widths[i] * smoothstep(Math.abs(k) * w * BAR_RADIUS);
+      a[i] = out * half;
+      b[i] = out * Math.max(0, half - reach);
+    }
+    return bandRuns(pts, frame, a, b);
+  });
+  // Distance in points to the nearest crossing between two bends tighter
+  // than `RIFFLE_RADIUS`.
+  const span = Math.round(RIFFLE_LENGTH / SPACING), look = 4 * span;
+  const tight = 1 / (RIFFLE_RADIUS * w);
+  const near = new Float64Array(n).fill(Infinity);
+  for (let i = 1; i < n; i++) {
+    if ((bend[i - 1] > 0) === (bend[i] > 0)) continue;
+    let up = 0, down = 0;
+    for (let j = Math.max(0, i - look); j < i; j++) up = Math.max(up, Math.abs(bend[j]));
+    for (let j = i; j < Math.min(n, i + look); j++) down = Math.max(down, Math.abs(bend[j]));
+    if (up < tight || down < tight) continue;
+    for (let j = Math.max(0, i - span); j < Math.min(n, i + span); j++) near[j] = Math.min(near[j], Math.abs(j - i + 0.5));
+  }
+  const ra = new Float64Array(n), rb = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const h = 0.5 * RIFFLE_WIDTH * widths[i] * smoothstep(1 - near[i] / span);
+    [ra[i], rb[i]] = [h, -h];
+  }
+  // Mid-channel bars, on the width smoothed so they grow and shrink
+  // slowly.
+  const wide = smoothed(widths);
+  const ba = new Float64Array(n), bb = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const h = 0.5 * MID_BAR * wide[i] * smoothstep((wide[i] / w - MID_BAR_FROM) / (MID_BAR_FULL - MID_BAR_FROM));
+    [ba[i], bb[i]] = [h, -h];
+  }
+  return [...pools, bandRuns(pts, frame, ra, rb), bandRuns(pts, frame, ba, bb)];
 }
 
 // Path data for points [start, end) of a flat x, y array.
@@ -657,6 +760,8 @@ class SvgRenderer {
     this.reedLayer = el('g', { fill: 'none', 'stroke-linejoin': 'round', stroke: REEDS }, svg);
     this.lakeLayer = el('g', {}, svg);
     this.water = el('g', { fill: `rgb(${WATER})` }, svg);
+    // Pools, riffles and mid-channel bars, over the channel's water.
+    this.depth = [...POOL_COLOURS, SHALLOW, BAR].map((c) => ({ g: el('g', { fill: `rgb(${c})` }, svg), paths: [] }));
     this.bankRuns = [];
     this.waterRuns = [];
     this.lakes = [];
@@ -801,7 +906,8 @@ class SvgRenderer {
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
     const frame = channelFrame(line);
     const waterRuns = channelRuns(line, widths, frame, 0.5);
-    const bankRuns = channelRuns(line, widths, frame, BANK_EDGE, barRim(frame, w));
+    const bend = smoothed(frame.curv);
+    const bankRuns = channelRuns(line, widths, frame, BANK_EDGE, barRim(bend, w));
     // Channel points, to find lake points beside it.
     const reach = (MAX_WIDTH + ALONGSIDE_GAP) * w;
     const channel = new Grid(line, reach);
@@ -882,6 +988,11 @@ class SvgRenderer {
     resize(this.waterRuns, waterRuns.length, this.water);
     bankRuns.forEach((d, k) => set(this.bankRuns[k], 'd', d));
     waterRuns.forEach((d, k) => set(this.waterRuns[k], 'd', d));
+    channelDepth(line, widths, frame, bend, w).forEach((runs, m) => {
+      const { g, paths } = this.depth[m];
+      resize(paths, runs.length, g);
+      runs.forEach((d, k) => set(paths[k], 'd', d));
+    });
   }
 
   // Contour the overbank deposits over the window after each flood, and
