@@ -94,6 +94,8 @@ pub struct Erodibility {
     /// Scratch: squared distance from each cell to the channel during a
     /// flood.
     near: Vec<f32>,
+    /// Scratch: the channel point nearest each cell during a flood.
+    nearest: Vec<u32>,
     seed: u64,
     scale: f64,
 }
@@ -120,6 +122,7 @@ impl Erodibility {
             swept_at: vec![f64::NEG_INFINITY; cells],
             deposit: vec![0.0; cells],
             near: Vec::new(),
+            nearest: Vec::new(),
             seed,
             scale,
         }
@@ -201,24 +204,28 @@ impl Erodibility {
         if count > 0 { sum / count as f64 } else { 0.0 }
     }
 
-    /// Lay one flood's overbank deposit beside a channel of half-width
-    /// `half` along the points. A cell at distance d from the bank gains
+    /// Lay one flood's overbank deposit beside a channel along the points,
+    /// of half-width `half` times the width at each point (`widths`, one
+    /// per point). A cell at distance d from the bank gains
     /// `amount · exp(−d / length) · (1 − h / stage)`, so deposits thin away
     /// from the channel into natural levees and stop growing as the ground
     /// nears the flood level `stage`. The factor is the depth of flood water
     /// over the ground, so a lake bed `LAKE_DEPTH` below fresh bar level
     /// traps 1 + `LAKE_DEPTH / stage` times as much. Cells under the channel
     /// gain nothing.
-    pub fn flood(&mut self, pts: &[P], half: f64, amount: f64, length: f64, stage: f64) {
+    pub fn flood(&mut self, pts: &[P], widths: &[f64], half: f64, amount: f64, length: f64, stage: f64) {
         if amount <= 0.0 || length <= 0.0 || stage <= 0.0 {
             return;
         }
         let c = self.cell;
-        let reach = half + LEVEE_REACH * length;
+        let widest = widths.iter().fold(1.0f64, |a, &b| a.max(b));
+        let reach = widest * half + LEVEE_REACH * length;
         let r2 = (reach * reach) as f32;
         self.near.clear();
         self.near.resize(self.deposit.len(), f32::INFINITY);
-        for p in pts {
+        self.nearest.clear();
+        self.nearest.resize(self.deposit.len(), 0);
+        for (k, p) in pts.iter().enumerate() {
             let x0 = ((p[0] - reach) / c).floor().max(0.0) as usize;
             let y0 = ((p[1] - reach) / c).floor().max(0.0) as usize;
             let x1 = (((p[0] + reach) / c) as usize).min(self.cols - 1);
@@ -232,15 +239,16 @@ impl Erodibility {
                     let n = &mut self.near[row + x];
                     if d2 < *n && d2 < r2 {
                         *n = d2;
+                        self.nearest[row + x] = k as u32;
                     }
                 }
             }
         }
-        for (h, &d2) in self.deposit.iter_mut().zip(&self.near) {
-            let d = (d2 as f64).sqrt();
-            if d.is_finite() && d >= half {
+        for ((h, &d2), &k) in self.deposit.iter_mut().zip(&self.near).zip(&self.nearest) {
+            let (d, bank) = ((d2 as f64).sqrt(), half * widths[k as usize]);
+            if d.is_finite() && d >= bank {
                 let room = (1.0 - *h as f64 / stage).max(0.0);
-                *h += (amount * (-(d - half) / length).exp() * room) as f32;
+                *h += (amount * (-(d - bank) / length).exp() * room) as f32;
             }
         }
     }
@@ -372,13 +380,13 @@ mod tests {
         let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
         let channel: Vec<P> = (0..80).map(|k| [k as f64 * 0.5, 20.0]).collect();
         let h = |e: &Erodibility, y: f64| e.deposit_at([20.0, y]);
-        e.flood(&channel, 1.0, 0.3, 2.0, 1.0);
+        e.flood(&channel, &vec![1.0; channel.len()], 1.0, 0.3, 2.0, 1.0);
         assert_eq!(h(&e, 20.25), 0.0, "nothing settles under the channel");
         assert!(h(&e, 21.25) > 0.25, "bank {}", h(&e, 21.25));
         assert!(h(&e, 21.25) > 2.0 * h(&e, 23.25) && h(&e, 23.25) > 2.0 * h(&e, 25.25));
         assert_eq!(h(&e, 38.0), 0.0, "beyond the reach");
         for _ in 0..200 {
-            e.flood(&channel, 1.0, 0.3, 2.0, 1.0);
+            e.flood(&channel, &vec![1.0; channel.len()], 1.0, 0.3, 2.0, 1.0);
         }
         assert!(h(&e, 21.25) <= 1.0 && h(&e, 21.25) > 0.95, "levee {}", h(&e, 21.25));
         let at = |e: &Erodibility, y| e.at([20.0, y], &ground(0.0));
@@ -395,12 +403,12 @@ mod tests {
         assert_eq!(e.silt_at([20.0, 22.25]), 0.0);
         let at = |e: &Erodibility| e.at([20.0, 22.25], &ground(0.0));
         assert!((at(&e) - 3.0).abs() < 1e-9, "open water");
-        e.flood(&channel, 1.0, 0.3, 2.0, 0.25);
+        e.flood(&channel, &vec![1.0; channel.len()], 1.0, 0.3, 2.0, 0.25);
         let silt = e.silt_at([20.0, 22.25]);
         assert!(silt > 0.3 && silt < 1.0, "silt {silt}");
         assert!((at(&e) - (3.0 - 2.7 * silt)).abs() < 1e-6, "stiffens with the silt");
         for _ in 0..50 {
-            e.flood(&channel, 1.0, 0.3, 2.0, 0.25);
+            e.flood(&channel, &vec![1.0; channel.len()], 1.0, 0.3, 2.0, 0.25);
         }
         assert_eq!(e.silt_at([20.0, 22.25]), 1.0);
         assert!(e.deposit_at([20.0, 22.25]) <= 0.25, "fills no higher than the flood level");

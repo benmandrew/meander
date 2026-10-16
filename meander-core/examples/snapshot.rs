@@ -30,13 +30,34 @@ fn svg(sim: &Sim, x0: f64, w: f64) -> String {
             sim.params.width * (1.0 - 0.7 * age)
         );
     }
-    let _ = write!(
-        s,
-        "<path d='{}' fill='none' stroke='#2f6f8f' stroke-width='{}' stroke-linejoin='round' stroke-linecap='round'/></svg>",
-        path(&sim.centerline),
-        sim.params.width
-    );
+    // The channel as round-capped segments at the local width.
+    let pts = &sim.centerline;
+    for (k, seg) in pts.windows(2).enumerate() {
+        let b = 0.5 * (sim.widths[k] + sim.widths[k + 1]);
+        let _ = write!(
+            s,
+            "<path d='M{:.2},{:.2} L{:.2},{:.2}' stroke='#2f6f8f' stroke-width='{:.2}' stroke-linecap='round'/>",
+            seg[0][0], seg[0][1], seg[1][0], seg[1][1], b * sim.params.width
+        );
+    }
+    s.push_str("</svg>");
     s
+}
+
+/// Width quantiles (10%, median, 90%), and the mean width at gentle
+/// (radius over 10 widths) and sharp (under 3 widths) bends.
+fn width_stats(sim: &Sim) -> [f64; 5] {
+    let mut c = Vec::new();
+    curvature(&sim.centerline, &mut c);
+    let w = sim.params.width;
+    let mut ws = sim.widths.clone();
+    ws.sort_by(f64::total_cmp);
+    let q = |f: f64| ws[((ws.len() - 1) as f64 * f) as usize];
+    let mean = |keep: &dyn Fn(f64) -> bool| {
+        let (s, n) = c.iter().zip(&sim.widths).filter(|(k, _)| keep(k.abs() * w)).fold((0.0, 0), |(s, n), (_, b)| (s + b, n + 1));
+        s / n.max(1) as f64
+    };
+    [q(0.1), q(0.5), q(0.9), mean(&|k| k < 0.1), mean(&|k| k > 1.0 / 3.0)]
 }
 
 /// Fraction of interior points with bend radius under 1.5 channel widths.
@@ -78,7 +99,7 @@ fn main() {
             sim.step_n(every);
         }
         println!(
-            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  tight {:4.2}  cutoffs {:4} ({:4} in {:4} floods)  oxbows {:3}",
+            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  tight {:4.2}  cutoffs {:4} ({:4} in {:4} floods)  oxbows {:3}  width {}",
             sim.steps,
             sim.time,
             sim.centerline.len(),
@@ -87,7 +108,11 @@ fn main() {
             sim.cutoffs,
             sim.flood_cutoffs,
             sim.floods,
-            sim.oxbows.len()
+            sim.oxbows.len(),
+            {
+                let [lo, mid, hi, gentle, sharp] = width_stats(&sim);
+                format!("{lo:.2}/{mid:.2}/{hi:.2} gentle {gentle:.2} sharp {sharp:.2}")
+            }
         );
         std::fs::write(format!("{out}/step{:06}.svg", sim.steps), svg(&sim, up, view_w)).unwrap();
         for o in sim.oxbows.iter().filter(|o| !o.is_lake()) {

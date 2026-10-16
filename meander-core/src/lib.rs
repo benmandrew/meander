@@ -19,9 +19,22 @@ pub const SPACING: f64 = 0.5;
 
 #[derive(Clone, Debug)]
 pub struct Params {
-    /// Channel width `w`, in world units. Sets the point spacing, the cutoff
-    /// distance and the rendered width.
+    /// Reference channel width `w`, in world units. Sets the point spacing
+    /// and the unit of every length in channel widths. The local width
+    /// varies about it; see [`Sim::widths`].
     pub width: f64,
+    /// Time over which bar push brings the local width back to `width`
+    /// once the banks stop moving. 0 holds the width at `width`.
+    pub width_time: f64,
+    /// Rate at which the inner bank advances as the point bar grows, as a
+    /// fraction of the rate at which a bank of erodibility 1 retreats. The
+    /// channel widens where the outer bank erodes faster than this, and
+    /// narrows where it erodes slower.
+    pub bar_push: f64,
+    /// Widening of a bend by a flood of magnitude 1, in channel widths per
+    /// unit of migration rate at the bend, before bar push narrows it back.
+    /// 0 disables.
+    pub flood_widening: f64,
     /// Erodibility `E`: migration speed, in channel widths per unit time per
     /// unit of dimensionless rate.
     pub erodibility: f64,
@@ -135,6 +148,9 @@ impl Default for Params {
     fn default() -> Self {
         Self {
             width: 8.0,
+            width_time: WIDTH_TIME,
+            bar_push: BAR_PUSH,
+            flood_widening: FLOOD_WIDENING,
             erodibility: 1.0,
             omega: -1.0,
             gamma: 2.5,
@@ -181,6 +197,9 @@ impl Params {
     /// Names accepted by [`Params::get`] and [`Params::set`].
     pub const NAMES: &[&str] = &[
         "width",
+        "width_time",
+        "bar_push",
+        "flood_widening",
         "erodibility",
         "omega",
         "gamma",
@@ -224,6 +243,9 @@ impl Params {
     fn field(&mut self, name: &str) -> Option<&mut f64> {
         Some(match name {
             "width" => &mut self.width,
+            "width_time" => &mut self.width_time,
+            "bar_push" => &mut self.bar_push,
+            "flood_widening" => &mut self.flood_widening,
             "erodibility" => &mut self.erodibility,
             "omega" => &mut self.omega,
             "gamma" => &mut self.gamma,
@@ -362,6 +384,13 @@ pub struct Sim {
     /// Positions along x where the valley narrows to `pinch_width`.
     pub pinches: Vec<f64>,
     pub centerline: Vec<P>,
+    /// Local channel width at each centreline point, in multiples of
+    /// [`Params::width`]. The outer bank retreats at the migration rate
+    /// times its erodibility, the inner bank advances at [`Params::bar_push`]
+    /// times the rate, and the width changes by the difference while it
+    /// relaxes to 1 over [`Params::width_time`] (after the bank-pull and
+    /// bar-push model of Parker et al. 2011).
+    pub widths: Vec<f64>,
     pub oxbows: Vec<Oxbow>,
     /// Counts changes to the oxbow polylines, but not to their fill, so a
     /// renderer can skip rebuilding what depends only on their shape.
@@ -390,6 +419,7 @@ pub struct Sim {
     rate: Vec<f64>,
     noise: Vec<f64>,
     tmp: Vec<P>,
+    wtmp: Vec<f64>,
     grid_start: Vec<u32>,
     grid_items: Vec<u32>,
     grid_fill: Vec<u32>,
@@ -437,10 +467,23 @@ const NOISE_SCALE: f64 = 25.0;
 /// Cell size of the erodibility grid, in channel widths at reset.
 const FIELD_CELL: f64 = 0.5;
 
-/// Distance from the centreline at which a point reads the erodibility of
-/// the bank it moves into, in channel widths. It lies past the half-width
-/// bank, so the read misses the cells the channel itself has just swept.
-const BANK_READ: f64 = 0.75;
+/// Distance past the bank at which a point reads the erodibility of the
+/// bank it moves into, in channel widths. The read misses the cells the
+/// channel itself has just swept.
+const BANK_BEYOND: f64 = 0.25;
+
+/// Default width parameters; see [`Params`].
+const WIDTH_TIME: f64 = 10.0;
+const BAR_PUSH: f64 = 0.6;
+const FLOOD_WIDENING: f64 = 1.0;
+
+/// Range of the local width, in multiples of the reference width.
+pub const MIN_WIDTH: f64 = 0.5;
+pub const MAX_WIDTH: f64 = 2.0;
+
+/// Laplacian smoothing of the local width per step, so it varies over a
+/// few widths along the river and not from point to point.
+const WIDTH_SMOOTHING: f64 = 0.25;
 
 /// Default point-bar parameters; see [`Params`].
 const BAR_FACTOR: f64 = 1.3;
@@ -458,9 +501,8 @@ const OXBOW_LIFETIME: f64 = 1200.0;
 const BEDLOAD_FILL: f64 = 0.2;
 const SCROLL_LIFETIME: f64 = 1000.0;
 
-/// Distance of a scroll bar from the centreline, in channel widths: just
-/// inside the inner bank.
-const SCROLL_OFFSET: f64 = 0.6;
+/// Distance of a scroll bar past the inner bank, in channel widths.
+const SCROLL_OFFSET: f64 = 0.1;
 
 /// Least migration rate, in the dimensionless units of
 /// [`Sim::migration_rate`], at which a bank counts as accreting a scroll bar.
@@ -553,6 +595,7 @@ impl Sim {
             bounds,
             pinches: Vec::new(),
             centerline: Vec::new(),
+            widths: Vec::new(),
             oxbows: Vec::new(),
             oxbow_version: 0,
             scrolls: Vec::new(),
@@ -572,6 +615,7 @@ impl Sim {
             rate: Vec::new(),
             noise: Vec::new(),
             tmp: Vec::new(),
+            wtmp: Vec::new(),
             grid_start: Vec::new(),
             grid_items: Vec::new(),
             grid_fill: Vec::new(),
@@ -606,6 +650,7 @@ impl Sim {
         for (p, o) in pts.iter_mut().zip(&off) {
             p[1] += o;
         }
+        self.widths = vec![1.0; pts.len()];
         self.centerline = pts;
         let w = self.params.width;
         self.erodibility = Erodibility::new(self.bounds, FIELD_CELL * w, NOISE_SCALE * w, seed);
@@ -663,8 +708,9 @@ impl Sim {
                 }
                 self.resample(ds);
             }
+            self.widen(magnitude);
             let p = &self.params;
-            self.erodibility.flood(&self.centerline, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
+            self.erodibility.flood(&self.centerline, &self.widths, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
             self.fill_lakes(magnitude);
             self.add_scrolls();
             self.crevasse(magnitude);
@@ -695,9 +741,60 @@ impl Sim {
 
     /// Resample the centreline to spacing close to `ds`.
     fn resample(&mut self, ds: f64) {
-        geom::resample_into(&self.centerline, ds, &mut self.tmp);
+        geom::resample_with(&self.centerline, &self.widths, ds, &mut self.tmp, &mut self.wtmp);
         std::mem::swap(&mut self.centerline, &mut self.tmp);
+        std::mem::swap(&mut self.widths, &mut self.wtmp);
         self.line_version += 1;
+    }
+
+    /// Erodibility the ground lends a bank, from the parameters and the
+    /// current time.
+    fn ground(&self) -> Ground {
+        let p = &self.params;
+        Ground {
+            time: self.time,
+            heterogeneity: p.heterogeneity,
+            lake_life: p.oxbow_lifetime,
+            lake: p.lake_factor,
+            clay: p.clay_factor,
+            bar: p.bar_factor,
+            vegetation: p.vegetation_time,
+        }
+    }
+
+    /// Erodibility of the bank of point `i` on the side `sign` of its right
+    /// normal `nrm`, read [`BANK_BEYOND`] past the bank and tapered at the
+    /// domain edges and valley walls.
+    fn bank_erodibility(&self, i: usize, nrm: P, sign: f64, ground: &Ground) -> f64 {
+        let p = &self.params;
+        let q = self.centerline[i];
+        let valley = valley_at(
+            q[0],
+            self.bounds[1],
+            p.valley_width * p.width,
+            &self.pinches,
+            p.pinch_width * p.width,
+            p.pinch_length * p.width,
+        );
+        let side = sign * (0.5 * self.widths[i] + BANK_BEYOND) * p.width;
+        let bank = [q[0] + side * nrm[0], q[1] + side * nrm[1]];
+        edge_taper(q, self.bounds, p.edge_margin * p.width, valley) * self.erodibility.at(bank, ground)
+    }
+
+    /// Widen each bend by a flood of magnitude `u`, in proportion to its
+    /// migration rate and the erodibility of its outer bank.
+    fn widen(&mut self, u: f64) {
+        let (k, n) = (self.params.flood_widening * u, self.centerline.len());
+        if k <= 0.0 || self.params.width_time <= 0.0 || n < 3 {
+            return;
+        }
+        self.migration_rate();
+        let ground = self.ground();
+        for i in 1..n - 1 {
+            let r = self.rate[i];
+            let e = self.bank_erodibility(i, right_normal(&self.centerline, i), r.signum(), &ground);
+            self.widths[i] = (self.widths[i] + k * e * r.abs()).clamp(MIN_WIDTH, MAX_WIDTH);
+        }
     }
 
     /// Howard–Knutson migration rate at each point, in dimensionless units
@@ -743,16 +840,9 @@ impl Sim {
         let n = pts.len();
         let scale = p.dt * p.erodibility * p.width;
         let limit = p.max_step * SPACING * p.width;
-        let ground = Ground {
-            time: self.time,
-            heterogeneity: p.heterogeneity,
-            lake_life: p.oxbow_lifetime,
-            lake: p.lake_factor,
-            clay: p.clay_factor,
-            bar: p.bar_factor,
-            vegetation: p.vegetation_time,
-        };
-        let read = BANK_READ * p.width;
+        let ground = self.ground();
+        // Width lost per step to bar push towards the reference width.
+        let relax = if p.width_time > 0.0 { (p.dt / p.width_time).min(1.0) } else { 1.0 };
 
         // Noise smoothed along the river by a forward and a backward
         // exponential filter, with correlation length `jitter_scale`, then
@@ -776,29 +866,38 @@ impl Sim {
 
         self.tmp.clear();
         self.tmp.extend_from_slice(pts);
+        self.wtmp.clear();
+        self.wtmp.resize(n, 1.0);
         for i in 1..n.saturating_sub(1) {
             let nrm = right_normal(pts, i);
-            let valley = valley_at(
-                pts[i][0],
-                self.bounds[1],
-                p.valley_width * p.width,
-                &self.pinches,
-                p.pinch_width * p.width,
-                p.pinch_length * p.width,
-            );
             // Positive rate moves toward the outside of a left bend, i.e. to
             // the right, so bends grow.
             // The bank is on the side the rate pushes towards. Choosing it
             // by the jitter as well would damp outward and amplify inward
             // noise wherever the banks differ, a net drift inwards.
-            let side = if self.rate[i] < 0.0 { -read } else { read };
-            let bank = [pts[i][0] + side * nrm[0], pts[i][1] + side * nrm[1]];
-            let e = edge_taper(pts[i], self.bounds, p.edge_margin * p.width, valley) * self.erodibility.at(bank, &ground);
+            let sign = if self.rate[i] < 0.0 { -1.0 } else { 1.0 };
+            let e = self.bank_erodibility(i, nrm, sign, &ground);
             let d = (e * (scale * self.rate[i] + self.noise[i])).clamp(-limit, limit);
             self.tmp[i][0] += d * nrm[0];
             self.tmp[i][1] += d * nrm[1];
+            // The outer bank retreats as the centreline does, without the
+            // jitter, and the inner bank follows at the bar push. The
+            // centreline keeps the Howard–Knutson rate, so the two agree on
+            // average.
+            let b = self.widths[i];
+            let demand = scale * self.rate[i].abs();
+            let (pull, push) = ((e * demand).min(limit), (p.bar_push * demand).min(limit));
+            self.wtmp[i] = if p.width_time > 0.0 { b + (pull - push) / p.width - (b - 1.0) * relax } else { 1.0 };
         }
         std::mem::swap(&mut self.centerline, &mut self.tmp);
+        // Smooth the width along the river, with the ends held at 1.
+        for i in 1..n.saturating_sub(1) {
+            let lap = self.wtmp[i - 1] + self.wtmp[i + 1] - 2.0 * self.wtmp[i];
+            self.widths[i] = (self.wtmp[i] + WIDTH_SMOOTHING * lap).clamp(MIN_WIDTH, MAX_WIDTH);
+        }
+        if n > 0 {
+            (self.widths[0], self.widths[n - 1]) = (1.0, 1.0);
+        }
     }
 
     fn smooth(&mut self) {
@@ -826,13 +925,15 @@ impl Sim {
     }
 
     /// Fill the hashed grid with the centreline points, for cells of size
-    /// `size`, unless it already holds them. The table has about 4n buckets
+    /// `size`, unless it already holds them in cells up to twice that size,
+    /// which serve searches within `size` as well. The table has about 4n buckets
     /// and is filled by counting sort, so each bucket lists its points in
     /// increasing order; collisions only add candidates, which callers
     /// reject by distance.
     fn build_grid(&mut self, size: f64) -> Cells {
         if let Some((g, v)) = self.grid_for
-            && g.size == size
+            && g.size >= size
+            && g.size <= 2.0 * size
             && v == self.line_version
         {
             return g;
@@ -924,7 +1025,15 @@ impl Sim {
         self.recent_cuts.iter().any(|&(c, _)| dist(c, p) < r)
     }
 
+    /// Widest local width along the centreline, in channel widths.
+    fn max_width(&self) -> f64 {
+        self.widths.iter().fold(MIN_WIDTH, |a, &b| a.max(b))
+    }
+
     /// Find one neck cutoff and apply it. Returns whether a cut was made.
+    /// A neck closes when the centrelines come within `cutoff_dist` times
+    /// the mean of their local widths, so the banks meet at a cutoff
+    /// distance of 1.
     fn cutoff(&mut self) -> bool {
         let d_cut = self.params.cutoff_dist * self.params.width;
         let k_sep = self.params.cutoff_min_sep;
@@ -932,15 +1041,15 @@ impl Sim {
         if n < k_sep + 2 || d_cut <= 0.0 {
             return false;
         }
-        let g = self.build_grid(d_cut);
-        let d_cut2 = d_cut * d_cut;
-        let pts = &self.centerline;
+        let g = self.build_grid(d_cut * self.max_width());
+        let (pts, widths) = (&self.centerline, &self.widths);
 
         // Smallest upstream index first, then the smallest loop from it.
         for i in 0..n {
             let mut best: Option<usize> = None;
             self.for_neighbours_after(pts[i], g, i + k_sep, |j| {
-                if best.is_none_or(|b| j < b) && geom::dist2(pts[i], pts[j]) < d_cut2 {
+                let d = 0.5 * d_cut * (widths[i] + widths[j]);
+                if best.is_none_or(|b| j < b) && geom::dist2(pts[i], pts[j]) < d * d {
                     best = Some(j);
                 }
             });
@@ -962,9 +1071,12 @@ impl Sim {
     fn flood_cutoff(&mut self, u: f64) -> bool {
         let p = &self.params;
         let w = p.width;
+        // Neck width breached between banks of the reference width; it
+        // scales with the mean local width of each pair.
         let neck = (p.cutoff_dist + u * (p.breach_dist - p.cutoff_dist).max(0.0)) * w;
         let min_ratio = if p.chute_ratio > 0.0 && u > 0.0 { p.chute_ratio / u } else { f64::INFINITY };
-        let reach = if min_ratio.is_finite() { neck.max(CHUTE_CHORD * w) } else { neck };
+        let widest = neck * self.max_width();
+        let reach = if min_ratio.is_finite() { widest.max(CHUTE_CHORD * w) } else { widest };
         let k_sep = p.cutoff_min_sep;
         let n = self.centerline.len();
         if n < k_sep + 2 || reach <= 0.0 {
@@ -972,8 +1084,8 @@ impl Sim {
         }
         let ds = geom::length(&self.centerline) / (n - 1) as f64;
         let g = self.build_grid(reach);
-        let (neck2, reach2) = (neck * neck, reach * reach);
-        let pts = &self.centerline;
+        let reach2 = reach * reach;
+        let (pts, widths) = (&self.centerline, &self.widths);
 
         // Best pair from each upstream point, as (ratio, i, j).
         let mut found: Vec<(f64, usize, usize)> = Vec::new();
@@ -985,7 +1097,8 @@ impl Sim {
                     return;
                 }
                 let ratio = (j - i) as f64 * ds / d2.sqrt().max(1e-9);
-                if (d2 < neck2 || ratio >= min_ratio) && best.is_none_or(|(r, _)| ratio > r) {
+                let local = 0.5 * neck * (widths[i] + widths[j]);
+                if (d2 < local * local || ratio >= min_ratio) && best.is_none_or(|(r, _)| ratio > r) {
                     best = Some((ratio, j));
                 }
             });
@@ -1117,7 +1230,7 @@ impl Sim {
             return;
         }
         self.migration_rate();
-        let off = SCROLL_OFFSET * self.params.width;
+        let w = self.params.width;
         let pts = &self.centerline;
         let n = pts.len();
         let mut run: Vec<P> = Vec::new();
@@ -1143,6 +1256,7 @@ impl Sim {
                 // A positive rate moves the point along its right normal,
                 // so the inner bank lies along the left.
                 let nrm = right_normal(pts, i);
+                let off = (0.5 * self.widths[i] + SCROLL_OFFSET) * w;
                 run.push([pts[i][0] - s * off * nrm[0], pts[i][1] - s * off * nrm[1]]);
             }
         }
@@ -1185,7 +1299,8 @@ impl Sim {
         let s = c.signum();
         let dir = [s * nrm[0], s * nrm[1]];
         let q = self.centerline[i];
-        let apex = [q[0] + 0.5 * w * dir[0], q[1] + 0.5 * w * dir[1]];
+        let half = 0.5 * self.widths[i] * w;
+        let apex = [q[0] + half * dir[0], q[1] + half * dir[1]];
         let length = (SPLAY_BASE + SPLAY_EXTRA * u) * w;
         let thickness = u * self.params.levee_height;
         self.erodibility.stamp_splay(apex, dir, length, SPLAY_SPREAD, thickness, self.time);
@@ -1280,6 +1395,7 @@ impl Sim {
         let entry = if norms > 0.0 { ((main[0] * branch[0] + main[1] * branch[1]) / norms).max(0.0) } else { 0.0 };
         let mid = geom::lerp(self.centerline[i], self.centerline[j], 0.5);
         self.centerline.drain(i + 1..j);
+        self.widths.drain(i + 1..j);
         self.line_version += 1;
         self.oxbow_version += 1;
         self.erodibility.stamp_oxbow(&loop_pts, 0.5 * self.params.width, self.time);
@@ -1497,11 +1613,16 @@ mod tests {
         let mid = sim.bounds[1] / 2.0;
         let line = sim.centerline.clone();
         let gap = |q: P| line.iter().map(|&c| dist(q, c)).fold(f64::INFINITY, f64::min);
+        let widths = sim.widths.clone();
+        let half = |q: P| {
+            let k = (0..line.len()).min_by(|&a, &b| dist(line[a], q).total_cmp(&dist(line[b], q))).unwrap();
+            0.5 * widths[k] * w
+        };
         let mut bends = 0;
         for sc in &sim.scrolls {
             assert!(sc.points.len() >= MIN_SCROLL_POINTS);
             for &q in &sc.points {
-                assert!(gap(q) > 0.5 * w && gap(q) < 0.7 * w, "a ridge lies just off the bank");
+                assert!(gap(q) > half(q) && gap(q) < half(q) + 0.2 * w, "a ridge lies just off the bank");
             }
             // Bends grow outwards, so the ridge at a bend lies on its axis
             // side: inside the bend.
@@ -1610,6 +1731,66 @@ mod tests {
         sim.step();
         assert_eq!(sim.oxbows.len(), 2, "the crossed oxbow splits in two");
         assert_eq!(sim.oxbows[0].points.len() + sim.oxbows[1].points.len(), 40);
+    }
+
+    /// Mean width over the points migrating fastest and slowest, by the top
+    /// and bottom quarter of the migration rate.
+    fn width_by_rate(sim: &mut Sim) -> (f64, f64) {
+        let rate: Vec<f64> = sim.migration_rate().iter().map(|r| r.abs()).collect();
+        let mut order: Vec<usize> = (1..rate.len() - 1).collect();
+        order.sort_by(|&a, &b| rate[a].total_cmp(&rate[b]));
+        let q = order.len() / 4;
+        let mean = |ix: &[usize]| ix.iter().map(|&i| sim.widths[i]).sum::<f64>() / ix.len() as f64;
+        (mean(&order[order.len() - q..]), mean(&order[..q]))
+    }
+
+    #[test]
+    fn bends_widen_into_soft_banks_and_narrow_into_clay() {
+        let mut sim = sine_sim(2.0, 30.0);
+        sim.params.flood_rate = 0.0;
+        sim.step_n(300);
+        let (fast, slow) = width_by_rate(&mut sim);
+        eprintln!("soft banks: width {fast:.2} where migrating fastest, {slow:.2} slowest");
+        assert!(fast > 1.1 && fast > slow + 0.1, "the bank pulls ahead of the bar at a bend");
+
+        // Old clay plugs everywhere erode slower than the bar advances.
+        let mut sim = sine_sim(2.0, 30.0);
+        sim.params.flood_rate = 0.0;
+        sim.erodibility.cut_at.fill(-1e9);
+        sim.step_n(300);
+        let (fast, slow) = width_by_rate(&mut sim);
+        eprintln!("clay banks: width {fast:.2} where migrating fastest, {slow:.2} slowest");
+        assert!(fast < 0.95 && fast < slow - 0.03, "the bar pushes ahead of a clay bank");
+        assert!(sim.widths.iter().all(|&b| (MIN_WIDTH..=MAX_WIDTH).contains(&b)));
+
+        // A width time of 0 holds the reference width.
+        let mut sim = sine_sim(2.0, 30.0);
+        sim.params.width_time = 0.0;
+        sim.step_n(300);
+        assert!(sim.widths.iter().all(|&b| b == 1.0));
+    }
+
+    #[test]
+    fn a_neck_closes_when_the_banks_meet() {
+        // A hairpin whose legs run 1.3 widths apart, past the separation K.
+        let mut sim = sine_sim(0.0, 40.0);
+        sim.params.cutoff_dist = 1.0;
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        let r = 0.65 * w;
+        let mut pts: Vec<P> = (0..30).map(|k| [(100.0 + 0.5 * k as f64) * w, mid]).collect();
+        let x = pts[29][0];
+        pts.extend((1..4).map(|k| {
+            let t = std::f64::consts::PI * k as f64 / 4.0;
+            [x + r * t.sin(), mid + r - r * t.cos()]
+        }));
+        pts.extend((0..30).rev().map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 2.0 * r]));
+        sim.centerline = pts;
+        sim.widths = vec![1.0; sim.centerline.len()];
+        assert!(!sim.cutoff(), "banks of the reference width are 0.3 widths apart");
+        sim.widths.fill(1.5);
+        sim.line_version += 1;
+        assert!(sim.cutoff(), "banks 1.5 widths wide overlap");
+        assert_eq!(sim.widths.len(), sim.centerline.len());
     }
 
     #[test]

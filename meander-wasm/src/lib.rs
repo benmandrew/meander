@@ -22,6 +22,8 @@ pub struct River {
     view_x: f64,
     /// Centreline as flat x, y pairs.
     line: Vec<f32>,
+    /// Local channel width at each centreline point, in world units.
+    widths: Vec<f32>,
     /// All oxbow polylines, back to back, as flat x, y pairs.
     oxbow_line: Vec<f32>,
     /// Start of each oxbow in `oxbow_line`, in points, plus an end marker.
@@ -64,6 +66,7 @@ impl River {
             sim: Sim::new(Params::default(), [1.0, 1.0], 0, 0.0),
             view_x: 0.0,
             line: Vec::new(),
+            widths: Vec::new(),
             oxbow_line: Vec::new(),
             oxbow_offsets: Vec::new(),
             oxbow_fills: Vec::new(),
@@ -110,10 +113,13 @@ impl River {
         self.sim.params.get(name).unwrap_or(f64::NAN)
     }
 
-    /// Copy the centreline into a flat buffer.
+    /// Copy the centreline into a flat buffer, and its local widths.
     pub fn sync_line(&mut self) {
         self.line.clear();
         self.line.extend(self.sim.centerline.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
+        let w = self.sim.params.width;
+        self.widths.clear();
+        self.widths.extend(self.sim.widths.iter().map(|&b| (b * w) as f32));
     }
 
     /// Copy the centreline and oxbow polylines into flat buffers, and the
@@ -224,6 +230,10 @@ impl River {
     /// Number of f32 values in the centreline (two per point).
     pub fn line_len(&self) -> usize {
         self.line.len()
+    }
+    /// Local channel widths, one per centreline point.
+    pub fn widths_ptr(&self) -> *const f32 {
+        self.widths.as_ptr()
     }
     pub fn oxbow_line_ptr(&self) -> *const f32 {
         self.oxbow_line.as_ptr()

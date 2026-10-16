@@ -83,18 +83,60 @@ function set(e, name, value) {
   e.setAttribute(name, value);
 }
 
-// Path data for points [start, end) of a flat x, y array in runs of `RUN`
-// segments, each run sharing its last point with the next.
-function runData(pts, start, end) {
-  const runs = [];
-  for (let s = start; s < end - 1; s += RUN) runs.push(pathData(pts, s, Math.min(end, s + RUN + 1)));
-  return runs;
-}
-
 // `v` to one decimal place, without the trailing zero `toFixed` keeps,
 // and several times faster.
 function dp1(v) {
   return '' + Math.round(10 * v) / 10;
+}
+
+// Unit left normal and signed curvature at each point of a flat x, y array,
+// positive where the river turns towards the left normal.
+function channelFrame(pts) {
+  const n = pts.length / 2;
+  const nx = new Float64Array(n), ny = new Float64Array(n), curv = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const [a, b] = [Math.max(0, i - 1), Math.min(n - 1, i + 1)];
+    const tx = pts[2 * b] - pts[2 * a], ty = pts[2 * b + 1] - pts[2 * a + 1];
+    const len = Math.sqrt(tx * tx + ty * ty) || 1;
+    nx[i] = -ty / len;
+    ny[i] = tx / len;
+    if (a === i || b === i) continue;
+    const ax = pts[2 * i] - pts[2 * a], ay = pts[2 * i + 1] - pts[2 * a + 1];
+    const bx = pts[2 * b] - pts[2 * i], by = pts[2 * b + 1] - pts[2 * i + 1];
+    const denom = Math.sqrt((ax * ax + ay * ay) * (bx * bx + by * by)) * len;
+    curv[i] = denom > 0 ? 2 * (ax * by - ay * bx) / denom : 0;
+  }
+  return { nx, ny, curv };
+}
+
+// Closed path data for the channel over points [start, end), out to
+// `scale` times the local width either side: one bank forwards, the other
+// back. At a bend tighter than that, the inner bank stops just short of the
+// centre of the bend, so it cannot fold over itself.
+function channelData(pts, widths, frame, scale, start, end) {
+  if (end - start < 2) return '';
+  const { nx, ny, curv } = frame;
+  const left = [], right = [];
+  for (let i = start; i < end; i++) {
+    const h = scale * widths[i], k = curv[i];
+    const hl = k > 0 ? Math.min(h, 0.95 / k) : h;
+    const hr = k < 0 ? Math.min(h, -0.95 / k) : h;
+    const [x, y] = [pts[2 * i], pts[2 * i + 1]];
+    left.push(dp1(x + hl * nx[i]) + ' ' + dp1(y + hl * ny[i]));
+    right.push(dp1(x - hr * nx[i]) + ' ' + dp1(y - hr * ny[i]));
+  }
+  return 'M' + left.join(' ') + 'L' + right.reverse().join(' ') + 'Z';
+}
+
+// Channel outlines in runs of `RUN` segments, each overlapping its
+// neighbours by a segment so no seam shows between them.
+function channelRuns(pts, widths, frame, scale) {
+  const n = pts.length / 2;
+  const runs = [];
+  for (let s = 0; s < n - 1; s += RUN) {
+    runs.push(channelData(pts, widths, frame, scale, Math.max(0, s - 1), Math.min(n, s + RUN + 2)));
+  }
+  return runs;
 }
 
 // Path data for points [start, end) of a flat x, y array.
@@ -490,9 +532,10 @@ class SvgRenderer {
     this.scarLayer = el('g', { ...line, stroke: MARSH }, ground);
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
-    this.bank = el('g', { ...line, stroke: '#b8a678' }, svg);
+    // Both are filled outlines at the local width, which a stroke cannot vary.
+    this.bank = el('g', { fill: '#b8a678' }, svg);
     this.lakeLayer = el('g', { 'stroke-linejoin': 'round', stroke: REEDS }, svg);
-    this.water = el('g', { ...line, stroke: `rgb(${WATER})` }, svg);
+    this.water = el('g', { fill: `rgb(${WATER})` }, svg);
     this.bankRuns = [];
     this.waterRuns = [];
     this.lakes = [];
@@ -589,8 +632,11 @@ class SvgRenderer {
     const oxAlong = new Float32Array(buf, river.oxbow_offsets_along_ptr(), n);
     const oxHeight = new Float32Array(buf, river.oxbow_heights_ptr(), oxPts.length / 2);
     const oxSilt = new Float32Array(buf, river.oxbow_silts_ptr(), oxPts.length / 2);
+    const widths = new Float32Array(buf, river.widths_ptr(), line.length / 2);
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
-    const runs = runData(line, 0, line.length / 2);
+    const frame = channelFrame(line);
+    const waterRuns = channelRuns(line, widths, frame, 0.5);
+    const bankRuns = channelRuns(line, widths, frame, 0.65);
 
     this.record(line, river.time(), w, local);
     this.drawBars(river.time(), w, local);
@@ -648,14 +694,10 @@ class SvgRenderer {
       set(lake, 'stroke-width', reeds.toFixed(2));
     }
 
-    resize(this.bankRuns, runs.length, this.bank);
-    resize(this.waterRuns, runs.length, this.water);
-    runs.forEach((d, k) => {
-      set(this.bankRuns[k], 'd', d);
-      set(this.waterRuns[k], 'd', d);
-    });
-    set(this.bank, 'stroke-width', w * 1.3);
-    set(this.water, 'stroke-width', w);
+    resize(this.bankRuns, bankRuns.length, this.bank);
+    resize(this.waterRuns, waterRuns.length, this.water);
+    bankRuns.forEach((d, k) => set(this.bankRuns[k], 'd', d));
+    waterRuns.forEach((d, k) => set(this.waterRuns[k], 'd', d));
   }
 
   // Contour the overbank deposits over the window after each flood, and

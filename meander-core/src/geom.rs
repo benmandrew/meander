@@ -38,10 +38,27 @@ pub fn resample(pts: &[P], ds: f64) -> Vec<P> {
 
 /// [`resample`] into `out`, reusing its allocation.
 pub fn resample_into(pts: &[P], ds: f64, out: &mut Vec<P>) {
+    resample_core(pts, ds, out, |_, _| {});
+}
+
+/// [`resample_into`], also interpolating `vals`, one per point, into
+/// `out_vals`.
+pub fn resample_with(pts: &[P], vals: &[f64], ds: f64, out: &mut Vec<P>, out_vals: &mut Vec<f64>) {
+    out_vals.clear();
+    resample_core(pts, ds, out, |seg, t| {
+        let v = if seg + 1 < vals.len() { vals[seg] + (vals[seg + 1] - vals[seg]) * t } else { vals[seg] };
+        out_vals.push(v);
+    });
+}
+
+/// Resample, calling `at` with the segment and fraction along it of each
+/// output point.
+fn resample_core(pts: &[P], ds: f64, out: &mut Vec<P>, mut at: impl FnMut(usize, f64)) {
     out.clear();
     let n = pts.len();
     if n < 2 {
         out.extend_from_slice(pts);
+        (0..n).for_each(|i| at(i, 0.0));
         return;
     }
     let total = length(pts);
@@ -50,6 +67,7 @@ pub fn resample_into(pts: &[P], ds: f64, out: &mut Vec<P>) {
 
     out.reserve(m + 1);
     out.push(pts[0]);
+    at(0, 0.0);
     let mut seg = 0;
     let mut seg_start = 0.0;
     let mut seg_len = dist(pts[0], pts[1]);
@@ -66,8 +84,10 @@ pub fn resample_into(pts: &[P], ds: f64, out: &mut Vec<P>) {
             0.0
         };
         out.push(lerp(pts[seg], pts[seg + 1], t));
+        at(seg, t);
     }
     out.push(pts[n - 1]);
+    at(n - 2, 1.0);
 }
 
 /// Signed Menger curvature at each point (positive = left turn). Endpoints
