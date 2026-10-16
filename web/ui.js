@@ -10,7 +10,7 @@ const WORLD_H = 480;
 // The panel's sliders, all page settings. The simulation runs on its own
 // defaults, which come from measured river hydraulics.
 const CONTROLS = [
-  { key: 'speed', label: 'Speed (sim time per second)', min: 0.5, max: 60, step: 0.5, value: 6 },
+  { key: 'speed', label: 'Speed (sim time per second)', min: 0.5, max: 60, step: 0.5, value: 2 },
 ];
 
 // Page settings the panel does not show: the warm-up on reset, in
