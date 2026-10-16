@@ -2773,9 +2773,10 @@ mod tests {
         let (w, i) = (sim.params.width, sim.centerline.len() / 2);
         let (q, nrm) = (sim.centerline[i], right_normal(&sim.centerline, i));
         let pos = [q[0] + 0.5 * w * nrm[0], q[1] + 0.5 * w * nrm[1]];
-        sim.jams.push(Jam { pos, side: 1.0, size: 1.0, until: 1e9, at: i });
+        sim.jams.push(Jam { pos, down: [-nrm[1], nrm[0]], side: 1.0, size: 1.0, until: 1e9, at: i });
         sim.step_n(100);
         assert_eq!(sim.jams.len(), 1, "the jam keeps to the bank");
+        assert_eq!(sim.jams[0].pos, pos, "where it lodged");
         let p = sim.centerline.iter().min_by(|a, b| (a[0] - q[0]).abs().total_cmp(&(b[0] - q[0]).abs())).unwrap();
         let moved = (p[0] - q[0]) * nrm[0] + (p[1] - q[1]) * nrm[1];
         assert!(moved < -0.05 * w, "the channel moves off the jam's bank: {moved}");

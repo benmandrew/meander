@@ -38,7 +38,7 @@ Where the code differs from the first plan:
 
 Flat `f32` buffers as for the scrolls, each behind its version counter, and the window offset applied as for the other geometry:
 
-- `sync_jams`: per jam, x, y, side, strength (`Jam::strength(time, jam_lifetime)`), and the bank direction from the centreline point `at`.
+- `jams`: per jam, x, y, the downstream and into-channel directions fixed where it lodged, strength (`Jam::strength(time, jam_lifetime)`), and `until`.
 - `sync_splays`: per splay, apex, dir, length and age over `SPLAY_LIFE`; `splay_version`.
 - `tributaries` and `tributary_courses`: per tributary, mouth, scale and the course the core keeps from the mouth to the water it meets, with a version that changes with the course.
 - `sync_mills`: per mill, weir, across, working flag, age of ruin over `MILL_RUIN`, then the leat polylines; `mill_version`.

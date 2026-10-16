@@ -12,15 +12,22 @@ const TREE: f64 = 0.35;
 const JAM_FADE: f64 = 0.25;
 /// Smoothing passes over the summed push of the jams.
 const JAM_SMOOTH: usize = 4;
-/// Distance from its bank point within which a jam keeps to the channel,
+/// Distance from the centreline within which a jam keeps to the channel,
 /// in channel widths; past it the bank has left the jam on the floodplain.
 const JAM_HOLD: f64 = 1.5;
+/// Fraction of the half-width from the centreline to its bank within which
+/// a jam is in mid-channel, where the current lifts it off and carries it
+/// out of the reach.
+const JAM_STRAND: f64 = 0.5;
 
-/// A jam of large wood against a bank.
+/// A jam of large wood against a bank. It stays where it lodged, anchored
+/// by its root wads and buried ends, while the channel moves about it.
 #[derive(Clone, Debug)]
 pub struct Jam {
-    /// Where it lies, on the bank.
+    /// Where it lodged, on the bank.
     pub pos: P,
+    /// Unit vector downstream where it lodged, along which its logs lie.
+    pub down: P,
     /// The bank it lies against: +1 along the channel's right normal, −1
     /// along its left.
     pub side: f64,
@@ -47,8 +54,9 @@ impl Sim {
         (reach / crate::SPACING).round() as usize
     }
 
-    /// Move each jam to the bank of the centreline point now nearest it,
-    /// dropping those the channel has left.
+    /// Point each jam at the centreline point now nearest it, dropping
+    /// those the channel has left on the floodplain and those it has run
+    /// over, which the current carries away.
     pub(crate) fn track_jams(&mut self) {
         if self.jams.is_empty() {
             return;
@@ -63,9 +71,10 @@ impl Sim {
                 return false;
             }
             let (q, nrm) = (self.centerline[i], right_normal(&self.centerline, i));
-            let off = j.side * 0.5 * self.widths[i] * w;
-            (j.pos, j.at) = ([q[0] + off * nrm[0], q[1] + off * nrm[1]], i);
-            true
+            // Distance out from the centreline towards the jam's bank.
+            let out = j.side * ((j.pos[0] - q[0]) * nrm[0] + (j.pos[1] - q[1]) * nrm[1]);
+            j.at = i;
+            out > JAM_STRAND * 0.5 * self.widths[i] * w
         });
         self.jams = jams;
     }
@@ -118,7 +127,8 @@ impl Sim {
             j.size = (j.size + TREE).min(1.0);
             j.until = j.until.max(time + life * j.size);
         } else if self.jams.len() < MAX_JAMS {
-            self.jams.push(Jam { pos, side, size: TREE, until: time + life * TREE, at: i });
+            let down = [-nrm[1], nrm[0]];
+            self.jams.push(Jam { pos, down, side, size: TREE, until: time + life * TREE, at: i });
         }
     }
 

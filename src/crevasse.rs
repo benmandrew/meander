@@ -368,7 +368,7 @@ mod tests {
         }
         assert!(!sim.crevasse(1.0), "a fall of 0.1 holds");
         let pos = out(-0.5, 0.0);
-        sim.jams.push(crate::Jam { pos, side: -1.0, size: 1.0, until: 1e9, at: i });
+        sim.jams.push(crate::Jam { pos, down: [1.0, 0.0], side: -1.0, size: 1.0, until: 1e9, at: i });
         assert!(sim.crevasse(1.0) || !sim.splays.is_empty(), "a jam breaks it");
         assert_eq!(sim.splays.len(), 1);
     }

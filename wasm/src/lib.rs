@@ -8,7 +8,6 @@
 //! without copying. Call `sync` after stepping, then rebuild every typed
 //! array view: memory growth detaches old views.
 
-use meander_core::geom::right_normal;
 use meander_core::{FAN_MAX_DEPTH, MILL_RUIN, Params, SPLAY_LIFE, Sim};
 use wasm_bindgen::prelude::*;
 
@@ -336,15 +335,16 @@ impl River {
     /// The jams of large wood, eight values each: the jam's x and y on the
     /// bank, the unit vector downstream, the unit vector from its bank into
     /// the channel, its strength in [0, 1], and the time it breaks up, which
-    /// tells one jam from another.
+    /// tells one jam from another. All are fixed where the jam lodged, so its
+    /// logs stay put as the channel moves.
     pub fn jams(&self) -> Vec<f32> {
         let sim = &self.sim;
-        let (n, life) = (sim.centerline.len(), sim.params.jam_lifetime);
-        let mut out = Vec::with_capacity(7 * sim.jams.len());
-        for j in sim.jams.iter().filter(|j| j.at > 0 && j.at + 1 < n) {
-            let nrm = right_normal(&sim.centerline, j.at);
-            // The right normal turned back a right angle is downstream.
-            let (down, into) = ([-nrm[1], nrm[0]], [-j.side * nrm[0], -j.side * nrm[1]]);
+        let life = sim.params.jam_lifetime;
+        let mut out = Vec::with_capacity(8 * sim.jams.len());
+        for j in &sim.jams {
+            // The right normal is (down.y, −down.x); into the channel is
+            // against the jam's side of it.
+            let (down, into) = (j.down, [-j.side * j.down[1], j.side * j.down[0]]);
             let s = j.strength(sim.time, life);
             out.extend([j.pos[0], j.pos[1], down[0], down[1], into[0], into[1], s, j.until].map(|v| v as f32));
         }
