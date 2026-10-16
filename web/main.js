@@ -64,6 +64,26 @@ const FOREST = [
 ];
 const FOREST_OPACITY = 0.16;
 const FOREST_STEPS = 6;
+// Trees: crowns on a grid `TREE_GAP` widths apart, jittered by up to half
+// a gap. Each crown appears once the growth of the ground under it passes
+// its own seeded threshold between the young and mature forest levels,
+// then widens to its full radius, up to `TREE_RADIUS` widths, over
+// `TREE_GROW` of `forest_time`. Crowns smaller than `TREE_MIN` widths are
+// not drawn. A crown is `TREE_LOBES` overlapping circles around a central
+// one, at seeded angles. It casts a shadow down and to the right and
+// catches light up and to the left.
+const TREE_GAP = 0.9;
+const TREE_RADIUS = 0.5;
+const TREE_LOBES = 4;
+const TREE_GROW = 0.4;
+const TREE_MIN = 0.06;
+const TREE_TONES = [[104, 136, 78], [90, 124, 68], [76, 110, 62]];
+const TREE_SHADOW = [48, 66, 40];
+const TREE_LIGHT = [150, 176, 108];
+// Crowns are drawn in strips `TREE_STRIP` widths wide, one path per strip
+// for each kind of mark, so the browser rasterises only the strips a tile
+// meets and a strip whose trees have not changed keeps its path data.
+const TREE_STRIP = 8;
 // Opacity of the marsh that stays on the clay plug of an old oxbow after
 // its lake and scar have gone, until the channel sweeps it away.
 const PLUG_MARSH = 0.25;
@@ -364,6 +384,12 @@ function random(seed) {
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+// Path data for a circle.
+function circleData(x, y, r) {
+  const [r1, d] = [dp1(r), dp1(2 * r)];
+  return `M${dp1(x - r)},${dp1(y)}a${r1},${r1} 0 1 0 ${d},0a${r1},${r1} 0 1 0 -${d},0`;
 }
 
 // Outline of a soil patch: an oval with radii `rx`, `ry` at a random angle,
@@ -802,6 +828,16 @@ class SvgRenderer {
     // Path element of each ridge drawn, by band and path data.
     this.ridges = new Map();
     this.scrollAt = null;
+    // Trees lie over the scroll bars, which the canopy hides as it closes:
+    // the shadows of every crown, then the crowns in a few tones, then
+    // their highlights.
+    this.treeLayer = el('g', {}, ground);
+    this.treeKinds = [
+      el('g', { fill: `rgb(${TREE_SHADOW})`, 'fill-opacity': 0.3 }, this.treeLayer),
+      ...TREE_TONES.map((c) => el('g', { fill: `rgb(${c})`, 'fill-opacity': 0.9 }, this.treeLayer)),
+      el('g', { fill: `rgb(${TREE_LIGHT})`, 'fill-opacity': 0.4 }, this.treeLayer),
+    ];
+    this.treeStrips = [];
     // Natural levees: nested translucent silt regions, higher ground inside.
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
@@ -863,6 +899,7 @@ class SvgRenderer {
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
     this.drawSoils(river, x, w, h, seed);
+    this.placeTrees(river, x, w, h, seed);
     this.drawWalls(river, x, w, h, seed);
   }
 
@@ -1120,6 +1157,58 @@ class SvgRenderer {
         set(this.forest[k * FOREST_STEPS + s], 'd', contourData(blur, cols, rows, cell, c0, c1, level));
       }
     });
+    this.drawTrees(blur, cols, rows, cell, shrub, forest, river.get_param('width'));
+  }
+
+  // Scatter crowns over the window on a jittered grid, each with its own
+  // threshold, size and tone, and sort them into strips.
+  placeTrees(river, x0, vw, h, seed) {
+    for (const g of this.treeKinds) g.replaceChildren();
+    const rand = random(seed ^ 0x7ee5);
+    const w = river.get_param('width');
+    const [gap, strip] = [TREE_GAP * w, TREE_STRIP * w];
+    const count = Math.ceil(vw / strip);
+    this.treeStrips = Array.from({ length: count }, () => ({
+      crowns: [],
+      paths: this.treeKinds.map((g) => el('path', {}, g)),
+    }));
+    for (let y = gap / 2; y < h; y += gap) {
+      for (let x = x0 + gap / 2; x < x0 + vw; x += gap) {
+        const cx = x + (rand() - 0.5) * gap, cy = y + (rand() - 0.5) * gap;
+        const s = Math.min(count - 1, Math.max(0, Math.floor((cx - x0) / strip)));
+        const tone = Math.floor(rand() * TREE_TONES.length);
+        // Lobes as offsets and radii in multiples of the crown's radius.
+        const turn = 2 * Math.PI * rand();
+        const lobes = [[0, 0, 0.7]];
+        for (let k = 0; k < TREE_LOBES; k++) {
+          const a = turn + 2 * Math.PI * (k + 0.3 * rand()) / TREE_LOBES, off = 0.35 + 0.15 * rand();
+          lobes.push([off * Math.cos(a), off * Math.sin(a), 0.5 + 0.2 * rand()]);
+        }
+        this.treeStrips[s].crowns.push({ x: cx, y: cy, at: rand(), size: 0.6 + 0.4 * rand(), tone, lobes });
+      }
+    }
+  }
+
+  // Size each crown by the blurred growth of the cell under it, and
+  // rebuild the paths of each strip.
+  drawTrees(blur, cols, rows, cell, shrub, forest, w) {
+    const [from, to] = [shrub + FOREST[1].at * forest, shrub + FOREST[2].at * forest];
+    const grow = Math.max(1e-6, TREE_GROW * forest);
+    const light = this.treeKinds.length - 1;
+    for (const { crowns, paths } of this.treeStrips) {
+      const d = paths.map(() => []);
+      for (const c of crowns) {
+        const i = Math.floor(c.x / cell), j = Math.floor(c.y / cell);
+        if (i < 0 || i >= cols || j < 0 || j >= rows) continue;
+        const start = from + c.at * (to - from);
+        const r = TREE_RADIUS * w * c.size * clamp01((blur[j * cols + i] - start) / grow);
+        if (r < TREE_MIN * w) continue;
+        d[0].push(circleData(c.x + 0.15 * r, c.y + 0.2 * r, r));
+        for (const [dx, dy, lr] of c.lobes) d[1 + c.tone].push(circleData(c.x + dx * r, c.y + dy * r, lr * r));
+        d[light].push(circleData(c.x - 0.3 * r, c.y - 0.3 * r, 0.45 * r));
+      }
+      paths.forEach((p, k) => set(p, 'd', d[k].join('')));
+    }
   }
 
   // Erodibility grid columns over the window, with a column to spare each
