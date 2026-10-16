@@ -483,12 +483,16 @@ class SvgRenderer {
     // looks the same as a round one and is far cheaper to rasterise.
     const line = { ...round, 'stroke-linejoin': 'bevel' };
     this.background = el('rect', { y: 0, fill: `rgb(${SOIL.loam})` }, bars);
-    // Point bars: each age band is one group of opaque paths in one colour,
-    // newest on top, so each spot shows the newest band over it and bands
-    // never build up. Old bands fade to the background colour, and the
-    // translucent soil patches lie over them. Bands that have stopped
-    // growing lie in the bottom layer; the growing band lies in the ground
-    // layer, so keeping a centreline does not repaint the old ones.
+    // Soil patches lie under the point bars: ground the channel has swept is
+    // its own fresh sand, whatever soil was there before.
+    this.soilLayer = el('g', {}, bars);
+    // Point bars: each age band is one group of paths in one colour, newest
+    // on top. A band is opaque while young, so each spot shows the newest
+    // band over it and bands never build up. Old bands fade towards the
+    // background colour and turn transparent, so the soil shows through
+    // again as it forms on the old bar. Bands that have stopped growing lie
+    // in the bottom layer; the growing band lies in the ground layer, so
+    // keeping a centreline does not repaint the old ones.
     this.oldBars = el('g', line, bars);
     this.barLayer = el('g', line, ground);
     // Scroll bars: one group for each age band, with one path for each
@@ -508,7 +512,6 @@ class SvgRenderer {
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
     this.leveeAt = null;
-    this.soilLayer = el('g', {}, ground);
     // Oxbow scars lie over the whole ground, under the channel. They change
     // slowly, so they sit at the top of the ground layer, not in the top
     // layer that is redrawn whenever the river moves.
@@ -797,8 +800,8 @@ class SvgRenderer {
   // Bring the bands on the page up to date: add the centrelines kept since
   // the last draw, move bands that have stopped growing to the bottom layer
   // and remove dropped ones. Shade each band by its age: bare sand when
-  // new, then grassed over and fading into the background as it nears
-  // `barMemory`. The old bands are shaded only when the bottom layer
+  // new, then grassed over, fading into the background and turning
+  // transparent over the soil beneath as it nears `barMemory`. The old bands are shaded only when the bottom layer
   // changes anyway, or the bar settings do, so it stays cached in between.
   drawBars(t, w, local) {
     let changed = false;
@@ -826,6 +829,9 @@ class SvgRenderer {
       const fresh = clamp01(1 - (t - 0.5 * (b.t0 + b.t1)) / local.barMemory);
       const sand = mixRgb(OLD_BAR, BAR, fresh * fresh);
       set(b.g, 'stroke', mix(SOIL.loam, sand, local.barOpacity * fresh));
+      // Group opacity, so a band's own paths do not build up where they
+      // overlap.
+      set(b.g, 'opacity', smoothstep(2 * fresh).toFixed(2));
     }
   }
 
