@@ -264,6 +264,20 @@ const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
 // Point bars are kept in this many age bands, each one group of paths.
 const BANDS = 24;
+// Ridge and swale: each kept centreline is laid in one of `BAR_TONES`
+// tones, from the bar's sand on the ridges to the darker, damper silt of
+// `SWALE` in the hollows, `BAR_CONTRAST` of the way at the darkest. The
+// tone follows seeded noise in time with knots every `BAR_GRAIN` units of
+// simulated time (5 years) and every 5 times that, so the whole river lays
+// the same tone at once and each bar shows arcs of its growth, wide where
+// it grew fast and crowded where slowly. The contrast falls to
+// `BAR_RELICT` of its first value as the bar ages, so old bars keep faint
+// ridges under the grass.
+const SWALE = [176, 176, 134];
+const BAR_TONES = 4;
+const BAR_CONTRAST = 0.55;
+const BAR_GRAIN = 2;
+const BAR_RELICT = 0.35;
 // Points on each rounded end of a lake.
 const CAP_STEPS = 8;
 // Fraction of its length a lake loses from each end over its lifetime.
@@ -1279,6 +1293,12 @@ class SvgRenderer {
       el('g', { fill: `rgb(${TREE_LIGHT})`, 'fill-opacity': 0.4 }, this.treeLayer),
     ];
     this.treeStrips = [];
+    // Ground the channel has swept since the shrub, forest, fields and
+    // crowns were last contoured, as its centrelines in the newest band's
+    // sand, over all of them. Without it, ground the channel crosses and
+    // leaves within one redraw shows the vegetation that stood there before
+    // until the next redraw.
+    this.sweptLayer = el('g', line, ground);
     // Natural levees: nested translucent silt regions, higher ground inside.
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
@@ -1326,6 +1346,9 @@ class SvgRenderer {
     this.reeds = [];
     this.scars = [];
     this.bands = [];
+    // Centrelines kept since the last forest redraw, each with its time,
+    // path data, tone and element in `sweptLayer` once drawn.
+    this.swept = [];
     // Bands dropped since the last draw, still to be removed from the page.
     this.dropped = [];
     // Bar settings the old bands were last shaded for.
@@ -1343,7 +1366,9 @@ class SvgRenderer {
     this.background.setAttribute('height', h);
     this.oldBars.replaceChildren();
     this.barLayer.replaceChildren();
+    this.sweptLayer.replaceChildren();
     this.bands = [];
+    this.swept = [];
     this.dropped = [];
     this.shadedFor = null;
     this.lastBar = null;
@@ -1724,7 +1749,8 @@ class SvgRenderer {
     // The floodplain layers sync their own data, which can grow memory, so
     // they go before the views below are built.
     const layers = [
-      [this.oldBars, local.showBars], [this.barLayer, local.showBars], [this.leveeLayer, local.showLevees],
+      [this.oldBars, local.showBars], [this.barLayer, local.showBars], [this.sweptLayer, local.showBars],
+      [this.leveeLayer, local.showLevees],
       [this.scrollLayer, local.showScrolls],
     ];
     for (const [layer, show] of layers) {
@@ -2124,6 +2150,13 @@ class SvgRenderer {
       () => this.drawSplays(river, w),
       () => this.redrawWalls(river),
     ];
+    // A forest redraw under way goes first, so its stages run in
+    // consecutive frames and the swept ground it clears is not held back
+    // by the turns of the other layers.
+    if (!all && this.forestJob) {
+      this.drawForest(river, memory);
+      return;
+    }
     for (let k = 0; k < layers.length; k++) {
       const m = all ? k : (this.floodplainTurn + k) % layers.length;
       if (layers[m]() && !all) {
@@ -2198,16 +2231,18 @@ class SvgRenderer {
   }
 
   // Redraw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
-  // after each cutoff, which clears an oxbow's footprint. The redraw takes
-  // one stage of `forestStages` a call, so its contours spread over the
-  // frames that follow instead of stalling one; a redraw due while one runs
-  // waits for it. `all` runs every stage at once. Returns whether it did any
-  // work.
+  // after each cutoff, which clears an oxbow's footprint, and each flood,
+  // which strips young shrub and lays scroll bars on the swept ground. The
+  // redraw takes one stage of `forestStages` a call, so its contours spread
+  // over the frames that follow instead of stalling one; a redraw due while
+  // one runs waits for it. `all` runs every stage at once. Returns whether
+  // it did any work.
   drawForest(river, memory, all = false) {
-    const t = river.time(), cutoffs = river.cutoffs();
+    const t = river.time(), cutoffs = river.cutoffs(), floods = river.floods();
     const last = this.forestAt;
-    if (!this.forestJob && (!last || last.cutoffs !== cutoffs || t - last.t >= LEVEE_REFRESH || t < last.t)) {
-      this.forestAt = { cutoffs, t };
+    const due = !last || last.cutoffs !== cutoffs || last.floods !== floods || t - last.t >= LEVEE_REFRESH || t < last.t;
+    if (!this.forestJob && due) {
+      this.forestAt = { cutoffs, floods, t };
       this.forestJob = this.forestStages(river, memory);
     }
     if (!this.forestJob) return false;
@@ -2220,9 +2255,13 @@ class SvgRenderer {
   // The stages of a forest redraw: copy and blur the age grid like the plug
   // grid, contour each forest level, then the farmland clip, then size the
   // tree crowns. The first stage reads WASM memory, so it runs in the call
-  // that starts the redraw.
+  // that starts the redraw. The contours are kept until the last stage,
+  // which puts them on the page with the crowns, so the vegetation changes
+  // in one frame, not in a cascade of partial redraws, and drops the swept
+  // ground the new contours have caught up with.
   *forestStages(river, memory) {
     river.sync_forest();
+    const synced = river.time();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const age = new Float32Array(memory.buffer, river.forest_ptr(), cols * rows);
     const [c0, c1] = this.windowColumns(cols, cell);
@@ -2230,27 +2269,43 @@ class SvgRenderer {
     const blur = this.blur(age, cols, rows, c0, c1, 'forestBlur');
     const [shrub, forest] = [river.get_param('vegetation_time'), river.get_param('forest_time')];
     const w = river.get_param('width');
+    const forestData = [];
     for (const [k, { at }] of FOREST.entries()) {
       yield;
       const age = shrub + at * forest;
       const start = 0.5 * (age + (k ? shrub + FOREST[k - 1].at * forest : 0));
       for (let s = 0; s < FOREST_STEPS; s++) {
         const level = start + (age - start) * (s + 1) / FOREST_STEPS;
-        set(this.forest[k * FOREST_STEPS + s], 'd', contourData(blur, cols, rows, cell, c0, c1, level));
+        forestData.push(contourData(blur, cols, rows, cell, c0, c1, level));
       }
     }
     const graze = river.get_param('grazing_time');
     yield;
-    this.farmland.forEach((path, k) => {
+    const farmData = this.farmland.map((_, k) => {
       const level = graze + (shrub - graze) * k / FIELD_FADE;
-      set(path, 'd', contourData(blur, cols, rows, cell, c0, c1, level));
+      return contourData(blur, cols, rows, cell, c0, c1, level);
     });
     yield;
+    const treeArgs = [cols, rows, cell, shrub, forest, w, graze];
+    const [trees, crop] = [this.treeData(blur, ...treeArgs), this.cropMask];
+    yield;
+    forestData.forEach((d, k) => set(this.forest[k], 'd', d));
+    farmData.forEach((d, k) => set(this.farmland[k], 'd', d));
+    this.setTrees(trees);
     if (this.treeBlur?.length !== blur.length) this.treeBlur = new Float32Array(blur.length);
     this.treeBlur.set(blur);
-    this.treeArgs = [cols, rows, cell, shrub, forest, w, graze];
-    this.drawTrees(this.treeBlur, ...this.treeArgs);
-    this.treesStale = false;
+    this.treeArgs = treeArgs;
+    // Fields finished since the crowns were sized leave them stale, for
+    // `redrawTrees` to size again.
+    if (this.cropMask === crop) this.treesStale = false;
+    // The grid stamps the channel as it lay at the sync, so centrelines
+    // kept up to then are now bare in the contours.
+    const keep = [];
+    for (const s of this.swept) {
+      if (s.t > synced) keep.push(s);
+      else s.e?.remove();
+    }
+    this.swept = keep;
   }
 
   // Redraw the crowns from the last forest redraw's growth, after new
@@ -2298,12 +2353,23 @@ class SvgRenderer {
 
   // Size each crown by the blurred growth of the cell under it, and
   // rebuild the paths of each strip.
-  drawTrees(blur, cols, rows, cell, shrub, forest, w, farm) {
+  drawTrees(...args) {
+    this.setTrees(this.treeData(...args));
+  }
+
+  // Put path data from `treeData` on the page.
+  setTrees(data) {
+    this.treeStrips.forEach(({ paths }, s) => paths.forEach((p, k) => set(p, 'd', data[s][k])));
+  }
+
+  // Path data of the crowns of each strip, one string for each of its
+  // paths, without touching the page.
+  treeData(blur, cols, rows, cell, shrub, forest, w, farm) {
     const [from, to] = [shrub + FOREST[1].at * forest, shrub + FOREST[2].at * forest];
     const grow = Math.max(1e-6, TREE_GROW * forest);
     const light = this.treeKinds.length - 1;
     const crop = this.cropMask;
-    for (const { crowns, paths } of this.treeStrips) {
+    return this.treeStrips.map(({ crowns, paths }) => {
       const d = paths.map(() => []);
       for (const c of crowns) {
         const i = Math.floor(c.x / cell), j = Math.floor(c.y / cell);
@@ -2317,8 +2383,8 @@ class SvgRenderer {
         for (const [dx, dy, lr] of c.lobes) d[1 + c.tone].push(circleData(c.x + dx * r, c.y + dy * r, lr * r));
         d[light].push(circleData(c.x - 0.3 * r, c.y - 0.3 * r, 0.45 * r));
       }
-      paths.forEach((p, k) => set(p, 'd', d[k].join('')));
-    }
+      return d.map((parts) => parts.join(''));
+    });
   }
 
   // Erodibility grid columns over the window, with a column to spare each
@@ -2423,16 +2489,54 @@ class SvgRenderer {
       this.bands.push(band);
     }
     band.t1 = t;
-    band.pending.push(d);
+    const tone = this.barTone(t);
+    band.pending.push({ d, tone });
+    this.swept.push({ t, d, tone, e: null });
     while (this.bands.length && t - this.bands[0].t1 > local.barMemory) this.dropped.push(this.bands.shift());
+  }
+
+  // Tone of the sand laid at time `t`, from 0 on the ridges to
+  // `BAR_TONES - 1` in the swales.
+  barTone(t) {
+    const knot = (len, j) => hash01(this.seed, len, j);
+    let u = 0;
+    for (const [len, weight] of [[BAR_GRAIN, 0.6], [5 * BAR_GRAIN, 0.4]]) {
+      const s = t / len, j = Math.floor(s);
+      u += weight * (knot(len, j) + (knot(len, j + 1) - knot(len, j)) * smoothstep(s - j));
+    }
+    // The sum of two octaves gathers about the middle; stretch it so every
+    // tone is laid.
+    return Math.min(BAR_TONES - 1, Math.floor(BAR_TONES * clamp01(1.6 * (u - 0.5) + 0.5)));
+  }
+
+  // Path element of a kept centreline, stroked in its tone's colour from
+  // its group.
+  barPath(d, tone, g) {
+    return el('path', { d, style: `stroke:var(--tone${tone})` }, g);
+  }
+
+  // Style setting the colour of each tone of a band laid at mean time
+  // `mid`, at time `t`: bare sand when new, then grassed over, fading into
+  // the background as it nears `barMemory`.
+  bandStyle(t, mid, local) {
+    const fresh = clamp01(1 - (t - mid) / local.barMemory);
+    const sand = mixRgb(OLD_BAR, BAR, fresh * fresh);
+    const contrast = BAR_CONTRAST * (BAR_RELICT + (1 - BAR_RELICT) * fresh);
+    let style = '';
+    for (let k = 0; k < BAR_TONES; k++) {
+      const tone = mixRgb(sand, SWALE, contrast * k / (BAR_TONES - 1));
+      style += `--tone${k}:${mix(SOIL.loam, tone, local.barOpacity * fresh)};`;
+    }
+    return { style, opacity: smoothstep(2 * fresh).toFixed(2) };
   }
 
   // Bring the bands on the page up to date: add the centrelines kept since
   // the last draw, move bands that have stopped growing to the bottom layer
-  // and remove dropped ones. Shade each band by its age: bare sand when
-  // new, then grassed over, fading into the background and turning
-  // transparent over the soil beneath as it nears `barMemory`. The old bands are shaded only when the bottom layer
-  // changes anyway, or the bar settings do, so it stays cached in between.
+  // and remove dropped ones. Shade each band by its age (see `bandStyle`),
+  // turning transparent over the soil beneath as it nears `barMemory`. The
+  // old bands are shaded only when the bottom layer changes anyway, or the
+  // bar settings do, so it stays cached in between. The swept ground is
+  // shaded as the newest band.
   drawBars(t, w, local) {
     let changed = false;
     for (const b of this.dropped) {
@@ -2447,21 +2551,25 @@ class SvgRenderer {
       else if (b.g.parentNode !== layer) layer.append(b.g);
       else if (!b.pending.length) continue;
       changed ||= layer === this.oldBars;
-      for (const d of b.pending) el('path', { d }, b.g);
+      for (const { d, tone } of b.pending) this.barPath(d, tone, b.g);
       b.pending = [];
     }
+    for (const s of this.swept) s.e ??= this.barPath(s.d, s.tone, this.sweptLayer);
     const key = `${w} ${local.barMemory} ${local.barOpacity}`;
     if (key !== this.shadedFor) changed = true;
     this.shadedFor = key;
-    set(this.oldBars, 'stroke-width', w);
-    set(this.barLayer, 'stroke-width', w);
+    for (const layer of [this.oldBars, this.barLayer, this.sweptLayer]) set(layer, 'stroke-width', w);
     for (const b of changed ? this.bands : this.bands.slice(-1)) {
-      const fresh = clamp01(1 - (t - 0.5 * (b.t0 + b.t1)) / local.barMemory);
-      const sand = mixRgb(OLD_BAR, BAR, fresh * fresh);
-      set(b.g, 'stroke', mix(SOIL.loam, sand, local.barOpacity * fresh));
+      const { style, opacity } = this.bandStyle(t, 0.5 * (b.t0 + b.t1), local);
+      set(b.g, 'style', style);
       // Group opacity, so a band's own paths do not build up where they
       // overlap.
-      set(b.g, 'opacity', smoothstep(2 * fresh).toFixed(2));
+      set(b.g, 'opacity', opacity);
+    }
+    if (newest) {
+      const { style, opacity } = this.bandStyle(t, 0.5 * (newest.t0 + newest.t1), local);
+      set(this.sweptLayer, 'style', style);
+      set(this.sweptLayer, 'opacity', opacity);
     }
   }
 
