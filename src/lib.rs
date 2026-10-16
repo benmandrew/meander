@@ -157,7 +157,7 @@ impl Default for Params {
             alpha,
             peak_radius: 2.5,
             dt: 0.1,
-            smoothing: 0.1,
+            smoothing: 0.03,
             cutoff_dist: 1.0,
             cutoff_min_sep: 20,
             max_step: 0.15,
@@ -170,7 +170,7 @@ impl Default for Params {
             valley_width: 45.0,
             edge_margin: 8.0,
             pinch_width: 6.0,
-            pinch_length: 20.0,
+            pinch_length: 30.0,
             heterogeneity: 0.5,
             clay_factor: 0.35,
             lake_factor: 3.0,
@@ -445,7 +445,7 @@ const FIELD_CELL: f64 = 0.5;
 const BANK_BEYOND: f64 = 0.25;
 
 /// Default width parameters; see [`Params`].
-const WIDTH_TIME: f64 = 10.0;
+const WIDTH_TIME: f64 = 3.0;
 const BAR_PUSH: f64 = 0.6;
 const FLOOD_WIDENING: f64 = 1.0;
 

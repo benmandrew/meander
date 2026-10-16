@@ -54,6 +54,9 @@ pub struct River {
     scroll_offsets: Vec<u32>,
     /// Age of each scroll bar in simulation time.
     scroll_ages: Vec<f32>,
+    /// 1 on each erodibility cell that was cut off as an oxbow and has not
+    /// been swept by the channel since, 0 elsewhere.
+    plugs: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -79,6 +82,7 @@ impl River {
             scroll_line: Vec::new(),
             scroll_offsets: Vec::new(),
             scroll_ages: Vec::new(),
+            plugs: Vec::new(),
         }
     }
 
@@ -255,6 +259,19 @@ impl River {
     }
     pub fn field_cell(&self) -> f64 {
         self.sim.erodibility.cell
+    }
+
+    /// Copy the cells cut off as oxbows into a flat buffer, the same shape
+    /// as `deposit_ptr`: 1 where the ground is lake or clay plug, 0
+    /// elsewhere. Rebuild every view after calling this, since it can grow
+    /// memory.
+    pub fn sync_plugs(&mut self) {
+        self.plugs.clear();
+        let cut = &self.sim.erodibility.cut_at;
+        self.plugs.extend(cut.iter().map(|t| if t.is_finite() { 1.0 } else { 0.0 }));
+    }
+    pub fn plugs_ptr(&self) -> *const f32 {
+        self.plugs.as_ptr()
     }
 
     /// Erodibility noise at a point, in [0, 1]; low values erode slowly.

@@ -10,6 +10,13 @@ import { startApp } from './ui.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const WATER = [61, 126, 166];
+// Water colour of a lake once cut off: the silt settles out of still
+// water, so it is clearer and darker than the river.
+const CLEAR = [34, 84, 116];
+// Fill over which a new lake turns from the river's colour to `CLEAR`. A
+// lake left to fill on its own takes 1200 units of simulated time, so this
+// is 12 units, two seconds on screen at the default speed.
+const CLEARING = 0.01;
 // Water colour of a lake near the end of its life, turbid and weedy.
 const MURKY = [80, 120, 116];
 const REEDS = 'rgb(104, 126, 84)';
@@ -31,12 +38,35 @@ const LEVEE = [216, 210, 166];
 const LEVEE_LEVELS = [0.3, 0.7];
 // Simulated time between levee redraws when no flood has come.
 const LEVEE_REFRESH = 10;
+// Older, higher ground beyond the valley walls, which the river cannot
+// reach, and the darker scarp at its edge, `SCARP` widths wide. The upland
+// is translucent, so the soil patches under it still show. The wall
+// wanders up to `WALL_WANDER` widths outwards from the valley edge, as
+// seeded value noise with knots every `WALL_KNOTS` widths, and never
+// inwards, where the channel may be.
+const UPLAND = [164, 164, 118];
+const SCARP_SHADE = [128, 128, 88];
+const SCARP = 1.5;
+const WALL_WANDER = 4;
+const WALL_KNOTS = [30, 8];
+// Opacity of the marsh that stays on the clay plug of an old oxbow after
+// its lake and scar have gone, until the channel sweeps it away.
+const PLUG_MARSH = 0.25;
 // Scroll bars: ridges of fresh sand that vegetation colonises first, so
 // they darken against the bar as they age. They are kept in this many age
 // bands, each one path element.
 const RIDGE = [238, 230, 196];
 const OLD_RIDGE = [146, 158, 108];
 const SCROLL_BANDS = 6;
+// The channel's edge: a thin line of bank on both sides, `BANK_EDGE` times
+// the local width from the centreline, and the wet sand of the point bar
+// on the inside of a bend, up to `BAR_RIM` widths more at a bend of radius
+// `BAR_RADIUS` widths. The outer bank is cut, so vegetation meets the
+// water there.
+const BANK_EDGE = 0.53;
+const BAR_RIM = 0.45;
+const BAR_RADIUS = 3;
+const WET_SAND = [190, 170, 120];
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -46,6 +76,23 @@ const BANDS = 24;
 const CAP_STEPS = 8;
 // Fraction of its length a lake loses from each end over its lifetime.
 const PLUG = 0.4;
+// Widest local channel width, as in the core's `MAX_WIDTH`.
+const MAX_WIDTH = 2;
+// Length, as a multiple of the lake's half-width, that a plugged end's cap
+// grows by over the lake's lifetime, so plugged ends stay blunt.
+const PLUG_TIP = 0.5;
+// Shortest lake piece drawn, in channel widths. The channel leaves short
+// pieces where it cuts across a lake, which would show as scattered dashes.
+const MIN_LAKE = 3;
+// A lake point beside the channel, with less than `ALONGSIDE_GAP` widths of
+// bank between their water and running within about 45° of parallel to
+// it, is drawn dry. A channel that has migrated along an old lake would
+// otherwise show it as a second bank beside its own. Points within
+// `ALONGSIDE_END` widths of either end of a piece keep their water, so a
+// lake still joins the channel at a cut.
+const ALONGSIDE_GAP = 0.5;
+const ALONGSIDE_COS = 0.7;
+const ALONGSIDE_END = 2;
 // A centreline is kept once some part of it has moved this many widths from
 // the last kept one, so the swept area has no gaps.
 const BAR_STEP = 0.5;
@@ -101,17 +148,18 @@ function channelFrame(pts) {
 }
 
 // Closed path data for the channel over points [start, end), out to
-// `scale` times the local width either side: one bank forwards, the other
-// back. At a bend tighter than that, the inner bank stops just short of the
-// centre of the bend, so it cannot fold over itself.
-function channelData(pts, widths, frame, scale, start, end) {
+// `scale` times the local width either side, plus `bar[i]` on the inside of
+// the bend if `bar` is given: one bank forwards, the other back. At a bend
+// tighter than that, the inner bank stops just short of the centre of the
+// bend, so it cannot fold over itself.
+function channelData(pts, widths, frame, scale, bar, start, end) {
   if (end - start < 2) return '';
   const { nx, ny, curv } = frame;
   const left = [], right = [];
   for (let i = start; i < end; i++) {
-    const h = scale * widths[i], k = curv[i];
-    const hl = k > 0 ? Math.min(h, 0.95 / k) : h;
-    const hr = k < 0 ? Math.min(h, -0.95 / k) : h;
+    const h = scale * widths[i], k = curv[i], b = bar ? bar[i] : 0;
+    const hl = k > 0 ? Math.min(h + b, 0.95 / k) : h;
+    const hr = k < 0 ? Math.min(h + b, -0.95 / k) : h;
     const [x, y] = [pts[2 * i], pts[2 * i + 1]];
     left.push(dp1(x + hl * nx[i]) + ' ' + dp1(y + hl * ny[i]));
     right.push(dp1(x - hr * nx[i]) + ' ' + dp1(y - hr * ny[i]));
@@ -121,13 +169,30 @@ function channelData(pts, widths, frame, scale, start, end) {
 
 // Channel outlines in runs of `RUN` segments, each overlapping its
 // neighbours by a segment so no seam shows between them.
-function channelRuns(pts, widths, frame, scale) {
+function channelRuns(pts, widths, frame, scale, bar = null) {
   const n = pts.length / 2;
   const runs = [];
   for (let s = 0; s < n - 1; s += RUN) {
-    runs.push(channelData(pts, widths, frame, scale, Math.max(0, s - 1), Math.min(n, s + RUN + 2)));
+    runs.push(channelData(pts, widths, frame, scale, bar, Math.max(0, s - 1), Math.min(n, s + RUN + 2)));
   }
   return runs;
+}
+
+// Width of the wet sand of the point bar beyond the inner bank at each
+// point, in world units: `BAR_RIM` widths at a bend of radius `BAR_RADIUS`
+// widths or tighter, falling to nothing on a straight reach. The curvature
+// is smoothed along the river first, so the bar does not flicker with the
+// point-to-point noise in it.
+function barRim(frame, w) {
+  const { curv } = frame;
+  const n = curv.length;
+  let k = Float64Array.from(curv, Math.abs);
+  for (let pass = 0; pass < 4; pass++) {
+    const prev = k;
+    k = new Float64Array(n);
+    for (let i = 0; i < n; i++) k[i] = 0.25 * prev[Math.max(0, i - 1)] + 0.5 * prev[i] + 0.25 * prev[Math.min(n - 1, i + 1)];
+  }
+  return k.map((c) => BAR_RIM * w * smoothstep(c * w * BAR_RADIUS));
 }
 
 // Path data for points [start, end) of a flat x, y array.
@@ -196,12 +261,13 @@ function blobData(rand, cx, cy, rx, ry) {
 // `half` by the old banks. The depth is `level` less the bed's rise, which
 // is `relief` × 4 × (height − 0.5) for the land heights in `heights`, plus
 // the flood silt in `silts` above its mean over the lake's interior points;
-// the mean is part of the fill that sets `level`. Where
-// the bed rises above the water the lake splits into pools, one subpath
-// each, and the parabola gives each pool a round tip there. A plugged end
-// is a round cap when young, lengthening with `age` in [0, 1] to a crescent
-// tip. An end cut by the channel stays a round cap, hidden under the water.
-function lakeData(pts, heights, silts, widths, start, end, from, to, half, level, relief, age) {
+// the mean is part of the fill that sets `level`. Points marked in `dry`,
+// if given, hold no water. Where the bed rises above the water the lake
+// splits into pools, one subpath each, and the parabola gives each pool a
+// round tip there. A plugged end is a round cap when young, lengthening by
+// `PLUG_TIP` times the half-width with `age` in [0, 1]. An end cut by the
+// channel stays a round cap, hidden under the water.
+function lakeData(pts, heights, silts, widths, start, end, from, to, half, level, relief, age, dry) {
   const m = end - start;
   if (m < 2 || level <= 0) return '';
   let mean = 0;
@@ -214,7 +280,7 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
   // The end points lie under the channel at a cut, swept clear of silt.
   for (let k = 0; k < m; k++) {
     const extra = k > 0 && k < m - 1 ? silts[start + k] - silt : 0;
-    depth[k] = level - 4 * relief * (heights[start + k] - 0.5) - extra;
+    depth[k] = dry?.[k] ? -level : level - 4 * relief * (heights[start + k] - 0.5) - extra;
   }
   for (let k = 1; k < m; k++) {
     const i = 2 * (start + k);
@@ -281,7 +347,7 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
       if (at !== a && at !== b) return { len: wide, cap: false };
       const [jj, uu] = locate(at, 0);
       const r = width(jj, uu, depthAt(jj, uu));
-      return { len: plugged ? r * (1 + 3 * age) : r, cap: true };
+      return { len: plugged ? r * (1 + PLUG_TIP * age) : r, cap: true };
     };
     const [ea, eb] = [end(u0, from > 0), end(v0, to < s[m - 1])];
     const fit = Math.min(1, (v0 - u0) / (ea.len + eb.len));
@@ -413,6 +479,45 @@ function cropped(line, x0, x1) {
   return { d: runs.map((r) => 'M' + r[0] + 'L' + r.slice(1).join(' ')).join(''), pts: kept };
 }
 
+// Arc length of points [start, end) of a flat x, y array.
+function pieceLength(pts, start, end) {
+  let len = 0;
+  for (let i = start + 1; i < end; i++) len += Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
+  return len;
+}
+
+// Lake points [start, end) of a flat x, y array that lie beside the
+// channel, as a mask by index into the piece, or null if there are none,
+// and a key that changes when the mask does. See `ALONGSIDE_GAP`.
+// `oxWidths` is in multiples of the reference width `w` and `widths` in
+// world units; `channel` is a grid of the channel points `line`, with its
+// `frame`.
+function alongside(pts, oxWidths, start, end, line, widths, frame, channel, w) {
+  const m = end - start;
+  let dry = null, key = 0, s = 0;
+  const ends = ALONGSIDE_END * w, total = pieceLength(pts, start, end);
+  for (let k = 1; k < m - 1; k++) {
+    const i = start + k;
+    s += Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
+    if (s < ends || total - s < ends) continue;
+    const [x, y] = [pts[2 * i], pts[2 * i + 1]];
+    const j = channel.nearest(x, y, channel.size);
+    if (j < 0) continue;
+    const c = j >> 1;
+    const gap = Math.hypot(line[j] - x, line[j + 1] - y) - 0.5 * (widths[c] + w * oxWidths[i]);
+    if (gap > ALONGSIDE_GAP * w) continue;
+    // Unit tangents: the lake's by central difference, the channel's from
+    // its left normal.
+    const tx = pts[2 * i + 2] - pts[2 * i - 2], ty = pts[2 * i + 3] - pts[2 * i - 1];
+    const cos = (tx * frame.ny[c] - ty * frame.nx[c]) / (Math.hypot(tx, ty) || 1);
+    if (Math.abs(cos) < ALONGSIDE_COS) continue;
+    dry ??= new Uint8Array(m);
+    dry[k] = 1;
+    key = (31 * key + k) | 0;
+  }
+  return { dry, key };
+}
+
 // Points of a flat x, y array hashed into square cells of side `size`.
 // Hashed grid of points, filled by counting sort into flat arrays. Cells
 // along a row hash to consecutive buckets, so the three cells around a
@@ -454,6 +559,26 @@ class Grid {
     return false;
   }
 
+  // Offset in `pts` of the point nearest (x, y) within `r` (at most
+  // `size`), or −1 if there is none.
+  nearest(x, y, r) {
+    const cx = Math.floor(x / this.size), cy = Math.floor(y / this.size);
+    const { start, mask, items, pts } = this;
+    let [best, bestD] = [-1, r * r];
+    const scan = (lo, hi) => {
+      for (let m = lo; m < hi; m++) {
+        const k = items[m], dx = pts[k] - x, dy = pts[k + 1] - y, d = dx * dx + dy * dy;
+        if (d <= bestD) [best, bestD] = [k, d];
+      }
+    };
+    for (let j = cy - 1; j <= cy + 1; j++) {
+      const b = this.bucket(cx - 1, j), e = Math.min(b + 3, mask + 1);
+      scan(start[b], start[e]);
+      scan(0, start[b + 3 - e]);
+    }
+    return best;
+  }
+
   // Whether any point in items [lo, hi) lies within √r2 of (x, y).
   scan(lo, hi, x, y, r2) {
     for (let m = lo; m < hi; m++) {
@@ -483,12 +608,16 @@ class SvgRenderer {
     // looks the same as a round one and is far cheaper to rasterise.
     const line = { ...round, 'stroke-linejoin': 'bevel' };
     this.background = el('rect', { y: 0, fill: `rgb(${SOIL.loam})` }, bars);
-    // Point bars: each age band is one group of opaque paths in one colour,
-    // newest on top, so each spot shows the newest band over it and bands
-    // never build up. Old bands fade to the background colour, and the
-    // translucent soil patches lie over them. Bands that have stopped
-    // growing lie in the bottom layer; the growing band lies in the ground
-    // layer, so keeping a centreline does not repaint the old ones.
+    // Soil patches lie under the point bars: ground the channel has swept is
+    // its own fresh sand, whatever soil was there before.
+    this.soilLayer = el('g', {}, bars);
+    // Point bars: each age band is one group of paths in one colour, newest
+    // on top. A band is opaque while young, so each spot shows the newest
+    // band over it and bands never build up. Old bands fade towards the
+    // background colour and turn transparent, so the soil shows through
+    // again as it forms on the old bar. Bands that have stopped growing lie
+    // in the bottom layer; the growing band lies in the ground layer, so
+    // keeping a centreline does not repaint the old ones.
     this.oldBars = el('g', line, bars);
     this.barLayer = el('g', line, ground);
     // Scroll bars: one group for each age band, with one path for each
@@ -508,7 +637,13 @@ class SvgRenderer {
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
     this.leveeAt = null;
-    this.soilLayer = el('g', {}, ground);
+    // The valley walls lie over the floodplain, which never reaches them.
+    this.walls = el('g', {}, ground);
+    // Every clay plug the channel has not swept away keeps a faint marsh,
+    // so old meander belts stay legible after their scars fade.
+    this.plugMarsh = el('path', { fill: MARSH, 'fill-opacity': PLUG_MARSH, 'fill-rule': 'evenodd' }, ground);
+    this.plugAt = null;
+    this.plugBlur = null;
     // Oxbow scars lie over the whole ground, under the channel. They change
     // slowly, so they sit at the top of the ground layer, not in the top
     // layer that is redrawn whenever the river moves.
@@ -518,7 +653,7 @@ class SvgRenderer {
     // Both are filled outlines at the local width, which a stroke cannot vary.
     // Every lake's reed fringe lies under the water of all of them, so lakes
     // that meet join as one body of water.
-    this.bank = el('g', { fill: '#b8a678' }, svg);
+    this.bank = el('g', { fill: `rgb(${WET_SAND})` }, svg);
     this.reedLayer = el('g', { fill: 'none', 'stroke-linejoin': 'round', stroke: REEDS }, svg);
     this.lakeLayer = el('g', {}, svg);
     this.water = el('g', { fill: `rgb(${WATER})` }, svg);
@@ -551,10 +686,53 @@ class SvgRenderer {
     this.lastBar = null;
     this.window = [x, w];
     this.leveeAt = null;
+    this.plugAt = null;
     this.scrollAt = null;
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
     this.drawSoils(river, x, w, h, seed);
+    this.drawWalls(river, x, w, h, seed);
+  }
+
+  // Draw the upland beyond each valley wall over the window [x0, x0 + vw),
+  // with a scarp along the wall. The core narrows the valley at the window
+  // edges to keep bends off them; the walls are drawn at its full width, so
+  // that device does not show.
+  drawWalls(river, x0, vw, h, seed) {
+    this.walls.replaceChildren();
+    const w = river.get_param('width'), valley = river.get_param('valley_width') * w;
+    if (!(valley > 0 && valley < h)) return;
+    const rand = random(seed ^ 0xba1e);
+    const step = 0.5 * w, n = Math.ceil(vw / step) + 1;
+    for (const side of [-1, 1]) {
+      const octaves = WALL_KNOTS.map((len) => Array.from({ length: Math.ceil(vw / (len * w)) + 2 }, rand));
+      // Distance of the wall from the top or bottom edge of the window.
+      const edge = new Float64Array(n);
+      for (let k = 0; k < n; k++) {
+        const x = Math.min(k * step, vw) / w;
+        let u = 0;
+        WALL_KNOTS.forEach((len, m) => {
+          const t = x / len, j = Math.floor(t), knots = octaves[m];
+          u += (knots[j] + (knots[j + 1] - knots[j]) * smoothstep(t - j)) / (m + 1);
+        });
+        edge[k] = 0.5 * (h - valley) - WALL_WANDER * w * u / 1.5;
+      }
+      const at = (k, d) => {
+        const x = dp1(x0 + Math.min(k * step, vw));
+        return `${x} ${dp1(side < 0 ? d : h - d)}`;
+      };
+      const wall = Array.from(edge, (d, k) => at(k, d)).join(' ');
+      const rim = side < 0 ? 0 : h;
+      el('path', {
+        d: `M${dp1(x0)} ${rim} L${wall} L${dp1(x0 + vw)} ${rim}Z`,
+        fill: `rgb(${UPLAND})`, 'fill-opacity': 0.8,
+      }, this.walls);
+      el('path', {
+        d: 'M' + Array.from(edge, (d, k) => at(k, d - 0.5 * SCARP * w)).join(' '),
+        fill: 'none', stroke: `rgb(${SCARP_SHADE})`, 'stroke-opacity': 0.45,
+        'stroke-width': SCARP * w, 'stroke-linejoin': 'round',
+      }, this.walls);
+    }
   }
 
   // Scatter soil patches over the window: broad patches whose type follows
@@ -602,6 +780,7 @@ class SvgRenderer {
       if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
     }
     if (local.showLevees) this.drawLevees(river, memory);
+    this.drawPlugs(river, memory);
     if (local.showScrolls) this.drawScrolls(river, memory, w);
 
     river.sync();
@@ -622,18 +801,21 @@ class SvgRenderer {
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
     const frame = channelFrame(line);
     const waterRuns = channelRuns(line, widths, frame, 0.5);
-    const bankRuns = channelRuns(line, widths, frame, 0.65);
+    const bankRuns = channelRuns(line, widths, frame, BANK_EDGE, barRim(frame, w));
+    // Channel points, to find lake points beside it.
+    const reach = (MAX_WIDTH + ALONGSIDE_GAP) * w;
+    const channel = new Grid(line, reach);
 
     this.record(line, river.time(), w, local);
     this.drawBars(river.time(), w, local);
 
-    // Oxbows: a lake that plugs from the ends, narrows far more slowly from
-    // the banks and turns murky, fading only over the last fifth of its
-    // fill, then a marshy scar that fades out. Both plugs and banks advance
-    // steadily as it fills, and the water drains first from where the land
-    // is high or floods have laid the most silt, splitting the lake into
-    // pools. The reed fringe grows inwards, so it does not hide the
-    // narrowing.
+    // Oxbows: a lake that clears and darkens once cut off, plugs from the
+    // ends, narrows far more slowly from the banks and turns murky, fading
+    // only over the last fifth of its fill, then a marshy scar that fades
+    // out. Both plugs and banks advance steadily as it fills, and the water
+    // drains first from where the land is high or floods have laid the most
+    // silt, splitting the lake into pools. The reed fringe grows inwards, so
+    // it does not hide the narrowing.
     resize(this.scars, n, this.scarLayer);
     resize(this.lakes, n, this.lakeLayer);
     resize(this.reeds, n, this.reedLayer);
@@ -653,9 +835,10 @@ class SvgRenderer {
         set(scar, 'd', pathData(oxPts, oxOff[k], oxOff[k + 1]));
       }
       set(scar, 'stroke-width', dp1(wm));
-      const fade = 1 - smoothstep(oxScar[k] / scarLife);
+      const sliver = pieceLength(oxPts, oxOff[k], oxOff[k + 1]) < MIN_LAKE * w;
+      const fade = sliver ? 0 : 1 - smoothstep(oxScar[k] / scarLife);
       set(scar, 'stroke-opacity', (0.45 * smoothstep(age) * fade).toFixed(2));
-      if (age >= 1) {
+      if (age >= 1 || sliver) {
         // Elements are matched to oxbows by index, so a lake can come back
         // to this element when the channel splits or drops an oxbow before
         // it. Forget its inputs, or it would stay blank.
@@ -678,16 +861,18 @@ class SvgRenderer {
       // Floods and the channel change the silt without reshaping the oxbow.
       let silt = 0;
       for (let i = oxOff[k]; i < oxOff[k + 1]; i++) silt += oxSilt[i];
-      const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief}`;
+      const { dry, key } = alongside(oxPts, oxWidth, oxOff[k], oxOff[k + 1], line, widths, frame, channel, w);
+      const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief} ${key}`;
       if (lake.inputs !== inputs) {
         lake.inputs = inputs;
         const d = lakeData(oxPts, oxHeight, oxSilt, oxWidth, oxOff[k], oxOff[k + 1], from, to,
-          0.5 * w * inset, level, local.oxbowRelief, age);
+          0.5 * w * inset, level, local.oxbowRelief, age, dry);
         set(lake, 'd', d);
         set(reed, 'd', d);
       }
       const opacity = clamp01(5 * (1 - age)).toFixed(2);
-      set(lake, 'fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
+      const clear = mixRgb(WATER, CLEAR, smoothstep(age / CLEARING));
+      set(lake, 'fill', mix(clear, MURKY, smoothstep(1.5 * (age - CLEARING) / (1 - CLEARING))));
       set(lake, 'opacity', opacity);
       set(reed, 'opacity', opacity);
       set(reed, 'stroke-width', (2 * reeds).toFixed(2));
@@ -715,6 +900,42 @@ class SvgRenderer {
     LEVEE_LEVELS.forEach((f, k) => {
       this.levees[k].setAttribute('d', top > 0 ? contourData(deposit, cols, rows, cell, c0, c1, f * top) : '');
     });
+  }
+
+  // Draw the clay plug marsh after each cutoff, and every `LEVEE_REFRESH`
+  // of simulated time as the channel sweeps it away. The plug grid is
+  // blurred over 3 × 3 cells first, so its outline follows the lake's
+  // curve instead of the cell edges.
+  drawPlugs(river, memory) {
+    const t = river.time(), cutoffs = river.cutoffs();
+    const last = this.plugAt;
+    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    this.plugAt = { cutoffs, t };
+    river.sync_plugs();
+    const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
+    const plugs = new Float32Array(memory.buffer, river.plugs_ptr(), cols * rows);
+    if (this.plugBlur?.length !== cols * rows) this.plugBlur = new Float32Array(cols * rows);
+    const blur = this.plugBlur;
+    const [x, vw] = this.window;
+    const c0 = Math.max(0, Math.floor(x / cell) - 1);
+    const c1 = Math.min(cols, Math.ceil((x + vw) / cell) + 1);
+    for (let j = 0; j < rows; j++) {
+      for (let i = c0; i < c1; i++) {
+        let sum = 0, count = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          const jj = j + dj;
+          if (jj < 0 || jj >= rows) continue;
+          for (let di = -1; di <= 1; di++) {
+            const ii = i + di;
+            if (ii < 0 || ii >= cols) continue;
+            sum += plugs[jj * cols + ii];
+            count++;
+          }
+        }
+        blur[j * cols + i] = sum / count;
+      }
+    }
+    set(this.plugMarsh, 'd', contourData(blur, cols, rows, cell, c0, c1, 0.5));
   }
 
   // Draw the scroll bars in age bands when they change, and every
@@ -797,8 +1018,8 @@ class SvgRenderer {
   // Bring the bands on the page up to date: add the centrelines kept since
   // the last draw, move bands that have stopped growing to the bottom layer
   // and remove dropped ones. Shade each band by its age: bare sand when
-  // new, then grassed over and fading into the background as it nears
-  // `barMemory`. The old bands are shaded only when the bottom layer
+  // new, then grassed over, fading into the background and turning
+  // transparent over the soil beneath as it nears `barMemory`. The old bands are shaded only when the bottom layer
   // changes anyway, or the bar settings do, so it stays cached in between.
   drawBars(t, w, local) {
     let changed = false;
@@ -826,6 +1047,9 @@ class SvgRenderer {
       const fresh = clamp01(1 - (t - 0.5 * (b.t0 + b.t1)) / local.barMemory);
       const sand = mixRgb(OLD_BAR, BAR, fresh * fresh);
       set(b.g, 'stroke', mix(SOIL.loam, sand, local.barOpacity * fresh));
+      // Group opacity, so a band's own paths do not build up where they
+      // overlap.
+      set(b.g, 'opacity', smoothstep(2 * fresh).toFixed(2));
     }
   }
 
