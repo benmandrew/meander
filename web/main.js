@@ -38,6 +38,17 @@ const LEVEE = [216, 210, 166];
 const LEVEE_LEVELS = [0.3, 0.7];
 // Simulated time between levee redraws when no flood has come.
 const LEVEE_REFRESH = 10;
+// Older, higher ground beyond the valley walls, which the river cannot
+// reach, and the darker scarp at its edge, `SCARP` widths wide. The upland
+// is translucent, so the soil patches under it still show. The wall
+// wanders up to `WALL_WANDER` widths outwards from the valley edge, as
+// seeded value noise with knots every `WALL_KNOTS` widths, and never
+// inwards, where the channel may be.
+const UPLAND = [164, 164, 118];
+const SCARP_SHADE = [128, 128, 88];
+const SCARP = 1.5;
+const WALL_WANDER = 4;
+const WALL_KNOTS = [30, 8];
 // Opacity of the marsh that stays on the clay plug of an old oxbow after
 // its lake and scar have gone, until the channel sweeps it away.
 const PLUG_MARSH = 0.25;
@@ -626,6 +637,8 @@ class SvgRenderer {
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
     this.leveeAt = null;
+    // The valley walls lie over the floodplain, which never reaches them.
+    this.walls = el('g', {}, ground);
     // Every clay plug the channel has not swept away keeps a faint marsh,
     // so old meander belts stay legible after their scars fade.
     this.plugMarsh = el('path', { fill: MARSH, 'fill-opacity': PLUG_MARSH, 'fill-rule': 'evenodd' }, ground);
@@ -678,6 +691,48 @@ class SvgRenderer {
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
     this.drawSoils(river, x, w, h, seed);
+    this.drawWalls(river, x, w, h, seed);
+  }
+
+  // Draw the upland beyond each valley wall over the window [x0, x0 + vw),
+  // with a scarp along the wall. The core narrows the valley at the window
+  // edges to keep bends off them; the walls are drawn at its full width, so
+  // that device does not show.
+  drawWalls(river, x0, vw, h, seed) {
+    this.walls.replaceChildren();
+    const w = river.get_param('width'), valley = river.get_param('valley_width') * w;
+    if (!(valley > 0 && valley < h)) return;
+    const rand = random(seed ^ 0xba1e);
+    const step = 0.5 * w, n = Math.ceil(vw / step) + 1;
+    for (const side of [-1, 1]) {
+      const octaves = WALL_KNOTS.map((len) => Array.from({ length: Math.ceil(vw / (len * w)) + 2 }, rand));
+      // Distance of the wall from the top or bottom edge of the window.
+      const edge = new Float64Array(n);
+      for (let k = 0; k < n; k++) {
+        const x = Math.min(k * step, vw) / w;
+        let u = 0;
+        WALL_KNOTS.forEach((len, m) => {
+          const t = x / len, j = Math.floor(t), knots = octaves[m];
+          u += (knots[j] + (knots[j + 1] - knots[j]) * smoothstep(t - j)) / (m + 1);
+        });
+        edge[k] = 0.5 * (h - valley) - WALL_WANDER * w * u / 1.5;
+      }
+      const at = (k, d) => {
+        const x = dp1(x0 + Math.min(k * step, vw));
+        return `${x} ${dp1(side < 0 ? d : h - d)}`;
+      };
+      const wall = Array.from(edge, (d, k) => at(k, d)).join(' ');
+      const rim = side < 0 ? 0 : h;
+      el('path', {
+        d: `M${dp1(x0)} ${rim} L${wall} L${dp1(x0 + vw)} ${rim}Z`,
+        fill: `rgb(${UPLAND})`, 'fill-opacity': 0.8,
+      }, this.walls);
+      el('path', {
+        d: 'M' + Array.from(edge, (d, k) => at(k, d - 0.5 * SCARP * w)).join(' '),
+        fill: 'none', stroke: `rgb(${SCARP_SHADE})`, 'stroke-opacity': 0.45,
+        'stroke-width': SCARP * w, 'stroke-linejoin': 'round',
+      }, this.walls);
+    }
   }
 
   // Scatter soil patches over the window: broad patches whose type follows
