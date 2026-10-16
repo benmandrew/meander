@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-A live browser simulation of a meandering river: a Rust core compiled to WASM, drawn as SVG with parameter sliders.
+A live browser simulation of a meandering river: a Rust core compiled to WASM, drawn as SVG. The panel shows only a speed slider; the simulation runs on its `Params` defaults.
 
 ## Commands
 
@@ -25,9 +25,9 @@ Three layers, with data flowing one way:
 
 ### Parameters are addressed by string name
 
-Adding a simulation parameter touches four places: the `Params` field and its `Default`, `Params::NAMES`, the `Params::field` match (or a special case in `get`/`set` for non-`f64` values such as `cutoff_min_sep` and `physics`), and an entry in `SIM_CONTROLS` in `web/ui.js`. The snapshot example picks up env overrides from `NAMES` with no further change. Most length parameters are in channel widths, not world units.
+Adding a simulation parameter touches three places: the `Params` field and its `Default`, `Params::NAMES`, the `Params::field` match (or a special case in `get`/`set` for non-`f64` values such as `cutoff_min_sep` and `physics`). The snapshot example picks up env overrides from `NAMES` with no further change. Most length parameters are in channel widths, not world units.
 
-With the `physics` flag on, every `Params::set` call re-derives `omega`, `gamma` and `alpha` from `friction`, `aspect`, `froude` and `scour`, so setting those three directly has no effect. The UI marks them `derived`.
+With the `physics` flag on, every `Params::set` call re-derives `omega`, `gamma` and `alpha` from `friction`, `aspect`, `froude` and `scour`, so setting those three directly has no effect. The flag is on by default, with hydraulics of a lowland sand-bed river.
 
 ## Constraints
 

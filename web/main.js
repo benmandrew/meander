@@ -890,14 +890,14 @@ document.getElementById('save').addEventListener('click', () => renderer.save())
 startApp({
   view: svg,
   renderer,
-  display: [
-    { key: 'oxbowShrink', label: 'Oxbow narrowing', min: 0, max: 0.95, step: 0.05, local: 0.6 },
-    { key: 'oxbowRelief', label: 'Oxbow bed relief', min: 0, max: 2, step: 0.05, local: 1 },
-    { key: 'barMemory', label: 'Point bar memory (sim time)', min: 50, max: 5000, step: 50, local: 600 },
-    { key: 'barOpacity', label: 'Point bar strength', min: 0.1, max: 1, step: 0.05, local: 0.75 },
-    { key: 'showBars', label: 'Show point bars (past centrelines)', toggle: true, local: true },
-    { key: 'showLevees', label: 'Show natural levees', toggle: true, local: true },
-    { key: 'showScrolls', label: 'Show scroll bars', toggle: true, local: true },
-    { key: 'showSplays', label: 'Show crevasse splays', toggle: true, local: true },
-  ],
+  display: {
+    oxbowShrink: 0.6,
+    oxbowRelief: 1,
+    barMemory: 600,
+    barOpacity: 0.75,
+    showBars: true,
+    showLevees: true,
+    showScrolls: true,
+    showSplays: true,
+  },
 });

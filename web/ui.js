@@ -1,5 +1,5 @@
 // Shared page logic: WASM start-up, the control panel, and the animation
-// loop. Each page supplies a renderer and its own display controls.
+// loop. Each page supplies a renderer and its own display settings.
 
 import init, { River } from './pkg/meander_wasm.js';
 
@@ -7,62 +7,15 @@ import init, { River } from './pkg/meander_wasm.js';
 // the view's aspect ratio at each reset.
 const WORLD_H = 480;
 
-// Sliders with `local` set are page settings; the rest are simulation
-// parameters, read from and written to the WASM side by name. Toggles
-// without `local` are simulation flags, set as 0 or 1. Sliders marked
-// `derived` are computed by the simulation while the physics flag is on.
-const SIM_CONTROLS = [
-  { group: 'Time' },
-  { key: 'speed', label: 'Speed (sim time per second)', min: 0.5, max: 60, step: 0.5, local: 6 },
-  { key: 'warmup', label: 'Warm-up on reset (sim time)', min: 0, max: 3000, step: 100, local: 1000 },
-  { group: 'Dynamics' },
-  { key: 'erodibility', label: 'Erodibility E', min: 0, max: 3, step: 0.05 },
-  { key: 'omega', label: 'Local weight Ω', min: -3, max: 1, step: 0.05, derived: true },
-  { key: 'gamma', label: 'Upstream weight Γ', min: 0, max: 5, step: 0.05, derived: true },
-  { key: 'alpha', label: 'Upstream decay α (per width)', min: 0.05, max: 2, step: 0.01, derived: true },
-  { key: 'peak_radius', label: 'Fastest bend radius (widths, 0 off)', min: 0, max: 6, step: 0.1 },
-  { key: 'dt', label: 'Timestep dt', min: 0.01, max: 0.3, step: 0.01 },
-  { key: 'smoothing', label: 'Smoothing k', min: 0, max: 0.25, step: 0.01 },
-  { key: 'max_step', label: 'Step limit (× spacing)', min: 0.05, max: 0.3, step: 0.01 },
-  { group: 'Channel' },
-  { key: 'width', label: 'Channel width w', min: 2, max: 20, step: 0.5 },
-  { key: 'valley_width', label: 'Valley width (widths, 0 off)', min: 0, max: 60, step: 1 },
-  { key: 'edge_margin', label: 'Edge margin (widths)', min: 0, max: 30, step: 1 },
-  { key: 'pinch_width', label: 'Valley at view edges (widths, 0 off)', min: 0, max: 60, step: 1 },
-  { key: 'pinch_length', label: 'Pinch length (widths)', min: 1, max: 60, step: 1 },
-  { group: 'Cutoffs' },
-  { key: 'cutoff_dist', label: 'Cutoff distance (widths)', min: 0.3, max: 3, step: 0.05 },
-  { key: 'cutoff_min_sep', label: 'Min separation K (points)', min: 6, max: 100, step: 1 },
-  { key: 'oxbow_lifetime', label: 'Lake fill time without floods', min: 10, max: 3000, step: 10 },
-  { key: 'bedload_fill', label: 'Lake fill by bedload per flood', min: 0, max: 1, step: 0.05 },
-  { key: 'scar_lifetime', label: 'Oxbow scar lifetime', min: 0, max: 5000, step: 50 },
-  { key: 'scroll_lifetime', label: 'Scroll bar lifetime (0 off)', min: 0, max: 5000, step: 50 },
-  { group: 'Floods' },
-  { key: 'flood_rate', label: 'Floods per unit time (0 off)', min: 0, max: 0.2, step: 0.005 },
-  { key: 'breach_dist', label: 'Widest neck breached (widths)', min: 1, max: 5, step: 0.1 },
-  { key: 'chute_ratio', label: 'Chute arc / chord (0 off)', min: 0, max: 10, step: 0.5 },
-  { key: 'overbank', label: 'Overbank deposit (depths per flood, 0 off)', min: 0, max: 1, step: 0.05 },
-  { key: 'levee_length', label: 'Levee length (widths)', min: 0.5, max: 6, step: 0.25 },
-  { key: 'levee_height', label: 'Flood level (depths above bars)', min: 0, max: 1, step: 0.05 },
-  { key: 'splay_chance', label: 'Crevasse splay chance (0 off)', min: 0, max: 1, step: 0.05 },
-  { key: 'splay_lifetime', label: 'Splay lifetime', min: 100, max: 5000, step: 100 },
-  { group: 'Physics (Ikeda–Parker–Sawai)' },
-  { key: 'physics', label: 'Derive Ω, Γ, α from hydraulics', toggle: true },
-  { key: 'friction', label: 'Friction coefficient Cf', min: 0.002, max: 0.03, step: 0.001 },
-  { key: 'aspect', label: 'Width / depth', min: 5, max: 100, step: 1 },
-  { key: 'froude', label: 'Froude number', min: 0.05, max: 0.9, step: 0.05 },
-  { key: 'scour', label: 'Scour factor A', min: 1, max: 6, step: 0.1 },
-  { group: 'Noise' },
-  { key: 'jitter', label: 'Jitter', min: 0, max: 0.3, step: 0.01 },
-  { key: 'jitter_scale', label: 'Jitter length (widths)', min: 0.5, max: 10, step: 0.5 },
-  { key: 'noise', label: 'Initial noise (widths, on reset)', min: 0, max: 2, step: 0.05, local: 0.5 },
-  { group: 'Erodibility' },
-  { key: 'heterogeneity', label: 'Heterogeneity', min: 0, max: 1, step: 0.05 },
-  { key: 'clay_factor', label: 'Oxbow clay plugs (× E)', min: 0.05, max: 1, step: 0.05 },
-  { key: 'lake_factor', label: 'Open oxbow lakes (× E)', min: 1, max: 6, step: 0.25 },
-  { key: 'bar_factor', label: 'Fresh point bars (× E)', min: 1, max: 3, step: 0.05 },
-  { key: 'vegetation_time', label: 'Vegetation binds bars (sim time)', min: 10, max: 1000, step: 10 },
+// The panel's sliders, all page settings. The simulation runs on its own
+// defaults, which come from measured river hydraulics.
+const CONTROLS = [
+  { key: 'speed', label: 'Speed (sim time per second)', min: 0.5, max: 60, step: 0.5, value: 6 },
 ];
+
+// Page settings the panel does not show: the warm-up on reset, in
+// simulated time, and the initial noise, in channel widths.
+const SETTINGS = { warmup: 500, noise: 0.5 };
 
 // Years per unit of simulated time. At this scale the median bank migrates
 // about 1% of a channel width per year and the fastest 10% of the channel
@@ -71,11 +24,10 @@ const YEARS_PER_UNIT = 2.5;
 
 // `renderer` provides draw(river, memory, state), reset(river, bounds, seed),
 // and capture(river, memory, state), which is called during warm-up in place
-// of drawing. `display` lists extra page-specific controls.
+// of drawing. `display` holds the renderer's own settings.
 export async function startApp({ view, renderer, display }) {
   const wasm = await init();
-  const controls = [...SIM_CONTROLS, { group: 'Display' }, ...display];
-  const local = {};
+  const local = { ...SETTINGS, ...display };
   const state = { bounds: [1, 1], local };
   const river = new River();
   let running = true;
@@ -95,12 +47,7 @@ export async function startApp({ view, renderer, display }) {
     const r = view.getBoundingClientRect();
     state.bounds = [WORLD_H * r.width / r.height, WORLD_H];
     const seed = Number($('seed').value) >>> 0;
-    for (const s of controls) {
-      if (!s.key || s.local !== undefined) continue;
-      river.set_param(s.key, s.toggle ? Number(s.box.checked) : Number(s.input.value));
-    }
     river.reset(...state.bounds, seed, local.noise, 0);
-    refresh();
     owed = 0;
     warming = local.warmup;
     epoch = river.time();
@@ -108,72 +55,25 @@ export async function startApp({ view, renderer, display }) {
     renderer.reset(river, state.bounds, seed);
   }
 
-  // Show the simulation's current parameter values, which differ from the
-  // sliders where the physics flag derives them.
-  function refresh() {
-    const physics = river.get_param('physics') !== 0;
-    for (const s of controls) {
-      if (!s.input || s.local !== undefined) continue;
-      const v = river.get_param(s.key);
-      s.input.value = v;
-      s.out.textContent = String(+v.toFixed(3));
-      s.input.disabled = Boolean(s.derived && physics);
-      s.input.parentElement.classList.toggle('derived', s.input.disabled);
-    }
-  }
-
   function buildControls() {
     const root = $('sliders');
-    const defaults = new River();
-    for (const s of controls) {
-      if (s.group) {
-        const h = document.createElement('h2');
-        h.textContent = s.group;
-        root.append(h);
-        continue;
-      }
-      if (s.toggle) {
-        const row = document.createElement('label');
-        row.className = 'toggle';
-        row.innerHTML = `<input type="checkbox"> ${s.label}`;
-        const box = s.box = row.querySelector('input');
-        if (s.local !== undefined) {
-          box.checked = s.local;
-          local[s.key] = s.local;
-          box.addEventListener('change', () => {
-            local[s.key] = box.checked;
-            dirty = true;
-          });
-        } else {
-          box.checked = defaults.get_param(s.key) !== 0;
-          box.addEventListener('change', () => {
-            river.set_param(s.key, Number(box.checked));
-            refresh();
-            dirty = true;
-          });
-        }
-        root.append(row);
-        continue;
-      }
+    for (const s of CONTROLS) {
       const row = document.createElement('div');
       row.className = 'slider';
       row.innerHTML = `<label for="p-${s.key}">${s.label}</label><output></output>
         <input id="p-${s.key}" type="range" min="${s.min}" max="${s.max}" step="${s.step}">`;
-      s.input = row.querySelector('input');
-      const out = s.out = row.querySelector('output');
-      s.input.value = s.local ?? defaults.get_param(s.key);
+      const input = row.querySelector('input');
+      const out = row.querySelector('output');
+      input.value = s.value;
       const apply = () => {
-        const v = Number(s.input.value);
-        out.textContent = String(+v.toFixed(3));
-        if (s.local !== undefined) local[s.key] = v;
-        else if (river.set_param(s.key, v) && river.get_param('physics') !== 0) refresh();
+        local[s.key] = Number(input.value);
+        out.textContent = String(local[s.key]);
         dirty = true;
       };
-      s.input.addEventListener('input', apply);
+      input.addEventListener('input', apply);
       apply();
       root.append(row);
     }
-    defaults.free();
   }
 
   function frame(now) {
@@ -258,7 +158,7 @@ export async function startApp({ view, renderer, display }) {
   });
 
   buildControls();
-  // ?warmup=T overrides the warm-up slider for the first reset.
+  // ?warmup=T overrides the warm-up for the first reset.
   const warmup = new URLSearchParams(location.search).get('warmup');
   if (warmup !== null) local.warmup = Number(warmup);
   reset();

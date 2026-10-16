@@ -113,15 +113,6 @@ h1 {
   font-weight: 600;
 }
 
-h2 {
-  margin: 14px 0 4px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
 button {
   font: inherit;
   color: inherit;
@@ -177,8 +168,6 @@ button:hover { border-color: var(--accent); }
 
 .slider label { color: var(--panel-fg); }
 
-.slider.derived { opacity: 0.5; }
-
 .slider output {
   font-variant-numeric: tabular-nums;
   color: var(--muted);
@@ -190,16 +179,6 @@ button:hover { border-color: var(--accent); }
   margin: 2px 0 0;
   accent-color: var(--accent);
 }
-
-.toggle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  cursor: pointer;
-}
-
-.toggle input { accent-color: var(--accent); margin: 0; }
 
 #stats {
   margin: 14px 0 0;

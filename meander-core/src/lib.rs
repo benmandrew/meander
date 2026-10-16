@@ -133,12 +133,19 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
+        // A lowland sand-bed river: friction and Froude number in the
+        // ranges measured on such rivers, a width 30 times the depth, and
+        // the scour factor from Ikeda (1981). The linear theory's fastest
+        // growing bend then has a wavelength of 2π / (α √(√Γ − 1)) ≈ 12
+        // channel widths, inside the 10 to 14 seen on real rivers.
+        let (friction, aspect, froude, scour) = (0.01, 30.0, 0.3, 2.89);
+        let (omega, gamma, alpha) = ips::coefficients(friction, aspect, froude, scour);
         Self {
             width: 8.0,
             erodibility: 1.0,
-            omega: -1.0,
-            gamma: 2.5,
-            alpha: 0.6,
+            omega,
+            gamma,
+            alpha,
             peak_radius: 2.5,
             dt: 0.1,
             smoothing: 0.1,
@@ -168,11 +175,11 @@ impl Default for Params {
             overbank: OVERBANK,
             levee_length: LEVEE_LENGTH,
             levee_height: LEVEE_HEIGHT,
-            physics: false,
-            friction: 0.01,
-            aspect: 30.0,
-            froude: 0.3,
-            scour: 2.89,
+            physics: true,
+            friction,
+            aspect,
+            froude,
+            scour,
         }
     }
 }
@@ -1447,7 +1454,7 @@ mod tests {
 
     #[test]
     fn physics_sets_the_kernel_weights() {
-        let mut p = Params::default();
+        let mut p = Params { physics: false, ..Params::default() };
         let alpha = p.alpha;
         p.set("friction", 0.02);
         assert_eq!(p.alpha, alpha, "hand-tuned weights stay until physics is on");
