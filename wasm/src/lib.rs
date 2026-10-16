@@ -291,13 +291,13 @@ impl River {
     }
 
     /// Copy the cells cut off as oxbows into a flat buffer, the same shape
-    /// as `deposit_ptr`: 1 where the ground is lake or clay plug, 0
-    /// elsewhere. Rebuild every view after calling this, since it can grow
-    /// memory.
+    /// as `deposit_ptr`: the simulated time since the cutoff where the
+    /// ground is lake or clay plug, and -1 elsewhere. Rebuild every view
+    /// after calling this, since it can grow memory.
     pub fn sync_plugs(&mut self) {
         self.plugs.clear();
-        let cut = &self.sim.erodibility.cut_at;
-        self.plugs.extend(cut.iter().map(|t| if t.is_finite() { 1.0 } else { 0.0 }));
+        let (cut, now) = (&self.sim.erodibility.cut_at, self.sim.time);
+        self.plugs.extend(cut.iter().map(|&t| if t.is_finite() { (now - t).max(0.0) as f32 } else { -1.0 }));
     }
     pub fn plugs_ptr(&self) -> *const f32 {
         self.plugs.as_ptr()

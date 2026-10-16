@@ -21,6 +21,23 @@ const CLEARING = 0.01;
 const MURKY = [80, 120, 116];
 const REEDS = 'rgb(104, 126, 84)';
 const MARSH = 'rgb(118, 134, 96)';
+// Oxbow scars: damp ground across the old channel, a wetter core where the
+// lake last stood, and marsh tufts on the core, each with its opacity.
+const SCAR_DAMP = [126, 140, 98];
+const SCAR_WET = [92, 114, 80];
+const SCAR_TUFT = [66, 88, 60];
+const SCAR_OPACITY = [0.3, 0.35, 0.6];
+// Half-widths of the damp ground and the wet core, as fractions of the old
+// channel's width. The core is the lake's width when it filled, 1 less
+// `oxbowShrink`, times 0.5.
+const SCAR_DAMP_HALF = 0.55;
+// Spacing of the marsh tufts along a scar, and the width of each, in
+// channel widths.
+const TUFT_STEP = 1.2;
+const TUFT_SIZE = 0.5;
+// Fraction of `scar_lifetime` over which the core and its tufts fade. The
+// damp ground fades over the whole of it.
+const SCAR_WET_LIFE = 0.5;
 
 // Floodplain colours. Loam is the background; patches range from clay and
 // silt where erosion is slow to sand and gravel where it is fast.
@@ -151,9 +168,15 @@ const HEDGE = [84, 108, 66];
 const HEDGE_EDGE = 0.9;
 const HEDGE_SIDE = 0.55;
 const HEDGE_WIDTH = 0.18;
-// Opacity of the marsh that stays on the clay plug of an old oxbow after
-// its lake and scar have gone, until the channel sweeps it away.
-const PLUG_MARSH = 0.25;
+// Marsh on the clay plug of an old oxbow: its opacity while young, and
+// the fraction of its weight left once it has faded over `scar_lifetime`
+// after the lake fills, as the scar does. What is left stays until the
+// channel sweeps it away, so old meander belts stay faintly legible. The
+// blurred weight is contoured at `PLUG_LEVELS`, nested regions that soften
+// its edge and let the faded marsh show only at the lowest.
+const PLUG_MARSH = 0.22;
+const PLUG_RESIDUAL = 0.3;
+const PLUG_LEVELS = [0.2, 0.45, 0.7];
 // Scroll bars: ridges of fresh sand that vegetation colonises first, so
 // they darken against the bar as they age. They are kept in this many age
 // bands, each one path element.
@@ -822,6 +845,88 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
   return path;
 }
 
+// Arc lengths of points [start, end) of a flat x, y array from the first,
+// and the unit tangents there, by central differences.
+function arcFrame(pts, start, end) {
+  const m = end - start;
+  const s = new Float64Array(m), tx = new Float64Array(m), ty = new Float64Array(m);
+  for (let k = 1; k < m; k++) {
+    const i = 2 * (start + k);
+    s[k] = s[k - 1] + Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
+  }
+  for (let k = 0; k < m; k++) {
+    const p = 2 * (start + Math.max(0, k - 1)), q = 2 * (start + Math.min(m - 1, k + 1));
+    const dx = pts[q] - pts[p], dy = pts[q + 1] - pts[p + 1];
+    const l = Math.hypot(dx, dy) || 1;
+    tx[k] = dx / l;
+    ty[k] = dy / l;
+  }
+  return { s, tx, ty };
+}
+
+// How much of its width an oxbow scar keeps at arc length `at` along a
+// piece of length `len`, which starts `along` into an oxbow of length
+// `total`. The scar narrows to round tips at the oxbow's own ends, which
+// filled first, so it is widest in the middle where the lake last stood.
+// An end the channel has cut since narrows over the last width `w`, under
+// the channel's water.
+function scarTaper(at, len, along, total, w) {
+  let f = Math.sqrt(Math.max(0, Math.sin(Math.PI * clamp01((along + at) / total))));
+  if (along > 1e-3) f *= Math.sqrt(clamp01(at / w));
+  if (along + len < total - 1e-3) f *= Math.sqrt(clamp01((len - at) / w));
+  return f;
+}
+
+// Outline of an oxbow scar along points [start, end) of a flat x, y array,
+// `half` times the old channel's width in `widths` either side of the
+// centreline, narrowed by `scarTaper`.
+function scarData(pts, widths, start, end, along, total, half, w) {
+  const m = end - start;
+  if (m < 2) return '';
+  const { s, tx, ty } = arcFrame(pts, start, end);
+  const len = s[m - 1];
+  const left = [], right = [];
+  for (let k = 0; k < m; k++) {
+    const i = 2 * (start + k);
+    const h = half * w * widths[start + k] * scarTaper(s[k], len, along, total, w);
+    left.push(dp1(pts[i] - ty[k] * h) + ' ' + dp1(pts[i + 1] + tx[k] * h));
+    right.push(dp1(pts[i] + ty[k] * h) + ' ' + dp1(pts[i + 1] - tx[k] * h));
+  }
+  return 'M' + left.join('L') + 'L' + right.reverse().slice(1, -1).join('L') + 'Z';
+}
+
+// Marsh tufts on an oxbow scar, scattered `half` times the old channel's
+// width either side of the centreline, drawn as on old survey maps: a short
+// base with three blades fanned above it, upright whatever the scar's
+// direction. One stands in each `TUFT_STEP` widths of the oxbow, jittered
+// along and across the scar and thinned towards its tips. Each is seeded by
+// its place along the whole oxbow, so a piece the channel splits off keeps
+// its tufts where they were.
+function tuftData(pts, widths, start, end, along, total, half, w) {
+  const m = end - start;
+  if (m < 2) return '';
+  const { s, tx, ty } = arcFrame(pts, start, end);
+  const len = s[m - 1], step = TUFT_STEP * w, seed = Math.round(total);
+  let d = '', k = 0;
+  for (let j = Math.floor(along / step); (j - 1) * step < along + len; j++) {
+    const at = (j + 0.2 + 0.6 * hash01(seed, j, 1)) * step - along;
+    if (at < 0 || at > len) continue;
+    const taper = scarTaper(at, len, along, total, w);
+    if (hash01(seed, j, 2) > 1.4 * taper - 0.2) continue;
+    while (k < m - 2 && s[k + 1] < at) k++;
+    const f = (at - s[k]) / (s[k + 1] - s[k] || 1);
+    const i = 2 * (start + k);
+    const across = (2 * hash01(seed, j, 3) - 1) * half * w * widths[start + k] * taper;
+    const x = pts[i] + (pts[i + 2] - pts[i]) * f - ty[k] * across;
+    const y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * f + tx[k] * across;
+    const a = TUFT_SIZE * w * (0.75 + 0.5 * hash01(seed, j, 4));
+    const [b, c] = [dp1(0.3 * a), dp1(0.5 * a)];
+    d += `M${dp1(x - 0.5 * a)} ${dp1(y)}h${dp1(a)}M${dp1(x)} ${dp1(y)}v-${dp1(0.7 * a)}`
+      + `M${dp1(x - 0.12 * a)} ${dp1(y)}l-${b}-${c}M${dp1(x + 0.12 * a)} ${dp1(y)}l${b}-${c}`;
+  }
+  return d;
+}
+
 // Marching squares cases: for each set of corners above the level (top left
 // 8, top right 4, bottom right 2, bottom left 1), the cell edges each
 // contour segment joins, as T, R, B, L. Saddles 5 and 10 list the pairing
@@ -1135,6 +1240,11 @@ class SvgRenderer {
     // Whether each field drawn, by its key, is meadow.
     this.meadow = new Map();
     this.fieldsAt = null;
+    // Oxbow scars lie over the fields and under the scroll bars and trees,
+    // so alder and willow crowns stand in them. They change slowly, so they
+    // sit in the ground layer, not in the top layer that is redrawn whenever
+    // the river moves.
+    this.scarLayer = el('g', {}, ground);
     // The valley sides' hachures and hanger woods lie over the fields and
     // under the trees, so the woods' crowns stand on them.
     this.scarpLayer = el('g', {}, ground);
@@ -1180,13 +1290,12 @@ class SvgRenderer {
     this.splayAt = null;
     // Every clay plug the channel has not swept away keeps a faint marsh,
     // so old meander belts stay legible after their scars fade.
-    this.plugMarsh = el('path', { fill: MARSH, 'fill-opacity': PLUG_MARSH, 'fill-rule': 'evenodd' }, ground);
+    const plugOpacity = 1 - (1 - PLUG_MARSH) ** (1 / PLUG_LEVELS.length);
+    const plugLayer = el('g', { fill: MARSH, 'fill-opacity': plugOpacity.toFixed(4), 'fill-rule': 'evenodd' }, ground);
+    this.plugMarsh = PLUG_LEVELS.map(() => el('path', {}, plugLayer));
     this.plugAt = null;
-    this.blurred = null;
-    // Oxbow scars lie over the whole ground, under the channel. They change
-    // slowly, so they sit at the top of the ground layer, not in the top
-    // layer that is redrawn whenever the river moves.
-    this.scarLayer = el('g', { ...line, stroke: MARSH }, ground);
+    this.plugJob = null;
+    this.plugBlur = null;
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
     // Both are filled outlines at the local width, which a stroke cannot vary.
@@ -1250,6 +1359,7 @@ class SvgRenderer {
     this.wallsAt = { version: river.wall_version(), t: river.time() };
     this.drawPebbles(river.get_param('width'), seed);
     this.plugAt = null;
+    this.plugJob = null;
     this.forestAt = null;
     this.forestJob = null;
     this.floodplainTurn = 0;
@@ -1660,7 +1770,15 @@ class SvgRenderer {
     // drains first from where the land is high or floods have laid the most
     // silt, splitting the lake into pools. The reed fringe grows inwards, so
     // it does not hide the narrowing.
-    resize(this.scars, n, this.scarLayer);
+    while (this.scars.length < n) {
+      const g = el('g', {}, this.scarLayer);
+      const [damp, wet, tufts] = SCAR_OPACITY.map(() => el('path', {}, g));
+      set(damp, 'fill', `rgb(${SCAR_DAMP})`);
+      set(wet, 'fill', `rgb(${SCAR_WET})`);
+      for (const [k, v] of Object.entries({ fill: 'none', stroke: `rgb(${SCAR_TUFT})`, 'stroke-linecap': 'round' })) set(tufts, k, v);
+      this.scars.push({ g, damp, wet, tufts, shape: null });
+    }
+    while (this.scars.length > n) this.scars.pop().g.remove();
     resize(this.lakes, n, this.lakeLayer);
     resize(this.reeds, n, this.reedLayer);
     for (let k = 0; k < n; k++) {
@@ -1674,14 +1792,25 @@ class SvgRenderer {
       let wm = 0;
       for (let i = oxOff[k]; i < oxOff[k + 1]; i++) wm += oxWidth[i];
       wm *= w / Math.max(1, oxOff[k + 1] - oxOff[k]);
-      if (scar.shape !== shape) {
-        scar.shape = shape;
-        set(scar, 'd', pathData(oxPts, oxOff[k], oxOff[k + 1]));
-      }
-      set(scar, 'stroke-width', dp1(wm));
       const sliver = pieceLength(oxPts, oxOff[k], oxOff[k + 1]) < MIN_LAKE * w;
-      const fade = sliver ? 0 : 1 - smoothstep(oxScar[k] / scarLife);
-      set(scar, 'stroke-opacity', (0.45 * smoothstep(age) * fade).toFixed(2));
+      // The scar shows as the lake fills over it, and its wet core and
+      // tufts dry out before the damp ground does.
+      const shown = sliver ? 0 : smoothstep(age);
+      const fades = [1, SCAR_WET_LIFE, SCAR_WET_LIFE].map((f, m) => (
+        shown * SCAR_OPACITY[m] * (1 - smoothstep(oxScar[k] / (f * scarLife)))).toFixed(2));
+      const scarShape = `${shape} ${w} ${local.oxbowShrink}`;
+      if (scar.shape !== scarShape && shown > 0) {
+        scar.shape = scarShape;
+        const [i0, i1, along, total] = [oxOff[k], oxOff[k + 1], oxAlong[k], oxLen[k]];
+        const core = 0.5 * (1 - local.oxbowShrink);
+        set(scar.damp, 'd', scarData(oxPts, oxWidth, i0, i1, along, total, SCAR_DAMP_HALF, w));
+        set(scar.wet, 'd', scarData(oxPts, oxWidth, i0, i1, along, total, core, w));
+        set(scar.tufts, 'd', tuftData(oxPts, oxWidth, i0, i1, along, total, 0.7 * SCAR_DAMP_HALF, w));
+        set(scar.tufts, 'stroke-width', dp1(0.06 * w));
+      }
+      set(scar.damp, 'fill-opacity', fades[0]);
+      set(scar.wet, 'fill-opacity', fades[1]);
+      set(scar.tufts, 'stroke-opacity', fades[2]);
       if (age >= 1 || sliver) {
         // Elements are matched to oxbows by index, so a lake can come back
         // to this element when the channel splits or drops an oxbow before
@@ -1985,7 +2114,7 @@ class SvgRenderer {
     const w = river.get_param('width');
     const layers = [
       () => local.showLevees && this.drawLevees(river, memory),
-      () => this.drawPlugs(river, memory),
+      () => this.drawPlugs(river, memory, all),
       () => this.drawFields(river, memory, all),
       () => this.drawForest(river, memory, all),
       // After the forest, whose redraw also redraws the crowns.
@@ -2025,21 +2154,47 @@ class SvgRenderer {
   }
 
   // Draw the clay plug marsh after each cutoff, and every `LEVEE_REFRESH`
-  // of simulated time as the channel sweeps it away. The plug grid is
-  // blurred over 3 × 3 cells first, so its outline follows the lake's
-  // curve instead of the cell edges. Returns whether it did.
-  drawPlugs(river, memory) {
+  // of simulated time as it fades and the channel sweeps it away. Each
+  // plug cell is weighted by its age, then blurred over 3 × 3 cells, so
+  // its outline follows the lake's curve instead of the cell edges. The
+  // redraw takes one of `PLUG_LEVELS` a call, as `drawForest` takes its
+  // stages; `all` draws every level at once. Returns whether it did any
+  // work.
+  drawPlugs(river, memory, all = false) {
     const t = river.time(), cutoffs = river.cutoffs();
     const last = this.plugAt;
-    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
-    this.plugAt = { cutoffs, t };
+    if (!this.plugJob && (!last || last.cutoffs !== cutoffs || t - last.t >= LEVEE_REFRESH || t < last.t)) {
+      this.plugAt = { cutoffs, t };
+      this.plugJob = this.plugStages(river, memory);
+    }
+    if (!this.plugJob) return false;
+    do {
+      if (this.plugJob.next().done) this.plugJob = null;
+    } while (all && this.plugJob);
+    return true;
+  }
+
+  // The stages of a plug marsh redraw: weight and blur the plug grid, then
+  // contour each level. The first stage reads WASM memory, so it runs in
+  // the call that starts the redraw.
+  *plugStages(river, memory) {
     river.sync_plugs();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const plugs = new Float32Array(memory.buffer, river.plugs_ptr(), cols * rows);
     const [c0, c1] = this.windowColumns(cols, cell);
-    const blur = this.blur(plugs, cols, rows, c0, c1);
-    set(this.plugMarsh, 'd', contourData(blur, cols, rows, cell, c0, c1, 0.5));
-    return true;
+    const [fill, scar] = [river.get_param('oxbow_lifetime'), Math.max(1e-6, river.get_param('scar_lifetime'))];
+    if (this.plugWeight?.length !== cols * rows) this.plugWeight = new Float32Array(cols * rows);
+    const weight = this.plugWeight;
+    for (let i = 0; i < weight.length; i++) {
+      const age = plugs[i];
+      weight[i] = age < 0 ? 0 : PLUG_RESIDUAL + (1 - PLUG_RESIDUAL) * (1 - smoothstep((age - fill) / scar));
+    }
+    // A buffer of its own, since the forest blurs between stages.
+    const blur = this.blur(weight, cols, rows, c0, c1, 'plugBlur');
+    for (const [k, level] of PLUG_LEVELS.entries()) {
+      set(this.plugMarsh[k], 'd', contourData(blur, cols, rows, cell, c0, c1, level));
+      if (k < PLUG_LEVELS.length - 1) yield;
+    }
   }
 
   // Redraw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
@@ -2175,7 +2330,7 @@ class SvgRenderer {
 
   // `values` on the erodibility grid averaged over 3 × 3 cells, in columns
   // [c0, c1), in the buffer `this[name]`, reused between calls.
-  blur(values, cols, rows, c0, c1, name = 'blurred') {
+  blur(values, cols, rows, c0, c1, name) {
     if (this[name]?.length !== cols * rows) this[name] = new Float32Array(cols * rows);
     const out = this[name];
     for (let j = 0; j < rows; j++) {
