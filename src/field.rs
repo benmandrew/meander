@@ -4,6 +4,8 @@
 //! they fill. The same noise, with a finer layer added, gives the height of
 //! the land. Floods lay overbank deposits on top, thickest beside the
 //! channel as natural levees, and a higher bank erodes more slowly.
+//! Slumps from the valley walls leave coarse ground, colluvium, which
+//! erodes more slowly still.
 
 use crate::geom::P;
 
@@ -83,6 +85,8 @@ pub struct Ground {
     pub shrub: f64,
     /// Growth shrub needs to become mature forest.
     pub forest: f64,
+    /// Multiplier on wholly coarse ground; see [`Erodibility::coarse`].
+    pub coarse: f64,
 }
 
 /// One flood's work on the floodplain beside a channel; see
@@ -126,6 +130,10 @@ pub struct Erodibility {
     /// depths. The channel resets it to 0 where it sweeps, and a cutoff
     /// sets it to −`LAKE_DEPTH` over the oxbow footprint.
     pub deposit: Vec<f32>,
+    /// Share of coarse material in each cell, in [0, 1]: colluvium
+    /// slumped from a valley wall. The channel halves it where it sweeps,
+    /// as it reworks the coarse material into its bars.
+    pub coarse: Vec<f32>,
     /// Scratch: squared distance from each cell to the channel during a
     /// flood.
     near: Vec<f32>,
@@ -164,6 +172,7 @@ impl Erodibility {
             cut_at: vec![f64::INFINITY; cells],
             growth: vec![f32::INFINITY; cells],
             deposit: vec![0.0; cells],
+            coarse: vec![0.0; cells],
             near: Vec::new(),
             nearest: Vec::new(),
             order: Vec::new(),
@@ -202,7 +211,7 @@ impl Erodibility {
     /// `g.vegetation`, then to 1 over a further `g.forest`. A bank raised by
     /// overbank deposits of height h, in channel depths, holds 1 + h times
     /// the material of a bank at bar level, so it erodes 1 / (1 + h) as
-    /// fast.
+    /// fast. Coarse ground moves the multiplier towards `g.coarse`.
     pub fn at(&self, p: P, g: &Ground) -> f64 {
         let i = self.index(p);
         let n = 1.0 + g.heterogeneity * 2.0 * (self.noise[i] as f64 - 0.5);
@@ -217,7 +226,8 @@ impl Erodibility {
             let shrub = g.bar + (g.shrub - g.bar) * (growth / g.vegetation.max(1e-9)).clamp(0.0, 1.0);
             shrub + (1.0 - shrub) * ((growth - g.vegetation) / g.forest.max(1e-9)).clamp(0.0, 1.0)
         };
-        n.max(0.05) * c / (1.0 + (self.deposit[i] as f64).max(0.0))
+        let coarse = 1.0 - (1.0 - g.coarse) * self.coarse[i] as f64;
+        n.max(0.05) * c * coarse / (1.0 + (self.deposit[i] as f64).max(0.0))
     }
 
     /// Vegetation growth at `p`; see [`Erodibility::growth`].
@@ -451,6 +461,45 @@ impl Erodibility {
             self.growth[i] = 0.0;
             self.cut_at[i] = f64::INFINITY;
             self.deposit[i] = 0.0;
+            self.coarse[i] *= 0.5;
+        }
+    }
+
+    /// Columns and rows, inclusive, of the cells that may lie within
+    /// `radius` of `apex`.
+    fn disc(&self, apex: P, radius: f64) -> [usize; 4] {
+        let c = self.cell;
+        let x0 = ((apex[0] - radius) / c).floor().max(0.0) as usize;
+        let y0 = ((apex[1] - radius) / c).floor().max(0.0) as usize;
+        let x1 = (((apex[0] + radius) / c).max(0.0) as usize).min(self.cols - 1);
+        let y1 = (((apex[1] + radius) / c).max(0.0) as usize).min(self.rows - 1);
+        [x0, y0, x1, y1]
+    }
+
+    /// Build a cone of coarse ground about `apex`, `radius` across: its
+    /// surface stands `top` channel depths above fresh bar sand at the
+    /// apex and its share of coarse material is `coarse` there, both
+    /// falling to nothing at the rim. Each cell moves the fraction `frac`
+    /// of the way up to the cone, never down. Lake footprints are left alone.
+    pub fn grow_cone(&mut self, apex: P, radius: f64, top: f64, coarse: f64, frac: f64) {
+        if radius <= 0.0 || frac <= 0.0 {
+            return;
+        }
+        let (frac, c) = (frac.min(1.0) as f32, self.cell);
+        let [x0, y0, x1, y1] = self.disc(apex, radius);
+        for y in y0..=y1 {
+            let dy = (y as f64 + 0.5) * c - apex[1];
+            for x in x0..=x1 {
+                let (dx, i) = ((x as f64 + 0.5) * c - apex[0], y * self.cols + x);
+                let d2 = dx * dx + dy * dy;
+                if d2 >= radius * radius || self.cut_at[i].is_finite() {
+                    continue;
+                }
+                let t = 1.0 - d2.sqrt() / radius;
+                let (h, k) = ((top * t) as f32, (coarse * t.sqrt()) as f32);
+                self.deposit[i] += frac * (h - self.deposit[i]).max(0.0);
+                self.coarse[i] += frac * (k - self.coarse[i]).max(0.0);
+            }
         }
     }
 
@@ -515,7 +564,7 @@ mod tests {
     }
 
     fn ground(time: f64) -> Ground {
-        Ground { time, heterogeneity: 0.0, lake_life: 100.0, lake: 3.0, clay: 0.3, bar: 2.0, vegetation: 50.0, shrub: 1.0, forest: 1.0 }
+        Ground { time, heterogeneity: 0.0, lake_life: 100.0, lake: 3.0, clay: 0.3, bar: 2.0, vegetation: 50.0, shrub: 1.0, forest: 1.0, coarse: 0.5 }
     }
 
     #[test]

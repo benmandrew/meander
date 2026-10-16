@@ -178,6 +178,9 @@ pub struct Params {
     /// `vegetation_time`, so holdings follow the channel onto bars long
     /// before shrub binds them.
     pub grazing_time: f64,
+    /// Erodibility multiplier on wholly coarse ground: colluvium slumped
+    /// from a valley wall. 1 disables.
+    pub coarse_factor: f64,
     /// Time the upland clearance begins. Fine sediment from cleared
     /// slopes multiplies overbank deposition and the filling of lakes by
     /// [`Sim::supply`].
@@ -203,6 +206,9 @@ pub struct Params {
     /// the dimensionless migration rate at the jam and falling to 0
     /// [`JAM_REACH`] widths along the channel either side.
     pub jam_push: f64,
+    /// Rate at which a bank pressing against a valley wall erodes it back,
+    /// as a fraction of the bank's migration demand. 0 disables.
+    pub bluff_rate: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -272,6 +278,7 @@ impl Default for Params {
             holding_area: HOLDING_AREA,
             reorganise_time: REORGANISE_TIME,
             grazing_time: GRAZING_TIME,
+            coarse_factor: COARSE_FACTOR,
             clearance_start: CLEARANCE_START,
             clearance_time: CLEARANCE_TIME,
             clearance_supply: CLEARANCE_SUPPLY,
@@ -279,6 +286,7 @@ impl Default for Params {
             wood_rate: WOOD_RATE,
             jam_lifetime: JAM_LIFETIME,
             jam_push: JAM_PUSH,
+            bluff_rate: BLUFF_RATE,
             physics: true,
             friction,
             aspect,
@@ -337,6 +345,7 @@ impl Params {
         "holding_area",
         "reorganise_time",
         "grazing_time",
+        "coarse_factor",
         "clearance_start",
         "clearance_time",
         "clearance_supply",
@@ -344,6 +353,7 @@ impl Params {
         "wood_rate",
         "jam_lifetime",
         "jam_push",
+        "bluff_rate",
         "physics",
         "friction",
         "aspect",
@@ -398,6 +408,7 @@ impl Params {
             "holding_area" => &mut self.holding_area,
             "reorganise_time" => &mut self.reorganise_time,
             "grazing_time" => &mut self.grazing_time,
+            "coarse_factor" => &mut self.coarse_factor,
             "clearance_start" => &mut self.clearance_start,
             "clearance_time" => &mut self.clearance_time,
             "clearance_supply" => &mut self.clearance_supply,
@@ -405,6 +416,7 @@ impl Params {
             "wood_rate" => &mut self.wood_rate,
             "jam_lifetime" => &mut self.jam_lifetime,
             "jam_push" => &mut self.jam_push,
+            "bluff_rate" => &mut self.bluff_rate,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -531,6 +543,9 @@ pub struct Sim {
     pub captures: u64,
     /// Jams of large wood against the banks.
     pub jams: Vec<Jam>,
+    /// Counts slumps from the valley walls, so a renderer can redraw the
+    /// walls after bluff erosion.
+    pub wall_version: u64,
     rng: Rng,
     /// Draws for the floodplain's events (falling wood), from a
     /// stream of their own so they leave the river's draws unchanged.
@@ -554,6 +569,9 @@ pub struct Sim {
     shift: Vec<f64>,
     /// Cumulative weights for picking a point.
     weights: Vec<f64>,
+    /// Bluff erosion found this step: the wall, x in channel widths, the
+    /// retreat and its limit.
+    cuts: Vec<(usize, f64, f64, f64)>,
     /// Valley floor's y range at each erodibility grid column, refreshed
     /// at the start of each survey of the land.
     valley: Vec<(f64, f64)>,
@@ -693,6 +711,9 @@ const SCROLL_REWORK_EVERY: u64 = 10;
 const LEVEE_LENGTH: f64 = 2.0;
 const LEVEE_HEIGHT: f64 = 0.25;
 
+/// Default coarse ground; see [`Params`]. Colluvium erodes at 0.4 of
+/// the floodplain's rate.
+const COARSE_FACTOR: f64 = 0.4;
 /// Default upland clearance; see [`Params`]. It begins 100 units, 250
 /// years, after the default warm-up of 500, and the supply triples over
 /// the 1,000 years that follow, as the post-medieval alluvium of English
@@ -721,6 +742,19 @@ pub const JAM_REACH: f64 = 3.0;
 const JAM_MERGE: f64 = 4.0;
 /// Most jams at once.
 const MAX_JAMS: usize = 40;
+/// Default bluff erosion; see [`Params`]. Valley sides of terrace gravel
+/// and bedrock erode a few times slower than the floodplain.
+const BLUFF_RATE: f64 = 0.05;
+/// Most a wall retreats, in channel widths, and the least room it leaves
+/// between its foot and the domain edge.
+const BLUFF_MAX: f64 = 8.0;
+const BLUFF_ROOM: f64 = 1.0;
+/// Colluvium a slump brings down: the radius of its lobe at the foot of
+/// the wall, in channel widths, its height there in channel depths, and
+/// its share of coarse material.
+const SLUMP_RADIUS: f64 = 1.5;
+const SLUMP_HEIGHT: f64 = 0.4;
+const SLUMP_COARSE: f64 = 0.8;
 
 /// Longest chute a flood can cut, in channel widths.
 pub const CHUTE_CHORD: f64 = 5.0;
@@ -807,6 +841,7 @@ impl Sim {
             flood_cutoffs: 0,
             captures: 0,
             jams: Vec::new(),
+            wall_version: 0,
             rng: Rng::new(seed),
             events: Rng::new(seed ^ EVENTS_SEED),
             recent_cuts: Vec::new(),
@@ -822,6 +857,7 @@ impl Sim {
             contacts: Vec::new(),
             shift: Vec::new(),
             weights: Vec::new(),
+            cuts: Vec::new(),
             valley: Vec::new(),
             line_version: 0,
             grid_for: None,
@@ -872,6 +908,7 @@ impl Sim {
         self.flood_cutoffs = 0;
         self.captures = 0;
         self.jams.clear();
+        self.wall_version += 1;
         self.land = Land::new(&self.erodibility, seed);
         self.read_valley();
         let s = self.land_settings();
@@ -940,6 +977,7 @@ impl Sim {
         self.resample(ds);
         self.track();
         self.migrate();
+        self.erode_bluffs();
         self.smooth();
         self.clamp_to_domain();
         self.line_version += 1;
@@ -1064,6 +1102,55 @@ impl Sim {
         best.0
     }
 
+    /// Erode the valley walls where banks press against them. A bank
+    /// moving towards a wall cuts it back by `bluff_rate` times its
+    /// migration demand, times the square of the shortfall from 1 of the
+    /// wall's taper at the bank, spread along the wall as a scallop. The
+    /// river then reaches farther into the wall as the taper follows it.
+    /// The walls' feet are read without the pinches, which keep the river
+    /// off the walls there anyway. Each slump drops a lobe of colluvium at
+    /// the foot.
+    fn erode_bluffs(&mut self) {
+        let p = &self.params;
+        let (w, n) = (p.width, self.centerline.len());
+        if p.bluff_rate <= 0.0 || p.valley_width <= 0.0 || p.edge_margin <= 0.0 || self.rate.len() != n {
+            return;
+        }
+        let k = p.bluff_rate * p.dt * p.erodibility;
+        let (h, margin) = (self.bounds[1], p.edge_margin * w);
+        self.cuts.clear();
+        for i in 1..n.saturating_sub(1) {
+            let r = self.rate[i];
+            let q = self.centerline[i];
+            let nrm = right_normal(&self.centerline, i);
+            let toward = r.signum() * nrm[1];
+            if toward == 0.0 {
+                continue;
+            }
+            let off = r.signum() * (0.5 * self.widths[i] + BANK_BEYOND) * w;
+            let bank = q[1] + off * nrm[1];
+            let floor = self.floor(q[0], false);
+            let (side, gap, room) =
+                if toward < 0.0 { (0, bank - floor.0, floor.0) } else { (1, floor.1 - bank, h - floor.1) };
+            let short = 1.0 - smoothstep(gap / margin);
+            if short <= 0.0 {
+                continue;
+            }
+            let xw = q[0] / w;
+            let limit = (self.walls.retreat(side, xw) + room / w - BLUFF_ROOM).min(BLUFF_MAX);
+            self.cuts.push((side, xw, k * r.abs() * toward.abs() * short * short, limit));
+        }
+        for c in 0..self.cuts.len() {
+            let (side, xw, amount, limit) = self.cuts[c];
+            if let Some(x) = self.walls.erode(side, xw, amount, limit) {
+                let floor = self.floor(x * w, false);
+                let foot = [x * w, if side == 0 { floor.0 } else { floor.1 }];
+                self.erodibility.grow_cone(foot, SLUMP_RADIUS * w, SLUMP_HEIGHT, SLUMP_COARSE, 1.0);
+                self.wall_version += 1;
+            }
+        }
+    }
+
     /// Resistance a point bar puts up against a chute along `a`–`b`: the
     /// mean along the chord of its vegetation's growth over
     /// `vegetation_time`, up to 2, plus its overbank deposit over
@@ -1105,6 +1192,7 @@ impl Sim {
             vegetation: p.vegetation_time,
             shrub: p.shrub_factor,
             forest: p.forest_time,
+            coarse: p.coarse_factor,
         }
     }
 
@@ -2449,6 +2537,29 @@ mod tests {
         assert!((far[1] - q[1]).abs() < 1e-6, "and stays put away from it");
         sim.flush_jams(1.0);
         assert!(sim.jams.is_empty(), "the largest flood flushes every jam");
+    }
+
+    #[test]
+    fn a_bank_against_a_wall_cuts_it_back_and_slumps() {
+        let mut sim = sine_sim(0.0, 40.0);
+        let w = sim.params.width;
+        let pts: Vec<P> = sim.centerline.iter().map(|q| [q[0], sim.floor(q[0], false).1 - 2.0 * w]).collect();
+        sim.centerline = pts;
+        let n = sim.centerline.len();
+        let towards = right_normal(&sim.centerline, n / 2)[1].signum();
+        let (foot, versions) = (sim.floor(200.0 * w, false).1, sim.wall_version);
+        for _ in 0..2000 {
+            sim.rate = vec![towards * 0.5; n];
+            sim.erode_bluffs();
+        }
+        let back = sim.walls.retreat(1, 200.0);
+        assert!(back > 0.5 && back <= BLUFF_MAX, "the wall retreats: {back}");
+        assert_eq!(sim.walls.retreat(0, 200.0), 0.0, "the far wall stands");
+        assert!(sim.floor(200.0 * w, false).1 > foot, "the floor widens");
+        assert!(sim.wall_version > versions, "slumps redraw the wall");
+        let lobe = [200.0 * w, sim.floor(200.0 * w, false).1];
+        let coarse = (0..8).map(|k| sim.erodibility.coarse[sim.erodibility.cell_index([lobe[0] + k as f64 * w, lobe[1]])]);
+        assert!(coarse.fold(0.0f32, f32::max) > 0.3, "colluvium at the foot");
     }
 
     /// A channel along x with a bend 10 widths high between x = 110 and
