@@ -98,11 +98,17 @@ pub struct Params {
     /// to `clay_factor` as the lake fills over `oxbow_lifetime`.
     pub lake_factor: f64,
     /// Erodibility multiplier on ground the channel has just left, as bare
-    /// point-bar sand. It moves to 1 as vegetation binds the sand over
-    /// `vegetation_time`; 1 disables.
+    /// point-bar sand. It moves to `shrub_factor` as willow and shrub bind
+    /// the sand over `vegetation_time`; 1 disables.
     pub bar_factor: f64,
     /// Simulation time vegetation takes to bind a point bar.
     pub vegetation_time: f64,
+    /// Erodibility multiplier on a point bar once shrub has bound it. It
+    /// moves to 1, the mature forest of the old floodplain, as forest grows
+    /// over `forest_time`; 1 disables.
+    pub shrub_factor: f64,
+    /// Simulation time shrub takes to grow into mature forest.
+    pub forest_time: f64,
     /// Expected floods per unit time. A flood can breach necks wider than
     /// `cutoff_dist` and cut chutes across point bars. 0 disables floods.
     pub flood_rate: f64,
@@ -176,6 +182,8 @@ impl Default for Params {
             lake_factor: 3.0,
             bar_factor: BAR_FACTOR,
             vegetation_time: VEGETATION_TIME,
+            shrub_factor: SHRUB_FACTOR,
+            forest_time: FOREST_TIME,
             flood_rate: FLOOD_RATE,
             breach_dist: BREACH_DIST,
             chute_ratio: CHUTE_RATIO,
@@ -223,6 +231,8 @@ impl Params {
         "lake_factor",
         "bar_factor",
         "vegetation_time",
+        "shrub_factor",
+        "forest_time",
         "flood_rate",
         "breach_dist",
         "chute_ratio",
@@ -266,6 +276,8 @@ impl Params {
             "lake_factor" => &mut self.lake_factor,
             "bar_factor" => &mut self.bar_factor,
             "vegetation_time" => &mut self.vegetation_time,
+            "shrub_factor" => &mut self.shrub_factor,
+            "forest_time" => &mut self.forest_time,
             "flood_rate" => &mut self.flood_rate,
             "breach_dist" => &mut self.breach_dist,
             "chute_ratio" => &mut self.chute_ratio,
@@ -460,6 +472,11 @@ const WIDTH_SMOOTHING: f64 = 0.25;
 /// Default point-bar parameters; see [`Params`].
 const BAR_FACTOR: f64 = 1.3;
 const VEGETATION_TIME: f64 = 100.0;
+/// Default forest succession; see [`Params`]. Riparian forest holds its
+/// banks: Micheli et al. (2004) found the Sacramento River migrated about
+/// 1.5 times as fast through cleared farmland as through it.
+const SHRUB_FACTOR: f64 = 1.15;
+const FOREST_TIME: f64 = 1500.0;
 
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
@@ -699,6 +716,8 @@ impl Sim {
             clay: p.clay_factor,
             bar: p.bar_factor,
             vegetation: p.vegetation_time,
+            shrub: p.shrub_factor,
+            forest: p.forest_time,
         }
     }
 

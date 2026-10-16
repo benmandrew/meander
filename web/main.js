@@ -49,6 +49,17 @@ const SCARP_SHADE = [128, 128, 88];
 const SCARP = 1.5;
 const WALL_WANDER = 4;
 const WALL_KNOTS = [30, 8];
+// Vegetation on the floodplain, drawn as nested translucent regions that
+// darken with age: shrub once it binds a point bar after
+// `vegetation_time`, then young and mature forest at these fractions of
+// `forest_time` after that. Ground the channel never reached is mature
+// forest.
+const FOREST = [
+  { at: 0, colour: [150, 170, 104] },
+  { at: 0.35, colour: [112, 140, 84] },
+  { at: 0.85, colour: [84, 116, 70] },
+];
+const FOREST_OPACITY = 0.16;
 // Opacity of the marsh that stays on the clay plug of an old oxbow after
 // its lake and scar have gone, until the channel sweeps it away.
 const PLUG_MARSH = 0.25;
@@ -723,6 +734,11 @@ class SvgRenderer {
     // keeping a centreline does not repaint the old ones.
     this.oldBars = el('g', line, bars);
     this.barLayer = el('g', line, ground);
+    // Shrub and forest lie over the bars and under the scroll bars, so the
+    // ridges show through the trees.
+    this.forestLayer = el('g', { 'fill-rule': 'evenodd', 'fill-opacity': FOREST_OPACITY }, ground);
+    this.forest = FOREST.map(({ colour }) => el('path', { fill: `rgb(${colour})` }, this.forestLayer));
+    this.forestAt = null;
     // Scroll bars: one group for each age band, with one path for each
     // ridge, so trimming a ridge repaints only the ground around it.
     this.scrollLayer = el('g', round, ground);
@@ -746,7 +762,7 @@ class SvgRenderer {
     // so old meander belts stay legible after their scars fade.
     this.plugMarsh = el('path', { fill: MARSH, 'fill-opacity': PLUG_MARSH, 'fill-rule': 'evenodd' }, ground);
     this.plugAt = null;
-    this.plugBlur = null;
+    this.blurred = null;
     // Oxbow scars lie over the whole ground, under the channel. They change
     // slowly, so they sit at the top of the ground layer, not in the top
     // layer that is redrawn whenever the river moves.
@@ -792,6 +808,7 @@ class SvgRenderer {
     this.window = [x, w];
     this.leveeAt = null;
     this.plugAt = null;
+    this.forestAt = null;
     this.scrollAt = null;
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
@@ -886,6 +903,7 @@ class SvgRenderer {
     }
     if (local.showLevees) this.drawLevees(river, memory);
     this.drawPlugs(river, memory);
+    this.drawForest(river, memory);
     if (local.showScrolls) this.drawScrolls(river, memory, w);
 
     river.sync();
@@ -1025,28 +1043,55 @@ class SvgRenderer {
     river.sync_plugs();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const plugs = new Float32Array(memory.buffer, river.plugs_ptr(), cols * rows);
-    if (this.plugBlur?.length !== cols * rows) this.plugBlur = new Float32Array(cols * rows);
-    const blur = this.plugBlur;
+    const [c0, c1] = this.windowColumns(cols, cell);
+    const blur = this.blur(plugs, cols, rows, c0, c1);
+    set(this.plugMarsh, 'd', contourData(blur, cols, rows, cell, c0, c1, 0.5));
+  }
+
+  // Draw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
+  // after each cutoff, which clears an oxbow's footprint. The age grid is
+  // blurred like the plug grid.
+  drawForest(river, memory) {
+    const t = river.time(), cutoffs = river.cutoffs();
+    const last = this.forestAt;
+    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    this.forestAt = { cutoffs, t };
+    river.sync_forest();
+    const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
+    const age = new Float32Array(memory.buffer, river.forest_ptr(), cols * rows);
+    const [c0, c1] = this.windowColumns(cols, cell);
+    const blur = this.blur(age, cols, rows, c0, c1);
+    const [shrub, forest] = [river.get_param('vegetation_time'), river.get_param('forest_time')];
+    FOREST.forEach(({ at }, k) => {
+      set(this.forest[k], 'd', contourData(blur, cols, rows, cell, c0, c1, shrub + at * forest));
+    });
+  }
+
+  // Erodibility grid columns over the window, with a column to spare each
+  // side.
+  windowColumns(cols, cell) {
     const [x, vw] = this.window;
-    const c0 = Math.max(0, Math.floor(x / cell) - 1);
-    const c1 = Math.min(cols, Math.ceil((x + vw) / cell) + 1);
+    return [Math.max(0, Math.floor(x / cell) - 1), Math.min(cols, Math.ceil((x + vw) / cell) + 1)];
+  }
+
+  // `values` on the erodibility grid averaged over 3 × 3 cells, in columns
+  // [c0, c1), in a buffer reused between calls.
+  blur(values, cols, rows, c0, c1) {
+    if (this.blurred?.length !== cols * rows) this.blurred = new Float32Array(cols * rows);
+    const out = this.blurred;
     for (let j = 0; j < rows; j++) {
       for (let i = c0; i < c1; i++) {
         let sum = 0, count = 0;
-        for (let dj = -1; dj <= 1; dj++) {
-          const jj = j + dj;
-          if (jj < 0 || jj >= rows) continue;
-          for (let di = -1; di <= 1; di++) {
-            const ii = i + di;
-            if (ii < 0 || ii >= cols) continue;
-            sum += plugs[jj * cols + ii];
+        for (let jj = Math.max(0, j - 1); jj <= Math.min(rows - 1, j + 1); jj++) {
+          for (let ii = Math.max(0, i - 1); ii <= Math.min(cols - 1, i + 1); ii++) {
+            sum += values[jj * cols + ii];
             count++;
           }
         }
-        blur[j * cols + i] = sum / count;
+        out[j * cols + i] = sum / count;
       }
     }
-    set(this.plugMarsh, 'd', contourData(blur, cols, rows, cell, c0, c1, 0.5));
+    return out;
   }
 
   // Draw the scroll bars in age bands when they change, and every

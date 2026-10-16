@@ -66,15 +66,21 @@ pub struct Ground {
     /// Multiplier once the lake has filled, as a clay plug.
     pub clay: f64,
     /// Multiplier on ground the channel has just left, as bare point-bar
-    /// sand. It moves to 1, the old floodplain, over `vegetation`.
+    /// sand. It moves to `shrub` over `vegetation`.
     pub bar: f64,
     /// Time vegetation takes to bind a point bar.
     pub vegetation: f64,
+    /// Multiplier once shrub has bound a point bar. It moves to 1, the
+    /// mature forest of the old floodplain, over `forest`.
+    pub shrub: f64,
+    /// Time shrub takes to grow into mature forest.
+    pub forest: f64,
 }
 
 /// Erodibility multiplier on a grid. Built from noise at reset. Cells the
 /// channel crosses are stamped with the time it last swept them, and their
-/// multiplier moves from the bar factor to 1 as vegetation binds the sand.
+/// multiplier moves from the bar factor to the shrub factor as vegetation
+/// binds the sand, then to 1 as forest grows.
 /// Oxbow footprints are stamped with their cutoff time, and their multiplier
 /// moves from the lake factor to the clay factor as the lake fills.
 pub struct Erodibility {
@@ -151,7 +157,8 @@ impl Erodibility {
     /// times a factor for the ground's history. Inside an oxbow footprint it
     /// moves linearly from `g.lake` to `g.clay` over `g.lake_life`, or
     /// faster as floods silt the lake up (see [`Erodibility::silt_at`]); on a
-    /// point bar, from `g.bar` to 1 over `g.vegetation`. A bank raised by
+    /// point bar, from `g.bar` to `g.shrub` over `g.vegetation`, then to 1
+    /// over `g.forest`. A bank raised by
     /// overbank deposits of height h, in channel depths, holds 1 + h times
     /// the material of a bank at bar level, so it erodes 1 / (1 + h) as
     /// fast.
@@ -164,7 +171,8 @@ impl Erodibility {
             let silt = (1.0 + self.deposit[i] as f64 / LAKE_DEPTH).clamp(0.0, 1.0);
             g.lake + (g.clay - g.lake) * since(cut, g.lake_life).max(silt)
         } else if swept.is_finite() {
-            g.bar + (1.0 - g.bar) * since(swept, g.vegetation)
+            let shrub = g.bar + (g.shrub - g.bar) * since(swept, g.vegetation);
+            shrub + (1.0 - shrub) * since(swept + g.vegetation, g.forest)
         } else {
             1.0
         };
@@ -315,7 +323,7 @@ mod tests {
     }
 
     fn ground(time: f64) -> Ground {
-        Ground { time, heterogeneity: 0.0, lake_life: 100.0, lake: 3.0, clay: 0.3, bar: 2.0, vegetation: 50.0 }
+        Ground { time, heterogeneity: 0.0, lake_life: 100.0, lake: 3.0, clay: 0.3, bar: 2.0, vegetation: 50.0, shrub: 1.0, forest: 1.0 }
     }
 
     #[test]
@@ -329,6 +337,19 @@ mod tests {
         assert!((at(&e, 110.0) - 0.3).abs() < 1e-12);
         assert!((at(&e, 1000.0) - 0.3).abs() < 1e-12);
         assert_eq!(e.at([1.0, 1.0], &ground(10.0)), 1.0);
+    }
+
+    #[test]
+    fn a_point_bar_grows_shrub_then_forest() {
+        let mut e = Erodibility::new([10.0, 10.0], 1.0, 5.0, 0);
+        let g = |time| Ground { shrub: 1.5, forest: 200.0, ..ground(time) };
+        let at = |e: &Erodibility, time| e.at([5.0, 5.0], &g(time));
+        e.sweep(&[[5.0, 5.0]], 10.0);
+        assert!((at(&e, 10.0) - 2.0).abs() < 1e-12, "bare sand");
+        assert!((at(&e, 60.0) - 1.5).abs() < 1e-12, "shrub");
+        assert!((at(&e, 160.0) - 1.25).abs() < 1e-12, "young forest");
+        assert!((at(&e, 260.0) - 1.0).abs() < 1e-12, "mature forest");
+        assert!((at(&e, 1000.0) - 1.0).abs() < 1e-12);
     }
 
     #[test]
