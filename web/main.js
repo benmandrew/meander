@@ -928,6 +928,9 @@ class SvgRenderer {
     this.leveeAt = null;
     this.plugAt = null;
     this.forestAt = null;
+    this.forestJob = null;
+    // The first draw after a reset draws the floodplain whole.
+    this.fresh = true;
     this.scrollAt = null;
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
@@ -1124,7 +1127,8 @@ class SvgRenderer {
     }
     if (local.showLevees) this.drawLevees(river, memory);
     this.drawPlugs(river, memory);
-    this.drawForest(river, memory);
+    this.drawForest(river, memory, this.fresh);
+    this.fresh = false;
     if (local.showScrolls) this.drawScrolls(river, memory, w);
 
     river.sync();
@@ -1269,30 +1273,54 @@ class SvgRenderer {
     set(this.plugMarsh, 'd', contourData(blur, cols, rows, cell, c0, c1, 0.5));
   }
 
-  // Draw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
-  // after each cutoff, which clears an oxbow's footprint. The age grid is
-  // blurred like the plug grid.
-  drawForest(river, memory) {
+  // Redraw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
+  // after each cutoff, which clears an oxbow's footprint. The redraw takes
+  // one stage of `forestStages` a call, so its contours spread over the
+  // frames that follow instead of stalling one; `all` runs every stage at
+  // once. Returns whether it did any work.
+  drawForest(river, memory, all = false) {
     const t = river.time(), cutoffs = river.cutoffs();
     const last = this.forestAt;
-    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return;
-    this.forestAt = { cutoffs, t };
+    if (!last || last.cutoffs !== cutoffs || t - last.t >= LEVEE_REFRESH || t < last.t) {
+      this.forestAt = { cutoffs, t };
+      this.forestJob = this.forestStages(river, memory);
+    }
+    if (!this.forestJob) return false;
+    do {
+      if (this.forestJob.next().done) this.forestJob = null;
+    } while (all && this.forestJob);
+    return true;
+  }
+
+  // The stages of a forest redraw: copy and blur the age grid like the plug
+  // grid, contour each forest level, then size the tree crowns. The first
+  // stage reads WASM memory, so it runs in the call that starts the redraw.
+  *forestStages(river, memory) {
     river.sync_forest();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const age = new Float32Array(memory.buffer, river.forest_ptr(), cols * rows);
     const [c0, c1] = this.windowColumns(cols, cell);
-    const blur = this.blur(age, cols, rows, c0, c1);
+    // A buffer of its own, since the plug marsh blurs between stages.
+    const blur = this.blur(age, cols, rows, c0, c1, 'forestBlur');
     const [shrub, forest] = [river.get_param('vegetation_time'), river.get_param('forest_time')];
-    FOREST.forEach(({ at }, k) => {
+    const w = river.get_param('width');
+    for (const [k, { at }] of FOREST.entries()) {
+      yield;
       const age = shrub + at * forest;
       const start = 0.5 * (age + (k ? shrub + FOREST[k - 1].at * forest : 0));
       for (let s = 0; s < FOREST_STEPS; s++) {
         const level = start + (age - start) * (s + 1) / FOREST_STEPS;
         set(this.forest[k * FOREST_STEPS + s], 'd', contourData(blur, cols, rows, cell, c0, c1, level));
       }
-    });
+    }
     set(this.farmland, 'd', this.forest.at(-1).getAttribute('d'));
-    this.drawTrees(blur, cols, rows, cell, shrub, forest, river.get_param('width'));
+    yield;
+    this.drawTrees(blur, cols, rows, cell, shrub, forest, w);
+  }
+
+  // Carry on with work spread over frames, on a frame that draws nothing.
+  idle(river, memory) {
+    this.drawForest(river, memory);
   }
 
   // Scatter crowns over the window on a jittered grid, each with its own
@@ -1358,10 +1386,10 @@ class SvgRenderer {
   }
 
   // `values` on the erodibility grid averaged over 3 × 3 cells, in columns
-  // [c0, c1), in a buffer reused between calls.
-  blur(values, cols, rows, c0, c1) {
-    if (this.blurred?.length !== cols * rows) this.blurred = new Float32Array(cols * rows);
-    const out = this.blurred;
+  // [c0, c1), in the buffer `this[name]`, reused between calls.
+  blur(values, cols, rows, c0, c1, name = 'blurred') {
+    if (this[name]?.length !== cols * rows) this[name] = new Float32Array(cols * rows);
+    const out = this[name];
     for (let j = 0; j < rows; j++) {
       for (let i = c0; i < c1; i++) {
         let sum = 0, count = 0;

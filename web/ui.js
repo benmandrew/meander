@@ -23,8 +23,9 @@ const SETTINGS = { warmup: 500, noise: 0.5 };
 const YEARS_PER_UNIT = 2.5;
 
 // `renderer` provides draw(river, memory, state), reset(river, bounds, seed),
-// and capture(river, memory, state), which is called during warm-up in place
-// of drawing. `display` holds the renderer's own settings.
+// capture(river, memory, state), which is called during warm-up in place of
+// drawing, and idle(river, memory), which is called on frames that draw
+// nothing, to carry on with drawing work spread over frames. `display` holds the renderer's own settings.
 export async function startApp({ view, renderer, display }) {
   const wasm = await init();
   const local = { ...SETTINGS, ...display };
@@ -107,8 +108,9 @@ export async function startApp({ view, renderer, display }) {
       frameMs = 0.9 * frameMs + 0.1 * (performance.now() - t0);
     }
     // Draw only when something has changed, so a paused or slow river costs
-    // nothing between steps.
+    // nothing between steps beyond drawing work spread over frames.
     if (!dirty) {
+      renderer.idle(river, wasm.memory);
       requestAnimationFrame(frame);
       return;
     }
