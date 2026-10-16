@@ -119,9 +119,11 @@ const MIN_FIELD = 2;
 // Boundaries are traced along the edges of the core's cells, simplified to
 // within `FIELD_SIMPLIFY` cells and rounded by two passes of Chaikin's
 // corner cutting. Fields are redrawn when a reorganisation finishes, at
-// most every `FIELD_REFRESH` of simulated time.
+// most every `FIELD_REFRESH` of simulated time. A redraw works for
+// `FIELD_SLICE` ms a frame, so its 10 to 25 ms spread over several frames.
 const FIELD_SIMPLIFY = 0.7;
 const FIELD_REFRESH = 5;
+const FIELD_SLICE = 2;
 // Fields fade in as the sward thickens, over `FIELD_FADE` nested regions
 // from `grazing_time`, when a holding takes the ground, to
 // `vegetation_time`, when it is as thick as old meadow: 50 to 250 years.
@@ -545,14 +547,18 @@ function pointsData(pts) {
 // j·(W + 1) + i, the label `a` on its left as it runs, the label `b` on its
 // right, and the cells on its left. A region's outline is the arcs it lies
 // left of, run forwards, and the arcs it lies right of, run backwards.
-function boundaryArcs(lab, W, H) {
+// Yields between rows whenever `due()`, and returns the arcs.
+function* boundaryArcs(lab, W, H, due) {
   const L = (i, j) => (i < 0 || j < 0 || i >= W || j >= H ? 0 : lab[j * W + i]);
   const CW = W + 1, nh = W * (H + 1);
   // Edge ids: j·W + i for the edge from corner (i, j) rightwards, and
   // nh + j·CW + i for the edge from corner (i, j) downwards.
   const edges = new Uint8Array(nh + CW * H);
-  for (let j = 0; j <= H; j++) for (let i = 0; i < W; i++) edges[j * W + i] = L(i, j - 1) !== L(i, j);
-  for (let j = 0; j < H; j++) for (let i = 0; i <= W; i++) edges[nh + j * CW + i] = L(i - 1, j) !== L(i, j);
+  for (let j = 0; j <= H; j++) {
+    if (due()) yield;
+    for (let i = 0; i < W; i++) edges[j * W + i] = L(i, j - 1) !== L(i, j);
+    if (j < H) for (let i = 0; i <= W; i++) edges[nh + j * CW + i] = L(i - 1, j) !== L(i, j);
+  }
   const incident = (i, j, out) => {
     out.length = 0;
     if (i > 0 && edges[j * W + i - 1]) out.push(j * W + i - 1, i - 1, j);
@@ -586,6 +592,7 @@ function boundaryArcs(lab, W, H) {
     arcs.push(arc);
   };
   for (let j = 0; j <= H; j++) {
+    if (due()) yield;
     for (let i = 0; i <= W; i++) {
       if (incident(i, j, step) <= 2) continue;
       for (let k = 0; k < step.length; k += 3) if (!used[step[k]]) walk(i, j, step[k], step[k + 1], step[k + 2]);
@@ -593,6 +600,7 @@ function boundaryArcs(lab, W, H) {
   }
   // What is left is closed loops, each with an edge along a row.
   for (let j = 0; j <= H; j++) {
+    if (due()) yield;
     for (let i = 0; i < W; i++) if (edges[j * W + i] && !used[j * W + i]) walk(i, j, j * W + i, i + 1, j);
   }
   return arcs;
@@ -1160,10 +1168,12 @@ class SvgRenderer {
     this.plugAt = null;
     this.forestAt = null;
     this.forestJob = null;
+    this.floodplainTurn = 0;
     // The first draw after a reset draws the floodplain whole.
     this.fresh = true;
     this.scrollAt = null;
     this.fieldsAt = null;
+    this.fieldJob = null;
     this.cropMask = null;
     this.meadow = new Map();
     for (const scar of this.scars) scar.shape = null;
@@ -1175,19 +1185,35 @@ class SvgRenderer {
 
   // Draw the fields of every holding over the window when a
   // reorganisation has finished, at most every `FIELD_REFRESH`, with their
-  // hedges, and mark the cells where crowns stand in crops.
-  drawFields(river, memory) {
-    const t = river.time(), version = river.land_version();
-    const last = this.fieldsAt;
-    if (last && t >= last.t && (last.version === version || t - last.t < FIELD_REFRESH)) return false;
-    this.fieldsAt = { version, t };
+  // hedges, and mark the cells where crowns stand in crops. The redraw runs
+  // for `FIELD_SLICE` ms a call and carries on in the calls that follow; a
+  // redraw due while one runs waits for it. `all` runs it whole. Returns
+  // whether it did any work.
+  drawFields(river, memory, all = false) {
+    if (!this.fieldJob) {
+      const t = river.time(), version = river.land_version();
+      const last = this.fieldsAt;
+      if (last && t >= last.t && (last.version === version || t - last.t < FIELD_REFRESH)) return false;
+      this.fieldsAt = { version, t };
+      this.fieldJob = this.fieldStages(river, memory);
+    }
+    this.fieldUntil = all ? Infinity : performance.now() + FIELD_SLICE;
+    if (this.fieldJob.next().done) this.fieldJob = null;
+    return true;
+  }
+
+  // The stages of a field redraw, which yield whenever the call's
+  // `fieldUntil` has passed. The page is written only in the last stage, so
+  // no frame shows half a redraw.
+  *fieldStages(river, memory) {
+    const due = () => performance.now() > this.fieldUntil;
     river.sync_holdings();
-    // Views must be built after syncing: it can grow memory.
+    // Copies, since later calls can grow memory and detach any view.
     const buf = memory.buffer;
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
-    const owner = new Uint32Array(buf, river.land_owner_ptr(), cols * rows);
-    const risk = new Float32Array(buf, river.land_risk_ptr(), cols * rows);
-    const hold = new Float32Array(buf, river.holdings_ptr(), 6 * river.holding_slots());
+    const owner = new Uint32Array(buf, river.land_owner_ptr(), cols * rows).slice();
+    const risk = new Float32Array(buf, river.land_risk_ptr(), cols * rows).slice();
+    const hold = new Float32Array(buf, river.holdings_ptr(), 6 * river.holding_slots()).slice();
     const w = river.get_param('width');
     const [c0, c1] = this.windowColumns(cols, cell);
     const W = c1 - c0;
@@ -1210,6 +1236,7 @@ class SvgRenderer {
     const lab = new Int32Array(W * rows);
     const fields = [], index = new Map();
     for (let j = 0; j < rows; j++) {
+      if (due()) yield;
       const y = (j + 0.5) * cell;
       for (let i = 0; i < W; i++) {
         const g = j * cols + c0 + i, o = owner[g];
@@ -1238,6 +1265,7 @@ class SvgRenderer {
     // Fold slivers into a neighbouring field of the same holding.
     const small = MIN_FIELD * w * w / (cell * cell);
     for (let n = 0; n < lab.length; n++) {
+      if (n % W === 0 && due()) yield;
       const f = lab[n];
       if (!f || fields[f - 1].cells >= small) continue;
       const [i, j] = [n % W, Math.floor(n / W)];
@@ -1271,10 +1299,11 @@ class SvgRenderer {
     }
     // Trace, simplify and round each boundary once, so neighbouring fields
     // share it exactly.
-    const arcs = boundaryArcs(lab, W, rows);
+    const arcs = yield* boundaryArcs(lab, W, rows, due);
     const outlines = new Map();
     let hedgeData = '';
     for (const arc of arcs) {
+      if (due()) yield;
       const world = arc.pts.map((v, k) => (k % 2 ? v : c0 + v) * cell);
       const closed = arc.start === arc.end;
       let pts = simplify(world, FIELD_SIMPLIFY * cell);
@@ -1294,9 +1323,9 @@ class SvgRenderer {
       for (const n of arc.cells) mask[n] = 0;
     }
     // Chain each field's arcs into rings, end to start.
-    const kept = new Map();
-    outlines.forEach((list, f) => {
-      const field = fields[f - 1];
+    const drawn = [];
+    for (const [f, list] of outlines) {
+      if (due()) yield;
       const from = new Map();
       for (const piece of list) {
         if (!from.has(piece.start)) from.set(piece.start, []);
@@ -1317,20 +1346,24 @@ class SvgRenderer {
         }
         if (ring.length >= 6) d += pointsData(ring) + 'Z';
       }
+      drawn.push([fields[f - 1], d]);
+    }
+    const kept = new Map();
+    for (const [field, d] of drawn) {
       const path = this.fieldPaths.get(field.key) ?? el('path', {}, this.parcels);
       this.fieldPaths.delete(field.key);
       kept.set(field.key, path);
       set(path, 'd', d);
       set(path, 'fill', `rgb(${field.colour})`);
       set(path, 'fill-opacity', field.opacity);
-    });
+    }
     for (const path of this.fieldPaths.values()) path.remove();
     this.meadow = meadowNow;
     this.fieldPaths = kept;
     set(this.hedges, 'd', hedgeData);
     set(this.hedges, 'stroke-width', dp1(HEDGE_WIDTH * w));
     this.cropMask = { mask, c0, W };
-    return true;
+    this.treesStale = true;
   }
 
   // Draw the valley sides over the window [x0, x0 + vw): the upland's tint
@@ -1616,20 +1649,27 @@ class SvgRenderer {
   // Refresh at most one floodplain layer a call. Their refreshes fall due
   // together, on the `LEVEE_REFRESH` clock and after cutoffs, and stacked
   // in one frame they overran it; a layer that is due now waits a frame.
-  // `all` refreshes every layer that is due, and draws the forest whole.
+  // The layers take turns, starting after the last one that refreshed, so a
+  // redraw spread over many calls does not hold back the layers after it.
+  // `all` refreshes every layer that is due, and draws the forest and the
+  // fields whole.
   drawFloodplain(river, memory, local, all = false) {
     const w = river.get_param('width');
     const layers = [
       () => local.showLevees && this.drawLevees(river, memory),
       () => this.drawPlugs(river, memory),
-      () => this.drawFields(river, memory) && (this.treesStale = true),
+      () => this.drawFields(river, memory, all),
       () => this.drawForest(river, memory, all),
       // After the forest, whose redraw also redraws the crowns.
       () => this.redrawTrees(),
       () => local.showScrolls && this.drawScrolls(river, memory, w),
     ];
-    for (const refresh of layers) {
-      if (refresh() && !all) return;
+    for (let k = 0; k < layers.length; k++) {
+      const m = all ? k : (this.floodplainTurn + k) % layers.length;
+      if (layers[m]() && !all) {
+        this.floodplainTurn = m + 1;
+        return;
+      }
     }
   }
 
@@ -1674,12 +1714,13 @@ class SvgRenderer {
   // Redraw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
   // after each cutoff, which clears an oxbow's footprint. The redraw takes
   // one stage of `forestStages` a call, so its contours spread over the
-  // frames that follow instead of stalling one; `all` runs every stage at
-  // once. Returns whether it did any work.
+  // frames that follow instead of stalling one; a redraw due while one runs
+  // waits for it. `all` runs every stage at once. Returns whether it did any
+  // work.
   drawForest(river, memory, all = false) {
     const t = river.time(), cutoffs = river.cutoffs();
     const last = this.forestAt;
-    if (!last || last.cutoffs !== cutoffs || t - last.t >= LEVEE_REFRESH || t < last.t) {
+    if (!this.forestJob && (!last || last.cutoffs !== cutoffs || t - last.t >= LEVEE_REFRESH || t < last.t)) {
       this.forestAt = { cutoffs, t };
       this.forestJob = this.forestStages(river, memory);
     }
