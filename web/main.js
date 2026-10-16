@@ -81,16 +81,22 @@ const WET_SAND = [190, 170, 120];
 // Depth in the channel. Pools lie against the outer bank of each bend,
 // `POOL_LAG` widths downstream of the apex, in nested crescents reaching
 // `POOL_LEVELS` of the width in from the bank at a bend of radius
-// `BAR_RADIUS` widths or tighter. Riffles are shallow lenses where the flow
-// crosses between two bends, `RIFFLE_WIDTH` of the width across and
-// fading over `RIFFLE_LENGTH` widths either side of the crossing; both
-// bends must be tighter than `RIFFLE_RADIUS` widths.
+// `BAR_RADIUS` widths or tighter. Riffles are shallow lenses, up to
+// `RIFFLE_WIDTH` of the width across, where the flow crosses between bends
+// of opposite sign within `RIFFLE_LOOK` widths upstream and downstream: over
+// the reach whose curvature is under `RIFFLE_CROSSING` of the weaker of the
+// two bends'. They grow in as both bends tighten past `RIFFLE_RADIUS`
+// widths, over a band of `RIFFLE_RAMP` of its curvature either side. Every
+// step is continuous in the curvature, so the channel's jitter moves a
+// riffle a little and does not switch it on and off.
 const POOL_LAG = 1;
 const POOL_LEVELS = [0.5, 0.25];
 const POOL_COLOURS = [[50, 106, 146], [38, 88, 124]];
 const RIFFLE_WIDTH = 0.75;
-const RIFFLE_LENGTH = 2;
+const RIFFLE_LOOK = 8;
+const RIFFLE_CROSSING = 0.5;
 const RIFFLE_RADIUS = 8;
+const RIFFLE_RAMP = 0.25;
 const SHALLOW = [96, 154, 182];
 // Where the channel is wider than `MID_BAR_FROM` widths, a sand bar splits
 // the flow, growing to `MID_BAR` of the width across at `MID_BAR_FULL`.
@@ -185,8 +191,9 @@ function channelFrame(pts) {
 }
 
 // Closed path data for the channel over points [start, end), out to
-// `scale` times the local width either side, plus `bar[i]` on the inside of
-// the bend if `bar` is given: one bank forwards, the other back. At a bend
+// `scale` times the local width either side, plus `bar[i]` on the side of
+// the left normal its sign gives, if `bar` is given: one bank forwards, the
+// other back. At a bend
 // tighter than that, the inner bank stops just short of the centre of the
 // bend, so it cannot fold over itself.
 function channelData(pts, widths, frame, scale, bar, start, end) {
@@ -195,8 +202,9 @@ function channelData(pts, widths, frame, scale, bar, start, end) {
   const left = [], right = [];
   for (let i = start; i < end; i++) {
     const h = scale * widths[i], k = curv[i], b = bar ? bar[i] : 0;
-    const hl = k > 0 ? Math.min(h + b, 0.95 / k) : h;
-    const hr = k < 0 ? Math.min(h + b, -0.95 / k) : h;
+    const [bl, br] = [h + Math.max(0, b), h + Math.max(0, -b)];
+    const hl = k > 0 ? Math.min(bl, 0.95 / k) : bl;
+    const hr = k < 0 ? Math.min(br, -0.95 / k) : br;
     const [x, y] = [pts[2 * i], pts[2 * i + 1]];
     left.push(dp1(x + hl * nx[i]) + ' ' + dp1(y + hl * ny[i]));
     right.push(dp1(x - hr * nx[i]) + ' ' + dp1(y - hr * ny[i]));
@@ -216,12 +224,13 @@ function channelRuns(pts, widths, frame, scale, bar = null) {
 }
 
 // Width of the wet sand of the point bar beyond the inner bank at each
-// point, in world units: `BAR_RIM` widths at a bend of radius `BAR_RADIUS`
-// widths or tighter, falling to nothing on a straight reach. `bend` is the
-// curvature smoothed along the river, so the bar does not flicker with the
-// point-to-point noise in it.
+// point, in world units, signed by the side of the left normal it lies on:
+// `BAR_RIM` widths at a bend of radius `BAR_RADIUS` widths or tighter,
+// falling to nothing on a straight reach. `bend` is the curvature smoothed
+// along the river and sets both the size and the side, so the bar does not
+// flicker with the point-to-point noise in it.
 function barRim(bend, w) {
-  return bend.map((c) => BAR_RIM * w * smoothstep(Math.abs(c) * w * BAR_RADIUS));
+  return bend.map((c) => Math.sign(c) * BAR_RIM * w * smoothstep(Math.abs(c) * w * BAR_RADIUS));
 }
 
 // `values` smoothed along the river by four [1, 2, 1] passes.
@@ -285,22 +294,25 @@ function channelDepth(pts, widths, frame, bend, w) {
     }
     return bandRuns(pts, frame, a, b);
   });
-  // Distance in points to the nearest crossing between two bends tighter
-  // than `RIFFLE_RADIUS`.
-  const span = Math.round(RIFFLE_LENGTH / SPACING), look = 4 * span;
-  const tight = 1 / (RIFFLE_RADIUS * w);
-  const near = new Float64Array(n).fill(Infinity);
-  for (let i = 1; i < n; i++) {
-    if ((bend[i - 1] > 0) === (bend[i] > 0)) continue;
-    let up = 0, down = 0;
-    for (let j = Math.max(0, i - look); j < i; j++) up = Math.max(up, Math.abs(bend[j]));
-    for (let j = i; j < Math.min(n, i + look); j++) down = Math.max(down, Math.abs(bend[j]));
-    if (up < tight || down < tight) continue;
-    for (let j = Math.max(0, i - span); j < Math.min(n, i + span); j++) near[j] = Math.min(near[j], Math.abs(j - i + 0.5));
+  // Strength of the riffle at each point: the weaker of the strongest
+  // bends of opposite sign upstream and downstream, ramped about
+  // `RIFFLE_RADIUS`, where the curvature here is small beside it.
+  const look = Math.round(RIFFLE_LOOK / SPACING), tight = 1 / (RIFFLE_RADIUS * w);
+  const strength = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let [upL, upR, downL, downR] = [0, 0, 0, 0];
+    for (let j = Math.max(0, i - look); j <= i; j++) [upL, upR] = [Math.max(upL, bend[j]), Math.max(upR, -bend[j])];
+    for (let j = i; j < Math.min(n, i + look + 1); j++) [downL, downR] = [Math.max(downL, bend[j]), Math.max(downR, -bend[j])];
+    const bends = Math.max(Math.min(upL, downR), Math.min(upR, downL));
+    if (bends <= 0) continue;
+    const grow = smoothstep((bends / tight - 1 + RIFFLE_RAMP) / (2 * RIFFLE_RAMP));
+    strength[i] = grow * (1 - smoothstep(Math.abs(bend[i]) / (RIFFLE_CROSSING * bends)));
   }
+  // Smoothed along the river, so each riffle tapers to round ends.
+  const riffle = smoothed(strength);
   const ra = new Float64Array(n), rb = new Float64Array(n);
   for (let i = 0; i < n; i++) {
-    const h = 0.5 * RIFFLE_WIDTH * widths[i] * smoothstep(1 - near[i] / span);
+    const h = 0.5 * RIFFLE_WIDTH * widths[i] * riffle[i];
     [ra[i], rb[i]] = [h, -h];
   }
   // Mid-channel bars, on the width smoothed so they grow and shrink
