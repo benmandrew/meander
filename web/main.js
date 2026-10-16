@@ -749,65 +749,86 @@ const CASES = [
   ['LT'], ['TB'], [['TR', 'LB'], ['LT', 'BR']], ['TR'], ['LR'], ['BR'], ['LB'], [],
 ];
 
+// `CASES` as numbers for `contourData`: the sides each segment joins, as 0
+// top, 1 right, 2 bottom and 3 left, in pairs. Entry 2c is case c, and
+// entry 2c + 1 the other pairing of a saddle, or case c again.
+const CASE_SIDES = CASES.flatMap((pairs, c) => (c === 5 || c === 10 ? pairs : [pairs, pairs])
+  .map((ps) => Int8Array.from(ps.flatMap((p) => [...p].map((s) => 'TRBL'.indexOf(s))))));
+
+// Scratch buffers for `contourData`, grown as needed and reused.
+const contourScratch = { v: new Float32Array(0), at: new Int32Array(0), segs: new Int32Array(0), used: new Uint8Array(0) };
+
 // Region where a grid exceeds `level`, as path data for the even-odd fill
 // rule. `values` holds `cols` × `rows` cells of side `cell`, row by row; only
 // columns [c0, c1) are traced, and cells outside them count as below the
 // level, so every contour closes. The contours run through the cell centres,
-// placed by linear interpolation along the cell edges.
+// placed by linear interpolation along the cell edges, to a tenth of a unit.
 function contourData(values, cols, rows, cell, c0, c1, level) {
   // Corner grid over the cell centres, with a one-cell border below the level.
-  const W = c1 - c0 + 2, H = rows + 2;
-  const v = new Float32Array(W * H).fill(-level);
-  for (let j = 1; j <= rows; j++) {
-    for (let i = 1; i <= c1 - c0; i++) v[j * W + i] = values[(j - 1) * cols + c0 + i - 1];
+  const W = c1 - c0 + 2, H = rows + 2, n = W * H;
+  const scratch = contourScratch;
+  if (scratch.v.length < n) {
+    scratch.v = new Float32Array(n);
+    scratch.at = new Int32Array(4 * n);
+    // At most two segments a cell.
+    scratch.segs = new Int32Array(4 * n);
+    scratch.used = new Uint8Array(2 * n);
   }
-  // Edge ids: 2k is the edge from corner k rightwards, 2k + 1 downwards.
-  const edge = (i, j, side) => {
-    const k = j * W + i;
-    return side === 'T' ? 2 * k : side === 'B' ? 2 * (k + W) : side === 'L' ? 2 * k + 1 : 2 * (k + 1) + 1;
-  };
-  const point = (id) => {
-    const k = id >> 1, i = k % W, j = (k - i) / W;
-    const k2 = id & 1 ? k + W : k + 1;
-    const t = (level - v[k]) / (v[k2] - v[k]);
-    const [di, dj] = id & 1 ? [0, t] : [t, 0];
-    return ((c0 + i + di - 0.5) * cell).toFixed(1) + ' ' + ((j + dj - 0.5) * cell).toFixed(1);
-  };
+  const { v, at, segs, used } = scratch;
+  v.fill(-level, 0, n);
+  for (let j = 1; j <= rows; j++) {
+    const row = (j - 1) * cols + c0 - 1;
+    for (let i = 1; i <= c1 - c0; i++) v[j * W + i] = values[row + i];
+  }
+  // Edge ids: 2k is the edge from corner k rightwards, 2k + 1 downwards. The
+  // cell with top-left corner k has the edge 2k + `side[s]` on side s.
+  const side = [0, 3, 2 * W, 1];
   // Segments as pairs of edge ids, and up to two segments at each edge.
-  const segs = [];
-  const at = new Int32Array(4 * W * H).fill(-1);
-  const link = (e, s) => { at[2 * e + (at[2 * e] < 0 ? 0 : 1)] = s; };
+  at.fill(-1, 0, 4 * n);
+  let count = 0;
   for (let j = 0; j < H - 1; j++) {
     for (let i = 0; i < W - 1; i++) {
-      const tl = v[j * W + i], tr = v[j * W + i + 1], br = v[(j + 1) * W + i + 1], bl = v[(j + 1) * W + i];
+      const k = j * W + i;
+      const tl = v[k], tr = v[k + 1], br = v[k + W + 1], bl = v[k + W];
       const c = (tl > level) * 8 + (tr > level) * 4 + (br > level) * 2 + (bl > level);
-      let pairs = CASES[c];
-      if (c === 5 || c === 10) pairs = pairs[(tl + tr + br + bl) / 4 > level ? 0 : 1];
-      for (const [a, b] of pairs) {
-        const s = segs.length / 2;
-        const [ea, eb] = [edge(i, j, a), edge(i, j, b)];
-        segs.push(ea, eb);
-        link(ea, s);
-        link(eb, s);
+      if (c === 0 || c === 15) continue;
+      const saddle = (c === 5 || c === 10) && (tl + tr + br + bl) / 4 <= level;
+      const sides = CASE_SIDES[2 * c + saddle];
+      for (let m = 0; m < sides.length; m += 2) {
+        const ea = 2 * k + side[sides[m]], eb = 2 * k + side[sides[m + 1]];
+        segs[2 * count] = ea;
+        segs[2 * count + 1] = eb;
+        at[2 * ea + (at[2 * ea] < 0 ? 0 : 1)] = count;
+        at[2 * eb + (at[2 * eb] < 0 ? 0 : 1)] = count;
+        count++;
       }
     }
   }
+  // Where the contour crosses an edge.
+  const point = (id) => {
+    const k = id >> 1, i = k % W, j = (k - i) / W;
+    const down = id & 1;
+    const t = (level - v[k]) / (v[down ? k + W : k + 1] - v[k]);
+    const x = (c0 + i + (down ? 0 : t) - 0.5) * cell, y = (j + (down ? t : 0) - 0.5) * cell;
+    return Math.round(10 * x) / 10 + ' ' + Math.round(10 * y) / 10;
+  };
   // Chain the segments into closed loops.
-  const used = new Uint8Array(segs.length / 2);
+  used.fill(0, 0, count);
   let d = '';
-  for (let s0 = 0; s0 < used.length; s0++) {
+  for (let s0 = 0; s0 < count; s0++) {
     if (used[s0]) continue;
-    const pts = [point(segs[2 * s0])];
-    let [s, e] = [s0, segs[2 * s0 + 1]];
+    let path = point(segs[2 * s0]), points = 1;
+    let s = s0, e = segs[2 * s0 + 1];
     while (s >= 0) {
       used[s] = 1;
-      pts.push(point(e));
+      path += 'L' + point(e);
+      points++;
       const next = at[2 * e] === s ? at[2 * e + 1] : at[2 * e];
       if (next < 0 || used[next]) break;
       s = next;
       e = segs[2 * s] === e ? segs[2 * s + 1] : segs[2 * s];
     }
-    if (pts.length > 3) d += 'M' + pts.join('L') + 'Z';
+    if (points > 3) d += 'M' + path + 'Z';
   }
   return d;
 }
@@ -1105,6 +1126,9 @@ class SvgRenderer {
     this.leveeAt = null;
     this.plugAt = null;
     this.forestAt = null;
+    this.forestJob = null;
+    // The first draw after a reset draws the floodplain whole.
+    this.fresh = true;
     this.scrollAt = null;
     this.fieldsAt = null;
     this.cropMask = null;
@@ -1358,12 +1382,8 @@ class SvgRenderer {
     for (const [layer, show] of layers) {
       if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
     }
-    if (local.showLevees) this.drawLevees(river, memory);
-    this.drawPlugs(river, memory);
-    const fields = this.drawFields(river, memory);
-    // New fields change which crowns stand in crops.
-    if (!this.drawForest(river, memory) && fields && this.treeBlur) this.drawTrees(this.treeBlur, ...this.treeArgs);
-    if (local.showScrolls) this.drawScrolls(river, memory, w);
+    this.drawFloodplain(river, memory, local, this.fresh);
+    this.fresh = false;
 
     river.sync();
     // Views must be rebuilt after every step: memory growth detaches them.
@@ -1472,12 +1492,33 @@ class SvgRenderer {
     });
   }
 
+  // Refresh at most one floodplain layer a call. Their refreshes fall due
+  // together, on the `LEVEE_REFRESH` clock and after cutoffs, and stacked
+  // in one frame they overran it; a layer that is due now waits a frame.
+  // `all` refreshes every layer that is due, and draws the forest whole.
+  drawFloodplain(river, memory, local, all = false) {
+    const w = river.get_param('width');
+    const layers = [
+      () => local.showLevees && this.drawLevees(river, memory),
+      () => this.drawPlugs(river, memory),
+      () => this.drawFields(river, memory) && (this.treesStale = true),
+      () => this.drawForest(river, memory, all),
+      // After the forest, whose redraw also redraws the crowns.
+      () => this.redrawTrees(),
+      () => local.showScrolls && this.drawScrolls(river, memory, w),
+    ];
+    for (const refresh of layers) {
+      if (refresh() && !all) return;
+    }
+  }
+
   // Contour the overbank deposits over the window after each flood, and
   // every `LEVEE_REFRESH` of simulated time as the channel sweeps them away.
+  // Returns whether it did.
   drawLevees(river, memory) {
     const t = river.time(), floods = river.floods();
     const last = this.leveeAt;
-    if (last && last.floods === floods && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    if (last && last.floods === floods && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
     this.leveeAt = { floods, t };
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const deposit = new Float32Array(memory.buffer, river.deposit_ptr(), cols * rows);
@@ -1488,16 +1529,17 @@ class SvgRenderer {
     LEVEE_LEVELS.forEach((f, k) => {
       this.levees[k].setAttribute('d', top > 0 ? contourData(deposit, cols, rows, cell, c0, c1, f * top) : '');
     });
+    return true;
   }
 
   // Draw the clay plug marsh after each cutoff, and every `LEVEE_REFRESH`
   // of simulated time as the channel sweeps it away. The plug grid is
   // blurred over 3 × 3 cells first, so its outline follows the lake's
-  // curve instead of the cell edges.
+  // curve instead of the cell edges. Returns whether it did.
   drawPlugs(river, memory) {
     const t = river.time(), cutoffs = river.cutoffs();
     const last = this.plugAt;
-    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
     this.plugAt = { cutoffs, t };
     river.sync_plugs();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
@@ -1505,40 +1547,76 @@ class SvgRenderer {
     const [c0, c1] = this.windowColumns(cols, cell);
     const blur = this.blur(plugs, cols, rows, c0, c1);
     set(this.plugMarsh, 'd', contourData(blur, cols, rows, cell, c0, c1, 0.5));
+    return true;
   }
 
-  // Draw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
-  // after each cutoff, which clears an oxbow's footprint. The age grid is
-  // blurred like the plug grid.
-  drawForest(river, memory) {
+  // Redraw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
+  // after each cutoff, which clears an oxbow's footprint. The redraw takes
+  // one stage of `forestStages` a call, so its contours spread over the
+  // frames that follow instead of stalling one; `all` runs every stage at
+  // once. Returns whether it did any work.
+  drawForest(river, memory, all = false) {
     const t = river.time(), cutoffs = river.cutoffs();
     const last = this.forestAt;
-    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
-    this.forestAt = { cutoffs, t };
+    if (!last || last.cutoffs !== cutoffs || t - last.t >= LEVEE_REFRESH || t < last.t) {
+      this.forestAt = { cutoffs, t };
+      this.forestJob = this.forestStages(river, memory);
+    }
+    if (!this.forestJob) return false;
+    do {
+      if (this.forestJob.next().done) this.forestJob = null;
+    } while (all && this.forestJob);
+    return true;
+  }
+
+  // The stages of a forest redraw: copy and blur the age grid like the plug
+  // grid, contour each forest level, then the farmland clip, then size the
+  // tree crowns. The first stage reads WASM memory, so it runs in the call
+  // that starts the redraw.
+  *forestStages(river, memory) {
     river.sync_forest();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const age = new Float32Array(memory.buffer, river.forest_ptr(), cols * rows);
     const [c0, c1] = this.windowColumns(cols, cell);
-    const blur = this.blur(age, cols, rows, c0, c1);
+    // A buffer of its own, since the plug marsh blurs between stages.
+    const blur = this.blur(age, cols, rows, c0, c1, 'forestBlur');
     const [shrub, forest] = [river.get_param('vegetation_time'), river.get_param('forest_time')];
-    FOREST.forEach(({ at }, k) => {
+    const w = river.get_param('width');
+    for (const [k, { at }] of FOREST.entries()) {
+      yield;
       const age = shrub + at * forest;
       const start = 0.5 * (age + (k ? shrub + FOREST[k - 1].at * forest : 0));
       for (let s = 0; s < FOREST_STEPS; s++) {
         const level = start + (age - start) * (s + 1) / FOREST_STEPS;
         set(this.forest[k * FOREST_STEPS + s], 'd', contourData(blur, cols, rows, cell, c0, c1, level));
       }
-    });
+    }
     const graze = river.get_param('grazing_time');
+    yield;
     this.farmland.forEach((path, k) => {
       const level = graze + (shrub - graze) * k / FIELD_FADE;
       set(path, 'd', contourData(blur, cols, rows, cell, c0, c1, level));
     });
+    yield;
     if (this.treeBlur?.length !== blur.length) this.treeBlur = new Float32Array(blur.length);
     this.treeBlur.set(blur);
-    this.treeArgs = [cols, rows, cell, shrub, forest, river.get_param('width'), river.get_param('grazing_time')];
+    this.treeArgs = [cols, rows, cell, shrub, forest, w, graze];
     this.drawTrees(this.treeBlur, ...this.treeArgs);
+    this.treesStale = false;
+  }
+
+  // Redraw the crowns from the last forest redraw's growth, after new
+  // fields change which crowns stand in crops. Returns whether it did.
+  redrawTrees() {
+    if (!this.treesStale || !this.treeBlur) return false;
+    this.drawTrees(this.treeBlur, ...this.treeArgs);
+    this.treesStale = false;
     return true;
+  }
+
+  // Carry on with work spread over frames, on a frame that draws nothing.
+  idle(river, memory, { local }) {
+    this.drawFloodplain(river, memory, local);
   }
 
   // Scatter crowns over the window on a jittered grid, each with its own
@@ -1603,10 +1681,10 @@ class SvgRenderer {
   }
 
   // `values` on the erodibility grid averaged over 3 × 3 cells, in columns
-  // [c0, c1), in a buffer reused between calls.
-  blur(values, cols, rows, c0, c1) {
-    if (this.blurred?.length !== cols * rows) this.blurred = new Float32Array(cols * rows);
-    const out = this.blurred;
+  // [c0, c1), in the buffer `this[name]`, reused between calls.
+  blur(values, cols, rows, c0, c1, name = 'blurred') {
+    if (this[name]?.length !== cols * rows) this[name] = new Float32Array(cols * rows);
+    const out = this[name];
     for (let j = 0; j < rows; j++) {
       for (let i = c0; i < c1; i++) {
         let sum = 0, count = 0;
@@ -1625,10 +1703,11 @@ class SvgRenderer {
   // Draw the scroll bars in age bands when they change, and every
   // `LEVEE_REFRESH` of simulated time as they age. A band's ridges darken
   // as vegetation takes them, and fade over the last quarter of their life.
+  // Returns whether it did.
   drawScrolls(river, memory, w) {
     const t = river.time(), version = river.scroll_version();
     const last = this.scrollAt;
-    if (last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    if (last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
     this.scrollAt = { version, t };
     river.sync_scrolls();
     // Views must be built after syncing: it can grow memory.
@@ -1658,6 +1737,7 @@ class SvgRenderer {
     for (const path of this.ridges.values()) path.remove();
     this.ridges = ridges;
     set(this.scrollLayer, 'stroke-width', (0.15 * w).toFixed(2));
+    return true;
   }
 
   // Record the centreline without drawing, during warm-up.
