@@ -120,6 +120,13 @@ pub struct Params {
     /// is at least `chute_ratio / u` times the chord, for chords up to
     /// [`CHUTE_CHORD`] widths. 0 disables chute cutoffs.
     pub chute_ratio: f64,
+    /// The channel takes up an open oxbow lake whose banks it meets at two
+    /// places when the route through the lake is shorter than the channel
+    /// between them by more than this factor, and abandons the channel's
+    /// route as a new oxbow. The steeper route draws the flow, as an
+    /// avulsion takes up an abandoned channel. A lake filled past
+    /// [`CAPTURE_FILL`] resists. 0 disables.
+    pub capture_ratio: f64,
     /// Overbank deposit a flood of magnitude 1 lays at the bank, in channel
     /// depths, before it thins towards the flood level. 0 disables.
     pub overbank: f64,
@@ -199,6 +206,7 @@ impl Default for Params {
             flood_rate: FLOOD_RATE,
             breach_dist: BREACH_DIST,
             chute_ratio: CHUTE_RATIO,
+            capture_ratio: CAPTURE_RATIO,
             overbank: OVERBANK,
             levee_length: LEVEE_LENGTH,
             levee_height: LEVEE_HEIGHT,
@@ -251,6 +259,7 @@ impl Params {
         "flood_rate",
         "breach_dist",
         "chute_ratio",
+        "capture_ratio",
         "overbank",
         "levee_length",
         "levee_height",
@@ -299,6 +308,7 @@ impl Params {
             "flood_rate" => &mut self.flood_rate,
             "breach_dist" => &mut self.breach_dist,
             "chute_ratio" => &mut self.chute_ratio,
+            "capture_ratio" => &mut self.capture_ratio,
             "overbank" => &mut self.overbank,
             "levee_length" => &mut self.levee_length,
             "levee_height" => &mut self.levee_height,
@@ -418,6 +428,8 @@ pub struct Sim {
     /// Floods so far, and the cutoffs they made (included in `cutoffs`).
     pub floods: u64,
     pub flood_cutoffs: u64,
+    /// Oxbow lakes the channel has taken up (included in `cutoffs`).
+    pub captures: u64,
     rng: Rng,
     /// Recent cut points and the step count until which they suppress new
     /// cutoffs nearby.
@@ -432,6 +444,7 @@ pub struct Sim {
     grid_items: Vec<u32>,
     grid_fill: Vec<u32>,
     cell_of: Vec<u32>,
+    contacts: Vec<(Contact, Contact)>,
     /// Counts changes to the centreline within a step, so the grid built
     /// for one pass can serve the next if the centreline has not moved.
     line_version: u64,
@@ -515,6 +528,7 @@ const CUT_COOLDOWN: u64 = 100;
 const FLOOD_RATE: f64 = 0.02;
 const BREACH_DIST: f64 = 2.5;
 const CHUTE_RATIO: f64 = 4.0;
+const CAPTURE_RATIO: f64 = 1.3;
 const OVERBANK: f64 = 0.3;
 const OXBOW_LIFETIME: f64 = 1200.0;
 /// Time over which the fill a flood brings into a lake settles, as the
@@ -556,6 +570,16 @@ const MIN_OXBOW_POINTS: usize = 3;
 /// a point comes within it.
 const REWORK_RADIUS: f64 = 0.1;
 
+/// Fill above which an oxbow lake no longer captures the channel: the clay
+/// plug has closed the route through it.
+pub const CAPTURE_FILL: f64 = 0.5;
+
+/// Length of the plug that seals each end of an oxbow soon after the cut,
+/// in channel widths. Bedload settles where flow into the old bend slows,
+/// so the ends close before the rest of the lake fills. The channel meeting
+/// a lake there opens no route through it.
+const END_PLUG: f64 = 3.0;
+
 /// Most cutoffs a single flood can make.
 const MAX_FLOOD_CUTS: usize = 4;
 
@@ -579,6 +603,11 @@ impl Cells {
         cy.wrapping_mul(self.stride).wrapping_add(cx) as usize & self.mask
     }
 }
+
+/// Where a lake's bank meets the channel's: the oxbow point, the nearest
+/// centreline point whose bank meets it, and the squared distance between
+/// them.
+type Contact = (usize, usize, f64);
 
 /// Whether segments `ab` and `cd` cross at a point interior to both.
 fn segments_cross(a: P, b: P, c: P, d: P) -> bool {
@@ -606,6 +635,7 @@ impl Sim {
             cutoffs: 0,
             floods: 0,
             flood_cutoffs: 0,
+            captures: 0,
             rng: Rng::new(seed),
             recent_cuts: Vec::new(),
             curv: Vec::new(),
@@ -617,6 +647,7 @@ impl Sim {
             grid_items: Vec::new(),
             grid_fill: Vec::new(),
             cell_of: Vec::new(),
+            contacts: Vec::new(),
             line_version: 0,
             grid_for: None,
         };
@@ -662,6 +693,7 @@ impl Sim {
         self.cutoffs = 0;
         self.floods = 0;
         self.flood_cutoffs = 0;
+        self.captures = 0;
     }
 
     /// Target point spacing Δs, in world units.
@@ -690,6 +722,9 @@ impl Sim {
         self.clamp_to_domain();
         self.line_version += 1;
         if self.cutoff() {
+            self.resample(ds);
+        }
+        if self.capture() {
             self.resample(ds);
         }
         // Floods arrive as a Poisson process, approximated per step.
@@ -1135,6 +1170,172 @@ impl Sim {
         false
     }
 
+    /// Take up one open oxbow lake whose banks meet the channel's at two
+    /// places, A upstream and B downstream, where the route through the lake
+    /// is shorter than the channel from A to B by more than `capture_ratio`.
+    /// The lake between A and B becomes channel, and the channel's route
+    /// becomes a new oxbow, as at a cutoff. Banks meet as at a neck cutoff,
+    /// within `cutoff_dist` times the mean of their widths. Each run of lake
+    /// points that meets the channel is one connection, and the lake between
+    /// two runs is the route through it, joined to the channel from the
+    /// last point of one run and the first of the next. Among the captures
+    /// that qualify, the one that shortens the river most for its length is
+    /// made, provided the new route crosses neither the rest of the channel
+    /// nor itself and turns less than a right angle at every point. A
+    /// sharper turn folds into a loop as the channel migrates. The ends of
+    /// the lake as cut off are plugged ([`END_PLUG`]), so the channel must
+    /// break into it elsewhere. Returns whether a capture was made.
+    fn capture(&mut self) -> bool {
+        let p = &self.params;
+        let (ratio, d_cut, k_sep) = (p.capture_ratio, p.cutoff_dist * p.width, p.cutoff_min_sep);
+        let n = self.centerline.len();
+        let open = |o: &Oxbow| o.is_lake() && o.fill < CAPTURE_FILL;
+        if ratio <= 0.0 || d_cut <= 0.0 || n < k_sep + 2 || !self.oxbows.iter().any(open) {
+            return false;
+        }
+        let ds = geom::length(&self.centerline) / (n - 1) as f64;
+        let plug = END_PLUG * self.params.width;
+        let g = self.build_grid((0.5 * d_cut * (self.max_width() + MAX_WIDTH)).max(self.params.width));
+        let (pts, widths) = (&self.centerline, &self.widths);
+        let mut runs = std::mem::take(&mut self.contacts);
+        // Captures that qualify, as (ratio, oxbow, A, B).
+        let mut found: Vec<(f64, usize, Contact, Contact)> = Vec::new();
+        for (oi, o) in self.oxbows.iter().enumerate().filter(|(_, o)| open(o)) {
+            runs.clear();
+            // The first and last contacts of the current run.
+            let mut run: Option<(Contact, Contact)> = None;
+            // Arc length along the oxbow as cut off.
+            let mut s = o.offset;
+            for (m, &q) in o.points.iter().enumerate() {
+                if m > 0 {
+                    s += dist(o.points[m - 1], q);
+                }
+                let mut meet: Option<Contact> = None;
+                if s < plug || s > o.length - plug {
+                    runs.extend(run.take());
+                    continue;
+                }
+                // The fixed upstream end, index 0, cannot be taken up.
+                self.for_neighbours_after(q, g, 0, |j| {
+                    let (d2, r) = (geom::dist2(q, pts[j]), 0.5 * d_cut * (widths[j] + o.widths[m]));
+                    if d2 < r * r && meet.is_none_or(|c| d2 < c.2) {
+                        meet = Some((m, j, d2));
+                    }
+                });
+                match meet {
+                    Some(c) => run = Some((run.map_or(c, |r| r.0), c)),
+                    None => runs.extend(run.take()),
+                }
+            }
+            runs.extend(run);
+            for pair in runs.windows(2) {
+                let (x, y) = (pair[0].1, pair[1].0);
+                let (a, b) = if x.1 < y.1 { (x, y) } else { (y, x) };
+                if b.1 - a.1 < k_sep || b.1 + 1 >= n {
+                    continue;
+                }
+                let (lo, hi) = (a.0.min(b.0), a.0.max(b.0));
+                let lake = a.2.sqrt() + geom::length(&o.points[lo..=hi]) + b.2.sqrt();
+                let r = (b.1 - a.1) as f64 * ds / lake.max(1e-9);
+                if r > ratio {
+                    found.push((r, oi, a, b));
+                }
+            }
+        }
+        self.contacts = runs;
+        found.sort_by(|x, y| y.0.total_cmp(&x.0));
+        for &(_, oi, a, b) in &found {
+            let route = self.capture_route(oi, a, b);
+            if self.near_recent(route[0])
+                || self.near_recent(route[route.len() - 1])
+                || self.route_turns_sharply(a.1, b.1, &route)
+                || self.route_crosses(a.1, b.1, &route)
+            {
+                continue;
+            }
+            self.apply_capture(oi, a, b);
+            return true;
+        }
+        false
+    }
+
+    /// The new channel from A to B through oxbow `oi`: A, the lake points
+    /// from A's contact to B's, and B.
+    fn capture_route(&self, oi: usize, a: Contact, b: Contact) -> Vec<P> {
+        let o = &self.oxbows[oi].points;
+        let mut route = vec![self.centerline[a.1]];
+        if a.0 <= b.0 {
+            route.extend_from_slice(&o[a.0..=b.0]);
+        } else {
+            route.extend(o[b.0..=a.0].iter().rev());
+        }
+        route.push(self.centerline[b.1]);
+        route
+    }
+
+    /// Whether `route`, replacing the channel between points `i` and `j`,
+    /// turns through a right angle or more at any point, including where it
+    /// joins the channel either side. Points that coincide are skipped.
+    fn route_turns_sharply(&self, i: usize, j: usize, route: &[P]) -> bool {
+        let pts = &self.centerline;
+        let mut prev: Option<P> = None;
+        let mut last = pts[i - 1];
+        for &q in route.iter().chain([&pts[j + 1]]) {
+            let d = [q[0] - last[0], q[1] - last[1]];
+            if d == [0.0, 0.0] {
+                continue;
+            }
+            if prev.is_some_and(|u| u[0] * d[0] + u[1] * d[1] <= 0.0) {
+                return true;
+            }
+            (prev, last) = (Some(d), q);
+        }
+        false
+    }
+
+    /// Whether `route`, replacing the channel between points `i` and `j`,
+    /// crosses the channel outside them or itself.
+    fn route_crosses(&self, i: usize, j: usize, route: &[P]) -> bool {
+        let pts = &self.centerline;
+        let n = pts.len();
+        route.windows(2).enumerate().any(|(k, s)| {
+            (0..n - 1).filter(|&c| c + 1 <= i || c >= j).any(|c| segments_cross(s[0], s[1], pts[c], pts[c + 1]))
+                || route[k + 2..].windows(2).any(|t| segments_cross(s[0], s[1], t[0], t[1]))
+        })
+    }
+
+    /// Take up oxbow `oi` between contacts `a` and `b`: the channel runs
+    /// through the lake from A to B, the lake's ends beyond them stay as
+    /// lakes, and the channel's old route becomes a new oxbow.
+    fn apply_capture(&mut self, oi: usize, a: Contact, b: Contact) {
+        let (i, j) = (a.1, b.1);
+        let route = self.capture_route(oi, a, b);
+        let o = self.oxbows.swap_remove(oi);
+        let (lo, hi) = (a.0.min(b.0), a.0.max(b.0));
+        let mut route_widths = vec![self.widths[i]];
+        if a.0 <= b.0 {
+            route_widths.extend_from_slice(&o.widths[lo..=hi]);
+        } else {
+            route_widths.extend(o.widths[lo..=hi].iter().rev());
+        }
+        route_widths.push(self.widths[j]);
+        // Each end left reaches the point now under the channel, as a piece
+        // the channel splits does.
+        for (s, e) in [(0, lo + 1), (hi, o.points.len())] {
+            if e - s >= MIN_OXBOW_POINTS {
+                let offset = o.offset + geom::length(&o.points[..=s]);
+                self.oxbows.push(Oxbow { points: o.points[s..e].to_vec(), widths: o.widths[s..e].to_vec(), offset, ..o });
+            }
+        }
+        let old = self.centerline[i..=j].to_vec();
+        let old_widths = self.widths[i..=j].to_vec();
+        self.centerline.splice(i + 1..j, route[1..route.len() - 1].iter().copied());
+        self.widths.splice(i + 1..j, route_widths[1..route_widths.len() - 1].iter().copied());
+        self.line_version += 1;
+        self.abandon(old, old_widths, route[2.min(route.len() - 1)]);
+        self.captures += 1;
+    }
+
     /// Remove the parts of oxbows the channel has reached, splitting an
     /// oxbow where the channel crosses it, and drop pieces too short to
     /// draw. The channel cuts an oxbow where its centreline crosses one of
@@ -1369,17 +1570,25 @@ impl Sim {
     /// oxbow.
     fn apply_cut(&mut self, i: usize, j: usize) {
         let loop_pts = self.centerline[i..=j].to_vec();
-        // Diversion angle at the upstream end, between the new channel,
-        // straight across to `j`, and the oxbow's first segment.
-        let (a, b, c) = (loop_pts[0], loop_pts[1], self.centerline[j]);
-        let (main, branch) = ([c[0] - a[0], c[1] - a[1]], [b[0] - a[0], b[1] - a[1]]);
-        let norms = (geom::dist2(a, c) * geom::dist2(a, b)).sqrt();
-        let entry = if norms > 0.0 { ((main[0] * branch[0] + main[1] * branch[1]) / norms).max(0.0) } else { 0.0 };
-        let mid = geom::lerp(self.centerline[i], self.centerline[j], 0.5);
         let loop_widths = self.widths[i..=j].to_vec();
+        let toward = self.centerline[j];
         self.centerline.drain(i + 1..j);
         self.widths.drain(i + 1..j);
         self.line_version += 1;
+        self.abandon(loop_pts, loop_widths, toward);
+    }
+
+    /// Abandon the reach along `loop_pts`, which the channel has left, as an
+    /// oxbow lake, where the new channel leaves its upstream end towards
+    /// `toward`.
+    fn abandon(&mut self, loop_pts: Vec<P>, loop_widths: Vec<f64>, toward: P) {
+        // Diversion angle at the upstream end, between the new channel and
+        // the oxbow's first segment.
+        let (a, b, c) = (loop_pts[0], loop_pts[1], toward);
+        let (main, branch) = ([c[0] - a[0], c[1] - a[1]], [b[0] - a[0], b[1] - a[1]]);
+        let norms = (geom::dist2(a, c) * geom::dist2(a, b)).sqrt();
+        let entry = if norms > 0.0 { ((main[0] * branch[0] + main[1] * branch[1]) / norms).max(0.0) } else { 0.0 };
+        let mid = geom::lerp(a, loop_pts[loop_pts.len() - 1], 0.5);
         self.oxbow_version += 1;
         self.erodibility.stamp_oxbow(&loop_pts, &loop_widths, 0.5 * self.params.width, self.time);
         self.absorb_oxbows(&loop_pts, &loop_widths);
@@ -1803,6 +2012,61 @@ mod tests {
         assert_eq!(piece.points, old[1..]);
         assert_eq!(piece.widths.len(), piece.points.len());
         assert!((piece.offset - 0.5 * w).abs() < 1e-9);
+    }
+
+    /// A channel along x with a bend 10 widths high between x = 110 and
+    /// 116 widths, and an open lake running straight across the bend's
+    /// mouth half a width below the channel, with its plugged ends beside
+    /// the channel either side.
+    fn bend_beside_a_lake() -> Sim {
+        let mut sim = sine_sim(0.0, 40.0);
+        (sim.params.cutoff_dist, sim.params.capture_ratio) = (1.0, 1.3);
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        let at = |x: f64, y: f64| [x * w, mid + y * w];
+        let mut pts: Vec<P> = (0..=20).map(|k| at(100.0 + 0.5 * k as f64, 0.0)).collect();
+        pts.extend((1..=20).map(|k| at(110.0, 0.5 * k as f64)));
+        pts.extend((1..=12).map(|k| at(110.0 + 0.5 * k as f64, 10.0)));
+        pts.extend((1..=20).map(|k| at(116.0, 10.0 - 0.5 * k as f64)));
+        pts.extend((1..=20).map(|k| at(116.0 + 0.5 * k as f64, 0.0)));
+        sim.centerline = pts;
+        sim.widths = vec![1.0; sim.centerline.len()];
+        sim.line_version += 1;
+        let lake: Vec<P> = (0..=30).map(|k| at(105.5 + 0.5 * k as f64, -0.5)).collect();
+        sim.oxbows.push(Oxbow::lake(lake, vec![1.0; 31], 0.0, 0.0));
+        sim
+    }
+
+    #[test]
+    fn channel_takes_up_an_open_lake_across_a_bend() {
+        let mut sim = bend_beside_a_lake();
+        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+        let before = geom::length(&sim.centerline);
+        assert!(sim.capture());
+        assert_eq!((sim.captures, sim.cutoffs), (1, 1));
+        assert_eq!(sim.widths.len(), sim.centerline.len());
+        assert!(sim.centerline.iter().all(|q| q[1] < mid + w), "the channel leaves the bend");
+        assert!(geom::length(&sim.centerline) < before - 15.0 * w);
+        assert!(!geom::self_intersects(&sim.centerline));
+        // The bend is the new lake; the old lake's middle is now channel.
+        let bend = sim.oxbows.last().unwrap();
+        assert!(bend.born == sim.time && bend.points.iter().any(|q| q[1] > mid + 9.0 * w));
+        let middle = [113.0 * w, mid - 0.5 * w];
+        assert!(sim.oxbows.iter().all(|o| o.points.iter().all(|&q| dist(q, middle) > 1.0)));
+        assert!(sim.centerline.iter().any(|&q| dist(q, middle) < 1e-9));
+    }
+
+    #[test]
+    fn a_plugged_lake_or_a_zero_ratio_does_not_capture() {
+        let mut sim = bend_beside_a_lake();
+        sim.oxbows[0].fill = CAPTURE_FILL;
+        assert!(!sim.capture(), "the clay plug has closed the route");
+        let mut sim = bend_beside_a_lake();
+        sim.params.capture_ratio = 0.0;
+        assert!(!sim.capture());
+        // Round the bend is 26 widths, and through the lake 6.4.
+        let mut sim = bend_beside_a_lake();
+        sim.params.capture_ratio = 5.0;
+        assert!(!sim.capture());
     }
 
     #[test]
