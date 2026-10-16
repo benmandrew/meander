@@ -84,6 +84,35 @@ const TREE_LIGHT = [150, 176, 108];
 // for each kind of mark, so the browser rasterises only the strips a tile
 // meets and a strip whose trees have not changed keeps its path data.
 const TREE_STRIP = 8;
+// Farmland: the old floodplain is cleared into fields wherever it has
+// grown to mature forest, the last of `FOREST`. Fields are clipped to that
+// ground, so the channel cuts them as it migrates and the young ground of
+// the meander belt stays wooded. Crowns in a crop parcel are not drawn on
+// farmland. They lie in strips across the valley,
+// `FIELD_STRIP` widths deep, each cut into parcels `FIELD_LENGTH` widths
+// long whose sides lean by up to `FIELD_LEAN` of the strip's depth. The
+// edges between strips bend at knots every `FIELD_KNOT` widths, by up to
+// `FIELD_BEND` widths either way, under half the shallowest strip so
+// edges never cross.
+const FIELD_STRIP = [5, 11];
+const FIELD_LENGTH = [4, 14];
+const FIELD_LEAN = 0.35;
+const FIELD_KNOT = [15, 35];
+const FIELD_BEND = 1.5;
+// Crops over the soil: pasture, young and ripe cereal, ploughed earth and
+// hay meadow. `WOODLAND` of the parcels stay as woods.
+const CROPS = [[146, 168, 104], [168, 182, 110], [212, 198, 138], [166, 146, 108], [184, 188, 128]];
+const CROP_OPACITY = 0.5;
+const WOODLAND = 0.12;
+const WOODS_OPACITY = 0.35;
+// Hedges along `HEDGE_EDGE` of the strip edges, between knots, and
+// `HEDGE_SIDE` of the parcel sides, `HEDGE_WIDTH` widths thick. Crowns
+// within `HEDGE_TREES` widths of a hedge stand in it as hedgerow trees.
+const HEDGE = [84, 108, 66];
+const HEDGE_EDGE = 0.85;
+const HEDGE_SIDE = 0.55;
+const HEDGE_WIDTH = 0.18;
+const HEDGE_TREES = 0.3;
 // Opacity of the marsh that stays on the clay plug of an old oxbow after
 // its lake and scar have gone, until the channel sweeps it away.
 const PLUG_MARSH = 0.25;
@@ -815,6 +844,10 @@ class SvgRenderer {
     this.forest = FOREST.flatMap(({ colour }) => Array.from(
       { length: FOREST_STEPS }, () => el('path', { fill: `rgb(${colour})` }, this.forestLayer)));
     this.forestAt = null;
+    // Fields lie over the forest, clipped to the mature forest's region.
+    const clip = el('clipPath', { id: 'farmland' }, el('defs', {}, ground));
+    this.farmland = el('path', { 'clip-rule': 'evenodd' }, clip);
+    this.fieldLayer = el('g', { 'clip-path': 'url(#farmland)' }, ground);
     // Scroll bars: one group for each age band, with one path for each
     // ridge, so trimming a ridge repaints only the ground around it.
     this.scrollLayer = el('g', round, ground);
@@ -899,8 +932,109 @@ class SvgRenderer {
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
     this.drawSoils(river, x, w, h, seed);
+    // The trees read the fields' parcels and hedges.
+    this.drawFields(river, x, w, h, seed);
     this.placeTrees(river, x, w, h, seed);
     this.drawWalls(river, x, w, h, seed);
+  }
+
+  // Lay out the fields over the valley floor in the window [x0, x0 + vw),
+  // with their hedges. They never change; the farmland clip does.
+  drawFields(river, x0, vw, h, seed) {
+    this.fieldLayer.replaceChildren();
+    const rand = random(seed ^ 0xf1e1d);
+    const w = river.get_param('width'), valley = river.get_param('valley_width') * w;
+    // The upland is farmed too, and shows faintly through its tint, so the
+    // fields meet the wandering scarp wherever it lies. The strip edges
+    // nearest the valley edges are straight, along the valley's line.
+    const [y0, y1] = [0, h];
+    const valleyEdges = valley > 0 && valley < h ? [0.5 * (h - valley), 0.5 * (h + valley)] : [];
+    const between = ([a, b]) => (a + (b - a) * rand()) * w;
+    const [xa, xb] = [x0 - FIELD_LENGTH[1] * w, x0 + vw + FIELD_LENGTH[1] * w];
+    // Strip edges as knots [x, y], straight along the valley walls.
+    const edge = (y, bend) => {
+      const knots = [];
+      for (let x = xa; ; x += between(FIELD_KNOT)) {
+        knots.push([Math.min(x, xb), y + bend * (2 * rand() - 1) * FIELD_BEND * w]);
+        if (x >= xb) return knots;
+      }
+    };
+    const ys = [y0], straight = new Set([y0, y1, ...valleyEdges]);
+    for (const end of [...valleyEdges, y1]) {
+      while (end - ys.at(-1) > (FIELD_STRIP[0] + FIELD_STRIP[1]) * w) ys.push(ys.at(-1) + between(FIELD_STRIP));
+      ys.push(end);
+    }
+    const edges = ys.map((y) => edge(y, straight.has(y) ? 0 : 1));
+    const yAt = (knots, x) => {
+      let k = 1;
+      while (k < knots.length - 1 && knots[k][0] < x) k++;
+      const [[ax, ay], [bx, by]] = [knots[k - 1], knots[k]];
+      return ay + (by - ay) * clamp01((x - ax) / (bx - ax));
+    };
+    // Knots of `knots` strictly between x = a and x = b, in that order.
+    const inner = (knots, a, b) => {
+      const pts = knots.filter(([x]) => x > Math.min(a, b) && x < Math.max(a, b));
+      return a < b ? pts : pts.reverse();
+    };
+    const xy = ([x, y]) => `${dp1(x)} ${dp1(y)}`;
+    // Crop parcels and hedge segments, for the trees to read.
+    this.crops = [];
+    this.hedges = [];
+    const hedge = (a, b) => this.hedges.push([a, b]);
+    // No hedge runs along the window's top and bottom edges.
+    for (const knots of edges.slice(1, -1)) {
+      for (let k = 1; k < knots.length; k++) {
+        if (rand() < HEDGE_EDGE) hedge(knots[k - 1], knots[k]);
+      }
+    }
+    const parcels = el('g', {}, this.fieldLayer);
+    for (let s = 0; s + 1 < edges.length; s++) {
+      const [top, bottom] = [edges[s], edges[s + 1]];
+      const depth = ys[s + 1] - ys[s];
+      const lean = (2 * rand() - 1) * FIELD_LEAN;
+      // Each side runs from (x, top) to (x + skew, bottom).
+      const side = (x) => [x, x + (lean + 0.1 * (2 * rand() - 1)) * depth];
+      let a = side(xa - between([0, FIELD_LENGTH[1]]));
+      while (a[0] < xb) {
+        const b = side(a[0] + between(FIELD_LENGTH));
+        const ring = [
+          [a[0], yAt(top, a[0])], ...inner(top, a[0], b[0]), [b[0], yAt(top, b[0])],
+          [b[1], yAt(bottom, b[1])], ...inner(bottom, b[1], a[1]), [a[1], yAt(bottom, a[1])],
+        ];
+        const woods = rand() < WOODLAND;
+        if (!woods) this.crops.push(ring);
+        el('path', {
+          d: `M${ring.map(xy).join('L')}Z`,
+          fill: `rgb(${woods ? FOREST.at(-1).colour : CROPS[Math.floor(rand() * CROPS.length)]})`,
+          'fill-opacity': woods ? WOODS_OPACITY : (CROP_OPACITY * (0.8 + 0.4 * rand())).toFixed(2),
+        }, parcels);
+        if (rand() < HEDGE_SIDE) hedge([b[0], yAt(top, b[0])], [b[1], yAt(bottom, b[1])]);
+        a = b;
+      }
+    }
+    el('path', {
+      d: this.hedges.map(([a, b]) => `M${xy(a)}L${xy(b)}`).join(''),
+      fill: 'none', 'stroke-linecap': 'round', stroke: `rgb(${HEDGE})`,
+      'stroke-width': dp1(HEDGE_WIDTH * w), 'stroke-opacity': 0.8,
+    }, this.fieldLayer);
+  }
+
+  // Whether a crown at (x, y) stands in a crop parcel, away from its hedges.
+  inCrop(x, y, w) {
+    const reach2 = (HEDGE_TREES * w) ** 2;
+    for (const [[ax, ay], [bx, by]] of this.hedges) {
+      const [dx, dy] = [bx - ax, by - ay];
+      const t = clamp01(((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy || 1));
+      if ((x - ax - t * dx) ** 2 + (y - ay - t * dy) ** 2 < reach2) return false;
+    }
+    return this.crops.some((ring) => {
+      let inside = false;
+      for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+        const [[xi, yi], [xj, yj]] = [ring[i], ring[j]];
+        if ((yi > y) !== (yj > y) && x < xi + (xj - xi) * (y - yi) / (yj - yi)) inside = !inside;
+      }
+      return inside;
+    });
   }
 
   // Draw the upland beyond each valley wall over the window [x0, x0 + vw),
@@ -1157,6 +1291,7 @@ class SvgRenderer {
         set(this.forest[k * FOREST_STEPS + s], 'd', contourData(blur, cols, rows, cell, c0, c1, level));
       }
     });
+    set(this.farmland, 'd', this.forest.at(-1).getAttribute('d'));
     this.drawTrees(blur, cols, rows, cell, shrub, forest, river.get_param('width'));
   }
 
@@ -1184,7 +1319,8 @@ class SvgRenderer {
           const a = turn + 2 * Math.PI * (k + 0.3 * rand()) / TREE_LOBES, off = 0.35 + 0.15 * rand();
           lobes.push([off * Math.cos(a), off * Math.sin(a), 0.5 + 0.2 * rand()]);
         }
-        this.treeStrips[s].crowns.push({ x: cx, y: cy, at: rand(), size: 0.6 + 0.4 * rand(), tone, lobes });
+        const crop = this.inCrop(cx, cy, w);
+        this.treeStrips[s].crowns.push({ x: cx, y: cy, at: rand(), size: 0.6 + 0.4 * rand(), tone, lobes, crop });
       }
     }
   }
@@ -1194,12 +1330,15 @@ class SvgRenderer {
   drawTrees(blur, cols, rows, cell, shrub, forest, w) {
     const [from, to] = [shrub + FOREST[1].at * forest, shrub + FOREST[2].at * forest];
     const grow = Math.max(1e-6, TREE_GROW * forest);
+    // Farmland's level, as in the clip of the fields.
+    const farm = shrub + FOREST.at(-1).at * forest;
     const light = this.treeKinds.length - 1;
     for (const { crowns, paths } of this.treeStrips) {
       const d = paths.map(() => []);
       for (const c of crowns) {
         const i = Math.floor(c.x / cell), j = Math.floor(c.y / cell);
         if (i < 0 || i >= cols || j < 0 || j >= rows) continue;
+        if (c.crop && blur[j * cols + i] > farm) continue;
         const start = from + c.at * (to - from);
         const r = TREE_RADIUS * w * c.size * clamp01((blur[j * cols + i] - start) / grow);
         if (r < TREE_MIN * w) continue;
