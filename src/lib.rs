@@ -5,6 +5,7 @@
 //! its normal at a rate given by the Howard–Knutson (1984) upstream-weighted
 //! curvature kernel, smooths, and cuts off any loop whose neck has closed.
 
+pub mod crevasse;
 pub mod field;
 pub mod geom;
 pub mod ips;
@@ -19,6 +20,7 @@ use field::{Erodibility, Flood, Ground};
 use land::Land;
 use rng::Rng;
 use walls::Walls;
+pub use crevasse::SplayMark;
 pub use tributary::Tributary;
 pub use wood::Jam;
 
@@ -222,6 +224,20 @@ pub struct Params {
     /// the deepest combe, falling to nothing [`TRIBUTARY_REACH`] widths
     /// downstream: the tributary's bedload feeds the bars.
     pub tributary_boost: f64,
+    /// Fall from the levee crest to the ground [`SPLAY_PROBE`] widths
+    /// beyond it, in channel depths, at which a flood of magnitude 1
+    /// breaches an outer bank and lays a crevasse splay. A flood of
+    /// magnitude u needs a fall of `crevasse_drop / u`. 0 disables.
+    pub crevasse_drop: f64,
+    /// Length of the splay laid by a flood of magnitude 1, in channel
+    /// widths.
+    pub splay_length: f64,
+    /// The channel avulses through a breach when it finds a route through
+    /// low ground that rejoins it downstream and is shorter than the
+    /// channel between by more than this factor. 0 disables.
+    pub avulsion_ratio: f64,
+    /// Least flood magnitude whose breach can avulse.
+    pub avulsion_flood: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -303,6 +319,10 @@ impl Default for Params {
             fan_radius: FAN_RADIUS,
             fan_time: FAN_TIME,
             tributary_boost: TRIBUTARY_BOOST,
+            crevasse_drop: CREVASSE_DROP,
+            splay_length: SPLAY_LENGTH,
+            avulsion_ratio: AVULSION_RATIO,
+            avulsion_flood: AVULSION_FLOOD,
             physics: true,
             friction,
             aspect,
@@ -373,6 +393,10 @@ impl Params {
         "fan_radius",
         "fan_time",
         "tributary_boost",
+        "crevasse_drop",
+        "splay_length",
+        "avulsion_ratio",
+        "avulsion_flood",
         "physics",
         "friction",
         "aspect",
@@ -439,6 +463,10 @@ impl Params {
             "fan_radius" => &mut self.fan_radius,
             "fan_time" => &mut self.fan_time,
             "tributary_boost" => &mut self.tributary_boost,
+            "crevasse_drop" => &mut self.crevasse_drop,
+            "splay_length" => &mut self.splay_length,
+            "avulsion_ratio" => &mut self.avulsion_ratio,
+            "avulsion_flood" => &mut self.avulsion_flood,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -563,10 +591,16 @@ pub struct Sim {
     pub flood_cutoffs: u64,
     /// Oxbow lakes the channel has taken up (included in `cutoffs`).
     pub captures: u64,
+    /// Avulsions through a crevasse (included in `cutoffs`).
+    pub avulsions: u64,
     /// Jams of large wood against the banks.
     pub jams: Vec<Jam>,
     /// Tributaries entering from the deeper combes, with their fans.
     pub tributaries: Vec<Tributary>,
+    /// Crevasse splays laid by recent floods.
+    pub splays: Vec<SplayMark>,
+    /// Counts changes to `splays`.
+    pub splay_version: u64,
     /// Counts slumps from the valley walls, so a renderer can redraw the
     /// walls after bluff erosion.
     pub wall_version: u64,
@@ -574,6 +608,9 @@ pub struct Sim {
     /// Draws for the floodplain's events (falling wood), from a
     /// stream of their own so they leave the river's draws unchanged.
     events: Rng,
+    /// Magnitude of the last step's flood, whose levee breach is still to
+    /// be found.
+    breach: Option<f64>,
     /// Recent cut points and the step count until which they suppress new
     /// cutoffs nearby.
     recent_cuts: Vec<(P, u64)>,
@@ -766,6 +803,9 @@ pub const JAM_REACH: f64 = 3.0;
 const JAM_MERGE: f64 = 4.0;
 /// Most jams at once.
 const MAX_JAMS: usize = 40;
+/// Factor by which a jam of full size raises the chance of a breach
+/// beside it, as it backs the flood up behind it.
+const JAM_CREVASSE: f64 = 2.0;
 /// Default bluff erosion; see [`Params`]. Valley sides of terrace gravel
 /// and bedrock erode a few times slower than the floodplain.
 const BLUFF_RATE: f64 = 0.05;
@@ -795,6 +835,39 @@ const FAN_HEIGHT: f64 = 0.6;
 pub const TRIBUTARY_REACH: f64 = 30.0;
 /// Steps between searches for each tributary's confluence.
 const JUNCTION_EVERY: u64 = 10;
+/// Default crevasse splays and avulsion; see [`Params`].
+const CREVASSE_DROP: f64 = 0.15;
+const SPLAY_LENGTH: f64 = 8.0;
+const AVULSION_RATIO: f64 = 2.5;
+const AVULSION_FLOOD: f64 = 0.75;
+/// Distance beyond the bank, in channel widths, at which a breach reads
+/// the ground the flood falls to.
+const SPLAY_PROBE: f64 = 4.0;
+/// Cosine of the half-angle a splay spreads through, 35°.
+const SPLAY_SPREAD: f64 = 0.82;
+/// Sand a flood of magnitude 1 lays at a splay's apex, in channel depths.
+const SPLAY_SAND: f64 = 0.3;
+/// Time a splay is kept for drawing, as vegetation grows over it.
+pub const SPLAY_LIFE: f64 = 300.0;
+/// Farthest along the valley an avulsion's route reaches from its breach,
+/// in channel widths.
+const AVULSION_REACH: f64 = 40.0;
+/// Width of a new channel cut by avulsion, in multiples of the reference
+/// width. It widens as the flow takes it.
+const AVULSION_WIDTH: f64 = 0.7;
+/// Cost of crossing ground in an avulsion's search, per unit length: the
+/// floor, and the rise per channel depth of ground above a fresh lake
+/// bed. Old channels and lakes draw the flow.
+const AVULSION_BASE: f32 = 0.5;
+const AVULSION_RISE: f32 = 4.0;
+/// Points either side of an avulsion's route that are smoothed into it, so
+/// it joins the channel without a sharp turn.
+const AVULSION_JOIN: usize = 6;
+/// Smoothing passes over an avulsion's route.
+const AVULSION_SMOOTH: usize = 40;
+/// Distance either side of a pinch, as a fraction of `pinch_length`,
+/// which an avulsion's route keeps out of.
+const PINCH_CLEAR: f64 = 0.5;
 
 /// Longest chute a flood can cut, in channel widths.
 pub const CHUTE_CHORD: f64 = 5.0;
@@ -880,11 +953,15 @@ impl Sim {
             floods: 0,
             flood_cutoffs: 0,
             captures: 0,
+            avulsions: 0,
             jams: Vec::new(),
             tributaries: Vec::new(),
+            splays: Vec::new(),
+            splay_version: 0,
             wall_version: 0,
             rng: Rng::new(seed),
             events: Rng::new(seed ^ EVENTS_SEED),
+            breach: None,
             recent_cuts: Vec::new(),
             curv: Vec::new(),
             rate: Vec::new(),
@@ -912,6 +989,7 @@ impl Sim {
     pub fn reset(&mut self, seed: u64, noise: f64) {
         self.rng = Rng::new(seed);
         self.events = Rng::new(seed ^ EVENTS_SEED);
+        self.breach = None;
         let [w, h] = self.bounds;
         let line = vec![[0.0, h / 2.0], [w, h / 2.0]];
         let mut pts = resample(&line, self.ds());
@@ -948,7 +1026,10 @@ impl Sim {
         self.floods = 0;
         self.flood_cutoffs = 0;
         self.captures = 0;
+        self.avulsions = 0;
         self.jams.clear();
+        self.splays.clear();
+        self.splay_version += 1;
         self.wall_version += 1;
         self.place_tributaries();
         self.land = Land::new(&self.erodibility, seed);
@@ -1031,6 +1112,12 @@ impl Sim {
             self.resample(ds);
             self.track();
         }
+        if let Some(u) = self.breach.take()
+            && self.crevasse(u)
+        {
+            self.resample(ds);
+            self.track();
+        }
         // Floods arrive as a Poisson process, approximated per step.
         if self.params.flood_rate > 0.0 && self.rng.uniform() < self.params.flood_rate * self.params.dt {
             self.floods += 1;
@@ -1058,6 +1145,9 @@ impl Sim {
                 young: p.vegetation_time,
             };
             self.erodibility.flood(&self.centerline, &self.widths, &flood);
+            // The flood breaks its levees in the next step, three months
+            // on, so the deposit and the breach do not share a step.
+            self.breach = Some(magnitude);
             self.fill_lakes(magnitude);
             self.add_scrolls();
         }
@@ -1076,6 +1166,7 @@ impl Sim {
         let s = self.land_settings();
         self.land.tick(&self.erodibility, &self.centerline, &self.widths, &self.valley, &s, phase);
         self.recruit_wood();
+        self.age_splays();
         self.rework_oxbows();
         // Clearance fills lakes faster with the fine sediment it washes in.
         let supply = self.supply();
@@ -2521,7 +2612,7 @@ mod tests {
         // The same flood, before and after clearance.
         let run = |time: f64| {
             let mut sim = sine_sim(0.0, 40.0);
-            (sim.params.flood_rate, sim.time) = (1.0 / sim.params.dt, time);
+            (sim.params.flood_rate, sim.params.crevasse_drop, sim.time) = (1.0 / sim.params.dt, 0.0, time);
             sim.step();
             let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
             [1.5, 5.0].map(|y| sim.erodibility.deposit_at([100.0 * w, mid + y * w]))

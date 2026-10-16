@@ -106,6 +106,27 @@ pub struct Flood {
     pub young: f64,
 }
 
+/// A crevasse splay: a lobe of sand a flood spreads through a breach in
+/// the levee. Lengths are in world units.
+pub struct Splay {
+    /// Where the lobe starts, on the far side of the levee.
+    pub apex: P,
+    /// Unit vector out through the breach.
+    pub dir: P,
+    /// Cosine of the half-angle the lobe spreads through.
+    pub spread: f64,
+    /// Length of the lobe.
+    pub length: f64,
+    /// Sand laid at the apex, in channel depths, thinning to nothing at
+    /// the lobe's edge.
+    pub sand: f64,
+    /// Flood level above fresh point-bar sand, in channel depths.
+    pub stage: f64,
+    /// Growth of mature forest. Old floodplain, whose growth is infinite,
+    /// is buried from this.
+    pub mature: f64,
+}
+
 /// Erodibility multiplier on a grid. Built from noise at reset. Cells the
 /// channel crosses are reset to bare sand with no growth, and their
 /// multiplier moves from the bar factor to the shrub factor as vegetation
@@ -504,6 +525,36 @@ impl Erodibility {
         }
     }
 
+    /// Lay a crevasse splay: sand that thins from the apex to the lobe's
+    /// edge, filling no higher than the flood level, and buries the
+    /// vegetation under it, wholly at the apex and not at all at the edge.
+    /// Returns the cells it covered.
+    pub fn splay(&mut self, s: &Splay) -> usize {
+        let (mut count, c) = (0, self.cell);
+        let [x0, y0, x1, y1] = self.disc(s.apex, s.length);
+        for y in y0..=y1 {
+            let dy = (y as f64 + 0.5) * c - s.apex[1];
+            for x in x0..=x1 {
+                let (dx, i) = ((x as f64 + 0.5) * c - s.apex[0], y * self.cols + x);
+                let d = (dx * dx + dy * dy).sqrt();
+                let cos = if d > 0.0 { (dx * s.dir[0] + dy * s.dir[1]) / d } else { 1.0 };
+                if d >= s.length || cos < s.spread {
+                    continue;
+                }
+                // Thinning along the lobe and towards its flanks. A lake
+                // bed lies below the flood level, so it has room for more.
+                let across = ((cos - s.spread) / (1.0 - s.spread).max(1e-9)).min(1.0);
+                let t = (1.0 - d / s.length) * across.sqrt();
+                let h = &mut self.deposit[i];
+                let room = if s.stage > 0.0 { (1.0 - *h as f64 / s.stage).max(0.0) } else { 0.0 };
+                *h += (s.sand * t * room) as f32;
+                self.growth[i] = self.growth[i].min(s.mature as f32) * (1.0 - t) as f32;
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Mark cells within `half` times the width at each point (`widths`,
     /// one per point) as cut off at `time`, with the bed `LAKE_DEPTH` below
     /// fresh bar level.
@@ -714,6 +765,23 @@ mod tests {
         assert!(back > 0.5 * full && back < full, "builds halfway back: {back} of {full}");
         e.grow_cone(apex, 5.0, 0.0, 0.0, 1.0);
         assert_eq!(e.coarse[e.index(toe)], back, "a cone never lowers the ground");
+    }
+
+    #[test]
+    fn a_splay_buries_vegetation_in_a_lobe() {
+        let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
+        e.growth.fill(500.0);
+        let s = Splay { apex: [10.0, 20.0], dir: [1.0, 0.0], spread: 0.8, length: 10.0, sand: 0.3, stage: 0.25, mature: 500.0 };
+        assert!(e.splay(&s) > 50);
+        let (near, far, behind, flank) = ([11.25, 20.25], [18.75, 20.25], [8.25, 20.25], [12.25, 26.25]);
+        assert!(e.growth_at(near) < 100.0 && e.deposit_at(near) > 0.15, "buried under sand at the apex");
+        assert!(e.growth_at(far) > 400.0 && e.deposit_at(far) < 0.05, "thin at the edge");
+        assert_eq!(e.growth_at(behind), 500.0, "nothing behind the breach");
+        assert_eq!(e.growth_at(flank), 500.0, "nothing outside the lobe");
+        assert!(e.deposit_at(near) <= 0.25, "no higher than the flood level");
+        e.growth.fill(f32::INFINITY);
+        e.splay(&s);
+        assert!(e.growth_at(near) < 100.0, "old floodplain is buried too");
     }
 
     #[test]

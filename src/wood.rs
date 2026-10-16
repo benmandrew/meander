@@ -165,4 +165,11 @@ impl Sim {
             *rate -= push * s.clamp(-1.0, 1.0);
         }
     }
+
+    /// Strength of the strongest jam within [`JAM_REACH`] widths along the
+    /// channel of point `i`.
+    pub(crate) fn jam_near(&self, i: usize) -> f64 {
+        let (r, life) = (self.reach_points(JAM_REACH), self.params.jam_lifetime);
+        self.jams.iter().filter(|j| j.at.abs_diff(i) <= r).fold(0.0, |m, j| m.max(j.strength(self.time, life)))
+    }
 }
