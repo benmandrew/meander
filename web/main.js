@@ -38,6 +38,9 @@ const LEVEE = [216, 210, 166];
 const LEVEE_LEVELS = [0.3, 0.7];
 // Simulated time between levee redraws when no flood has come.
 const LEVEE_REFRESH = 10;
+// Opacity of the marsh that stays on the clay plug of an old oxbow after
+// its lake and scar have gone, until the channel sweeps it away.
+const PLUG_MARSH = 0.25;
 // Scroll bars: ridges of fresh sand that vegetation colonises first, so
 // they darken against the bar as they age. They are kept in this many age
 // bands, each one path element.
@@ -623,6 +626,11 @@ class SvgRenderer {
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
     this.leveeAt = null;
+    // Every clay plug the channel has not swept away keeps a faint marsh,
+    // so old meander belts stay legible after their scars fade.
+    this.plugMarsh = el('path', { fill: MARSH, 'fill-opacity': PLUG_MARSH, 'fill-rule': 'evenodd' }, ground);
+    this.plugAt = null;
+    this.plugBlur = null;
     // Oxbow scars lie over the whole ground, under the channel. They change
     // slowly, so they sit at the top of the ground layer, not in the top
     // layer that is redrawn whenever the river moves.
@@ -665,6 +673,7 @@ class SvgRenderer {
     this.lastBar = null;
     this.window = [x, w];
     this.leveeAt = null;
+    this.plugAt = null;
     this.scrollAt = null;
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
@@ -716,6 +725,7 @@ class SvgRenderer {
       if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
     }
     if (local.showLevees) this.drawLevees(river, memory);
+    this.drawPlugs(river, memory);
     if (local.showScrolls) this.drawScrolls(river, memory, w);
 
     river.sync();
@@ -835,6 +845,42 @@ class SvgRenderer {
     LEVEE_LEVELS.forEach((f, k) => {
       this.levees[k].setAttribute('d', top > 0 ? contourData(deposit, cols, rows, cell, c0, c1, f * top) : '');
     });
+  }
+
+  // Draw the clay plug marsh after each cutoff, and every `LEVEE_REFRESH`
+  // of simulated time as the channel sweeps it away. The plug grid is
+  // blurred over 3 × 3 cells first, so its outline follows the lake's
+  // curve instead of the cell edges.
+  drawPlugs(river, memory) {
+    const t = river.time(), cutoffs = river.cutoffs();
+    const last = this.plugAt;
+    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    this.plugAt = { cutoffs, t };
+    river.sync_plugs();
+    const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
+    const plugs = new Float32Array(memory.buffer, river.plugs_ptr(), cols * rows);
+    if (this.plugBlur?.length !== cols * rows) this.plugBlur = new Float32Array(cols * rows);
+    const blur = this.plugBlur;
+    const [x, vw] = this.window;
+    const c0 = Math.max(0, Math.floor(x / cell) - 1);
+    const c1 = Math.min(cols, Math.ceil((x + vw) / cell) + 1);
+    for (let j = 0; j < rows; j++) {
+      for (let i = c0; i < c1; i++) {
+        let sum = 0, count = 0;
+        for (let dj = -1; dj <= 1; dj++) {
+          const jj = j + dj;
+          if (jj < 0 || jj >= rows) continue;
+          for (let di = -1; di <= 1; di++) {
+            const ii = i + di;
+            if (ii < 0 || ii >= cols) continue;
+            sum += plugs[jj * cols + ii];
+            count++;
+          }
+        }
+        blur[j * cols + i] = sum / count;
+      }
+    }
+    set(this.plugMarsh, 'd', contourData(blur, cols, rows, cell, c0, c1, 0.5));
   }
 
   // Draw the scroll bars in age bands when they change, and every
