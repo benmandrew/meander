@@ -53,6 +53,23 @@ const BANDS = 24;
 const CAP_STEPS = 8;
 // Fraction of its length a lake loses from each end over its lifetime.
 const PLUG = 0.4;
+// Widest local channel width, as in the core's `MAX_WIDTH`.
+const MAX_WIDTH = 2;
+// Length, as a multiple of the lake's half-width, that a plugged end's cap
+// grows by over the lake's lifetime, so plugged ends stay blunt.
+const PLUG_TIP = 0.5;
+// Shortest lake piece drawn, in channel widths. The channel leaves short
+// pieces where it cuts across a lake, which would show as scattered dashes.
+const MIN_LAKE = 3;
+// A lake point beside the channel, with less than `ALONGSIDE_GAP` widths of
+// bank between their water and running within about 45° of parallel to
+// it, is drawn dry. A channel that has migrated along an old lake would
+// otherwise show it as a second bank beside its own. Points within
+// `ALONGSIDE_END` widths of either end of a piece keep their water, so a
+// lake still joins the channel at a cut.
+const ALONGSIDE_GAP = 0.5;
+const ALONGSIDE_COS = 0.7;
+const ALONGSIDE_END = 2;
 // A centreline is kept once some part of it has moved this many widths from
 // the last kept one, so the swept area has no gaps.
 const BAR_STEP = 0.5;
@@ -203,12 +220,13 @@ function blobData(rand, cx, cy, rx, ry) {
 // `half` by the old banks. The depth is `level` less the bed's rise, which
 // is `relief` × 4 × (height − 0.5) for the land heights in `heights`, plus
 // the flood silt in `silts` above its mean over the lake's interior points;
-// the mean is part of the fill that sets `level`. Where
-// the bed rises above the water the lake splits into pools, one subpath
-// each, and the parabola gives each pool a round tip there. A plugged end
-// is a round cap when young, lengthening with `age` in [0, 1] to a crescent
-// tip. An end cut by the channel stays a round cap, hidden under the water.
-function lakeData(pts, heights, silts, widths, start, end, from, to, half, level, relief, age) {
+// the mean is part of the fill that sets `level`. Points marked in `dry`,
+// if given, hold no water. Where the bed rises above the water the lake
+// splits into pools, one subpath each, and the parabola gives each pool a
+// round tip there. A plugged end is a round cap when young, lengthening by
+// `PLUG_TIP` times the half-width with `age` in [0, 1]. An end cut by the
+// channel stays a round cap, hidden under the water.
+function lakeData(pts, heights, silts, widths, start, end, from, to, half, level, relief, age, dry) {
   const m = end - start;
   if (m < 2 || level <= 0) return '';
   let mean = 0;
@@ -221,7 +239,7 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
   // The end points lie under the channel at a cut, swept clear of silt.
   for (let k = 0; k < m; k++) {
     const extra = k > 0 && k < m - 1 ? silts[start + k] - silt : 0;
-    depth[k] = level - 4 * relief * (heights[start + k] - 0.5) - extra;
+    depth[k] = dry?.[k] ? -level : level - 4 * relief * (heights[start + k] - 0.5) - extra;
   }
   for (let k = 1; k < m; k++) {
     const i = 2 * (start + k);
@@ -288,7 +306,7 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
       if (at !== a && at !== b) return { len: wide, cap: false };
       const [jj, uu] = locate(at, 0);
       const r = width(jj, uu, depthAt(jj, uu));
-      return { len: plugged ? r * (1 + 3 * age) : r, cap: true };
+      return { len: plugged ? r * (1 + PLUG_TIP * age) : r, cap: true };
     };
     const [ea, eb] = [end(u0, from > 0), end(v0, to < s[m - 1])];
     const fit = Math.min(1, (v0 - u0) / (ea.len + eb.len));
@@ -420,6 +438,45 @@ function cropped(line, x0, x1) {
   return { d: runs.map((r) => 'M' + r[0] + 'L' + r.slice(1).join(' ')).join(''), pts: kept };
 }
 
+// Arc length of points [start, end) of a flat x, y array.
+function pieceLength(pts, start, end) {
+  let len = 0;
+  for (let i = start + 1; i < end; i++) len += Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
+  return len;
+}
+
+// Lake points [start, end) of a flat x, y array that lie beside the
+// channel, as a mask by index into the piece, or null if there are none,
+// and a key that changes when the mask does. See `ALONGSIDE_GAP`.
+// `oxWidths` is in multiples of the reference width `w` and `widths` in
+// world units; `channel` is a grid of the channel points `line`, with its
+// `frame`.
+function alongside(pts, oxWidths, start, end, line, widths, frame, channel, w) {
+  const m = end - start;
+  let dry = null, key = 0, s = 0;
+  const ends = ALONGSIDE_END * w, total = pieceLength(pts, start, end);
+  for (let k = 1; k < m - 1; k++) {
+    const i = start + k;
+    s += Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
+    if (s < ends || total - s < ends) continue;
+    const [x, y] = [pts[2 * i], pts[2 * i + 1]];
+    const j = channel.nearest(x, y, channel.size);
+    if (j < 0) continue;
+    const c = j >> 1;
+    const gap = Math.hypot(line[j] - x, line[j + 1] - y) - 0.5 * (widths[c] + w * oxWidths[i]);
+    if (gap > ALONGSIDE_GAP * w) continue;
+    // Unit tangents: the lake's by central difference, the channel's from
+    // its left normal.
+    const tx = pts[2 * i + 2] - pts[2 * i - 2], ty = pts[2 * i + 3] - pts[2 * i - 1];
+    const cos = (tx * frame.ny[c] - ty * frame.nx[c]) / (Math.hypot(tx, ty) || 1);
+    if (Math.abs(cos) < ALONGSIDE_COS) continue;
+    dry ??= new Uint8Array(m);
+    dry[k] = 1;
+    key = (31 * key + k) | 0;
+  }
+  return { dry, key };
+}
+
 // Points of a flat x, y array hashed into square cells of side `size`.
 // Hashed grid of points, filled by counting sort into flat arrays. Cells
 // along a row hash to consecutive buckets, so the three cells around a
@@ -459,6 +516,26 @@ class Grid {
       if (this.scan(start[b], start[e], x, y, r2) || this.scan(0, start[b + 3 - e], x, y, r2)) return true;
     }
     return false;
+  }
+
+  // Offset in `pts` of the point nearest (x, y) within `r` (at most
+  // `size`), or −1 if there is none.
+  nearest(x, y, r) {
+    const cx = Math.floor(x / this.size), cy = Math.floor(y / this.size);
+    const { start, mask, items, pts } = this;
+    let [best, bestD] = [-1, r * r];
+    const scan = (lo, hi) => {
+      for (let m = lo; m < hi; m++) {
+        const k = items[m], dx = pts[k] - x, dy = pts[k + 1] - y, d = dx * dx + dy * dy;
+        if (d <= bestD) [best, bestD] = [k, d];
+      }
+    };
+    for (let j = cy - 1; j <= cy + 1; j++) {
+      const b = this.bucket(cx - 1, j), e = Math.min(b + 3, mask + 1);
+      scan(start[b], start[e]);
+      scan(0, start[b + 3 - e]);
+    }
+    return best;
   }
 
   // Whether any point in items [lo, hi) lies within √r2 of (x, y).
@@ -633,6 +710,9 @@ class SvgRenderer {
     const frame = channelFrame(line);
     const waterRuns = channelRuns(line, widths, frame, 0.5);
     const bankRuns = channelRuns(line, widths, frame, 0.65);
+    // Channel points, to find lake points beside it.
+    const reach = (MAX_WIDTH + ALONGSIDE_GAP) * w;
+    const channel = new Grid(line, reach);
 
     this.record(line, river.time(), w, local);
     this.drawBars(river.time(), w, local);
@@ -642,8 +722,8 @@ class SvgRenderer {
     // only over the last fifth of its fill, then a marshy scar that fades
     // out. Both plugs and banks advance steadily as it fills, and the water
     // drains first from where the land is high or floods have laid the most
-    // silt, splitting the lake into pools. The reed fringe grows inwards, so it does not hide the
-    // narrowing.
+    // silt, splitting the lake into pools. The reed fringe grows inwards, so
+    // it does not hide the narrowing.
     resize(this.scars, n, this.scarLayer);
     resize(this.lakes, n, this.lakeLayer);
     resize(this.reeds, n, this.reedLayer);
@@ -663,9 +743,10 @@ class SvgRenderer {
         set(scar, 'd', pathData(oxPts, oxOff[k], oxOff[k + 1]));
       }
       set(scar, 'stroke-width', dp1(wm));
-      const fade = 1 - smoothstep(oxScar[k] / scarLife);
+      const sliver = pieceLength(oxPts, oxOff[k], oxOff[k + 1]) < MIN_LAKE * w;
+      const fade = sliver ? 0 : 1 - smoothstep(oxScar[k] / scarLife);
       set(scar, 'stroke-opacity', (0.45 * smoothstep(age) * fade).toFixed(2));
-      if (age >= 1) {
+      if (age >= 1 || sliver) {
         // Elements are matched to oxbows by index, so a lake can come back
         // to this element when the channel splits or drops an oxbow before
         // it. Forget its inputs, or it would stay blank.
@@ -688,11 +769,12 @@ class SvgRenderer {
       // Floods and the channel change the silt without reshaping the oxbow.
       let silt = 0;
       for (let i = oxOff[k]; i < oxOff[k + 1]; i++) silt += oxSilt[i];
-      const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief}`;
+      const { dry, key } = alongside(oxPts, oxWidth, oxOff[k], oxOff[k + 1], line, widths, frame, channel, w);
+      const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief} ${key}`;
       if (lake.inputs !== inputs) {
         lake.inputs = inputs;
         const d = lakeData(oxPts, oxHeight, oxSilt, oxWidth, oxOff[k], oxOff[k + 1], from, to,
-          0.5 * w * inset, level, local.oxbowRelief, age);
+          0.5 * w * inset, level, local.oxbowRelief, age, dry);
         set(lake, 'd', d);
         set(reed, 'd', d);
       }
