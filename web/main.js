@@ -44,6 +44,15 @@ const LEVEE_REFRESH = 10;
 const RIDGE = [238, 230, 196];
 const OLD_RIDGE = [146, 158, 108];
 const SCROLL_BANDS = 6;
+// The channel's edge: a thin line of bank on both sides, `BANK_EDGE` times
+// the local width from the centreline, and the wet sand of the point bar
+// on the inside of a bend, up to `BAR_RIM` widths more at a bend of radius
+// `BAR_RADIUS` widths. The outer bank is cut, so vegetation meets the
+// water there.
+const BANK_EDGE = 0.53;
+const BAR_RIM = 0.45;
+const BAR_RADIUS = 3;
+const WET_SAND = [190, 170, 120];
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -125,17 +134,18 @@ function channelFrame(pts) {
 }
 
 // Closed path data for the channel over points [start, end), out to
-// `scale` times the local width either side: one bank forwards, the other
-// back. At a bend tighter than that, the inner bank stops just short of the
-// centre of the bend, so it cannot fold over itself.
-function channelData(pts, widths, frame, scale, start, end) {
+// `scale` times the local width either side, plus `bar[i]` on the inside of
+// the bend if `bar` is given: one bank forwards, the other back. At a bend
+// tighter than that, the inner bank stops just short of the centre of the
+// bend, so it cannot fold over itself.
+function channelData(pts, widths, frame, scale, bar, start, end) {
   if (end - start < 2) return '';
   const { nx, ny, curv } = frame;
   const left = [], right = [];
   for (let i = start; i < end; i++) {
-    const h = scale * widths[i], k = curv[i];
-    const hl = k > 0 ? Math.min(h, 0.95 / k) : h;
-    const hr = k < 0 ? Math.min(h, -0.95 / k) : h;
+    const h = scale * widths[i], k = curv[i], b = bar ? bar[i] : 0;
+    const hl = k > 0 ? Math.min(h + b, 0.95 / k) : h;
+    const hr = k < 0 ? Math.min(h + b, -0.95 / k) : h;
     const [x, y] = [pts[2 * i], pts[2 * i + 1]];
     left.push(dp1(x + hl * nx[i]) + ' ' + dp1(y + hl * ny[i]));
     right.push(dp1(x - hr * nx[i]) + ' ' + dp1(y - hr * ny[i]));
@@ -145,13 +155,30 @@ function channelData(pts, widths, frame, scale, start, end) {
 
 // Channel outlines in runs of `RUN` segments, each overlapping its
 // neighbours by a segment so no seam shows between them.
-function channelRuns(pts, widths, frame, scale) {
+function channelRuns(pts, widths, frame, scale, bar = null) {
   const n = pts.length / 2;
   const runs = [];
   for (let s = 0; s < n - 1; s += RUN) {
-    runs.push(channelData(pts, widths, frame, scale, Math.max(0, s - 1), Math.min(n, s + RUN + 2)));
+    runs.push(channelData(pts, widths, frame, scale, bar, Math.max(0, s - 1), Math.min(n, s + RUN + 2)));
   }
   return runs;
+}
+
+// Width of the wet sand of the point bar beyond the inner bank at each
+// point, in world units: `BAR_RIM` widths at a bend of radius `BAR_RADIUS`
+// widths or tighter, falling to nothing on a straight reach. The curvature
+// is smoothed along the river first, so the bar does not flicker with the
+// point-to-point noise in it.
+function barRim(frame, w) {
+  const { curv } = frame;
+  const n = curv.length;
+  let k = Float64Array.from(curv, Math.abs);
+  for (let pass = 0; pass < 4; pass++) {
+    const prev = k;
+    k = new Float64Array(n);
+    for (let i = 0; i < n; i++) k[i] = 0.25 * prev[Math.max(0, i - 1)] + 0.5 * prev[i] + 0.25 * prev[Math.min(n - 1, i + 1)];
+  }
+  return k.map((c) => BAR_RIM * w * smoothstep(c * w * BAR_RADIUS));
 }
 
 // Path data for points [start, end) of a flat x, y array.
@@ -605,7 +632,7 @@ class SvgRenderer {
     // Both are filled outlines at the local width, which a stroke cannot vary.
     // Every lake's reed fringe lies under the water of all of them, so lakes
     // that meet join as one body of water.
-    this.bank = el('g', { fill: '#b8a678' }, svg);
+    this.bank = el('g', { fill: `rgb(${WET_SAND})` }, svg);
     this.reedLayer = el('g', { fill: 'none', 'stroke-linejoin': 'round', stroke: REEDS }, svg);
     this.lakeLayer = el('g', {}, svg);
     this.water = el('g', { fill: `rgb(${WATER})` }, svg);
@@ -709,7 +736,7 @@ class SvgRenderer {
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
     const frame = channelFrame(line);
     const waterRuns = channelRuns(line, widths, frame, 0.5);
-    const bankRuns = channelRuns(line, widths, frame, 0.65);
+    const bankRuns = channelRuns(line, widths, frame, BANK_EDGE, barRim(frame, w));
     // Channel points, to find lake points beside it.
     const reach = (MAX_WIDTH + ALONGSIDE_GAP) * w;
     const channel = new Grid(line, reach);
