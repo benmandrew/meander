@@ -120,7 +120,12 @@ enum Task {
     /// Let holdings take the open ground in `Land::free`.
     Accrete,
     /// Search out from a holding's farmstead; see [`Land::contest`].
-    Contest { h: usize, margin: f32, slack: f32, only: Option<u32> },
+    Contest {
+        h: usize,
+        margin: f32,
+        slack: f32,
+        only: Option<u32>,
+    },
     /// Divide a holding between heirs if it has grown too large.
     Divide(usize),
     /// Fit a holding's box, and lay out its fields again if forced or its
@@ -190,7 +195,11 @@ impl Land {
             version: 0,
             reorganisations: 0,
             open: vec![false; n],
-            rough: field.noise.iter().map(|&v| (1.0 + ROUGHNESS * (2.0 * v - 1.0)).max(0.2)).collect(),
+            rough: field
+                .noise
+                .iter()
+                .map(|&v| (1.0 + ROUGHNESS * (2.0 * v - 1.0)).max(0.2))
+                .collect(),
             dist: vec![f32::INFINITY; n],
             channel: Vec::new(),
             free: Vec::new(),
@@ -212,7 +221,10 @@ impl Land {
     }
 
     fn centre(&self, i: usize) -> P {
-        [((i % self.cols) as f64 + 0.5) * self.cell, ((i / self.cols) as f64 + 0.5) * self.cell]
+        [
+            ((i % self.cols) as f64 + 0.5) * self.cell,
+            ((i / self.cols) as f64 + 0.5) * self.cell,
+        ]
     }
 
     /// Number of live holdings.
@@ -223,7 +235,14 @@ impl Land {
     /// Run a whole survey and all the work it leads to at once, founding
     /// the first farmsteads if there are none. `valley` holds the valley
     /// floor's y range at each grid column.
-    pub fn update(&mut self, field: &Erodibility, line: &[P], widths: &[f64], valley: &[(f64, f64)], s: &Settings) {
+    pub fn update(
+        &mut self,
+        field: &Erodibility,
+        line: &[P],
+        widths: &[f64],
+        valley: &[(f64, f64)],
+        s: &Settings,
+    ) {
         for phase in 0..SURVEY_STEPS {
             self.survey(field, line, widths, valley, s, phase);
         }
@@ -233,7 +252,15 @@ impl Land {
     /// One step's share of the work: the survey's work for step `phase` of
     /// its [`SURVEY_STEPS`], then up to [`BUDGET`] cells of searching, or
     /// one other task.
-    pub fn tick(&mut self, field: &Erodibility, line: &[P], widths: &[f64], valley: &[(f64, f64)], s: &Settings, phase: u64) {
+    pub fn tick(
+        &mut self,
+        field: &Erodibility,
+        line: &[P],
+        widths: &[f64],
+        valley: &[(f64, f64)],
+        s: &Settings,
+        phase: u64,
+    ) {
         self.survey(field, line, widths, valley, s, phase);
         self.work(s, BUDGET);
     }
@@ -244,7 +271,15 @@ impl Land {
     /// runs from the last band, setting each row's flood risk, handing back
     /// ground the water has taken, and listing open ground no holding has,
     /// for the accretion that ends the survey.
-    fn survey(&mut self, field: &Erodibility, line: &[P], widths: &[f64], valley: &[(f64, f64)], s: &Settings, phase: u64) {
+    fn survey(
+        &mut self,
+        field: &Erodibility,
+        line: &[P],
+        widths: &[f64],
+        valley: &[(f64, f64)],
+        s: &Settings,
+        phase: u64,
+    ) {
         let p = phase as usize;
         let rows = self.rows;
         let band = |k: usize| (k * rows / BANDS, (k + 1) * rows / BANDS);
@@ -333,7 +368,11 @@ impl Land {
 
     fn backward(&mut self, valley: &[(f64, f64)], s: &Settings, y0: usize, y1: usize) {
         let (cols, rows, c) = (self.cols, self.rows, self.cell);
-        let (per_cell, fade, diag) = (c / (RISK_LENGTH * s.width), WALL_FADE * s.width, std::f32::consts::SQRT_2);
+        let (per_cell, fade, diag) = (
+            c / (RISK_LENGTH * s.width),
+            WALL_FADE * s.width,
+            std::f32::consts::SQRT_2,
+        );
         for y in (y0..y1).rev() {
             let wy = (y as f64 + 0.5) * c;
             for x in (0..cols).rev() {
@@ -389,7 +428,12 @@ impl Land {
                     self.version += done as u64;
                     done
                 }
-                Task::Contest { h, margin, slack, only } => {
+                Task::Contest {
+                    h,
+                    margin,
+                    slack,
+                    only,
+                } => {
                     if !self.searching {
                         self.seed_contest(h);
                     }
@@ -427,7 +471,11 @@ impl Land {
         for (k, slot) in self.holdings.iter().enumerate() {
             if let Some(h) = slot {
                 let i = self.index(h.seat);
-                let when = if self.owner[i] != k as u32 || self.risk[i] > FLEE_RISK { f64::NEG_INFINITY } else { h.next };
+                let when = if self.owner[i] != k as u32 || self.risk[i] > FLEE_RISK {
+                    f64::NEG_INFINITY
+                } else {
+                    h.next
+                };
                 if when <= s.time && due.is_none_or(|(t, _)| when < t) {
                     due = Some((when, k));
                 }
@@ -463,7 +511,12 @@ impl Land {
             x.next = next;
         }
         self.tasks.extend([
-            Task::Contest { h, margin: MARGIN, slack: SLACK, only: None },
+            Task::Contest {
+                h,
+                margin: MARGIN,
+                slack: SLACK,
+                only: None,
+            },
             Task::Divide(h),
             Task::LayOut(h, moved),
             Task::Done,
@@ -479,7 +532,12 @@ impl Land {
     fn steps(&self, i: usize, cw: f32, out: &mut [(usize, f32); 8]) -> usize {
         let (cols, rows, open) = (self.cols, self.rows, &self.open);
         let (x, y) = (i % cols, i / cols);
-        let (l, r, u, d) = (x > 0 && open[i - 1], x + 1 < cols && open[i + 1], y > 0 && open[i - cols], y + 1 < rows && open[i + cols]);
+        let (l, r, u, d) = (
+            x > 0 && open[i - 1],
+            x + 1 < cols && open[i + 1],
+            y > 0 && open[i - cols],
+            y + 1 < rows && open[i + cols],
+        );
         let diag = cw * std::f32::consts::SQRT_2;
         let mut n = 0;
         let mut add = |ok: bool, j: usize, len: f32| {
@@ -528,7 +586,11 @@ impl Land {
 
     /// Give cell `i` to holding `h`, from whichever holding had it.
     fn claim(&mut self, i: usize, h: u32, cost: f32) {
-        if let Some(g) = self.holdings.get_mut(self.owner[i] as usize).and_then(Option::as_mut) {
+        if let Some(g) = self
+            .holdings
+            .get_mut(self.owner[i] as usize)
+            .and_then(Option::as_mut)
+        {
             g.area -= 1;
         }
         self.owner[i] = h;
@@ -558,7 +620,12 @@ impl Land {
                 continue;
             }
             let (x, y) = (f % cols, f / cols);
-            for (ok, j) in [(x > 0, f.wrapping_sub(1)), (x + 1 < cols, f + 1), (y > 0, f.wrapping_sub(cols)), (f + cols < n, f + cols)] {
+            for (ok, j) in [
+                (x > 0, f.wrapping_sub(1)),
+                (x + 1 < cols, f + 1),
+                (y > 0, f.wrapping_sub(cols)),
+                (f + cols < n, f + cols),
+            ] {
                 if ok && self.owner[j] != NONE && self.cost[j] < self.best[j] {
                     self.push(j, self.cost[j], self.owner[j]);
                 }
@@ -573,7 +640,9 @@ impl Land {
     fn accrete(&mut self, cw: f32, budget: &mut usize) -> bool {
         let mut out = [(0, 0.0); 8];
         while *budget > 0 {
-            let Some(Reverse((bits, i))) = self.heap.pop() else { return true };
+            let Some(Reverse((bits, i))) = self.heap.pop() else {
+                return true;
+            };
             let (i, c) = (i as usize, f32::from_bits(bits));
             if c > self.best[i] || !self.open[i] {
                 continue;
@@ -611,21 +680,34 @@ impl Land {
     /// holding's cost by the fraction `margin` and `slack` widths. Each cell
     /// it holds is costed afresh. Returns whether it has finished.
     #[allow(clippy::too_many_arguments)]
-    fn contest(&mut self, h: usize, margin: f32, slack: f32, only: Option<u32>, limit: f32, cw: f32, budget: &mut usize) -> bool {
+    fn contest(
+        &mut self,
+        h: usize,
+        margin: f32,
+        slack: f32,
+        only: Option<u32>,
+        limit: f32,
+        cw: f32,
+        budget: &mut usize,
+    ) -> bool {
         if self.holdings[h].is_none() {
             return true;
         }
         let me = h as u32;
         let mut out = [(0, 0.0); 8];
         while *budget > 0 {
-            let Some(Reverse((bits, i))) = self.heap.pop() else { return true };
+            let Some(Reverse((bits, i))) = self.heap.pop() else {
+                return true;
+            };
             let (i, c) = (i as usize, f32::from_bits(bits));
             if c > self.best[i] || c > limit || !self.open[i] {
                 continue;
             }
             *budget -= 1;
             let o = self.owner[i];
-            let take = o == me || o == NONE || (only.is_none_or(|g| g == o) && c * (1.0 + margin) + slack < self.cost[i]);
+            let take = o == me
+                || o == NONE
+                || (only.is_none_or(|g| g == o) && c * (1.0 + margin) + slack < self.cost[i]);
             if !take {
                 continue;
             }
@@ -645,7 +727,10 @@ impl Land {
     }
 
     fn add(&mut self, seat: P, s: &Settings) -> usize {
-        let (x, y) = ((seat[0] / self.cell) as usize, (seat[1] / self.cell) as usize);
+        let (x, y) = (
+            (seat[0] / self.cell) as usize,
+            (seat[1] / self.cell) as usize,
+        );
         let holding = Holding {
             seat,
             axis: [1.0, 0.0],
@@ -692,7 +777,10 @@ impl Land {
                 continue;
             }
             let p = self.centre(i);
-            if seats.iter().all(|q| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) >= gap * gap) {
+            if seats
+                .iter()
+                .all(|q| (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2) >= gap * gap)
+            {
                 seats.push(p);
             }
         }
@@ -714,7 +802,11 @@ impl Land {
         let key = |i: usize| {
             let (p, r) = (self.centre(i), self.risk[i]);
             let d2 = (p[0] - seat[0]).powi(2) + (p[1] - seat[1]).powi(2);
-            if r <= SEAT_RISK { (0, d2) } else { (1, r as f64) }
+            if r <= SEAT_RISK {
+                (0, d2)
+            } else {
+                (1, r as f64)
+            }
         };
         self.boxed(h)
             .filter(|&i| self.owner[i] == me && self.risk[i] < FLEE_RISK)
@@ -746,11 +838,19 @@ impl Land {
         if (area as f64) <= DIVIDE * self.target(s).0 {
             return;
         }
-        let far = self.boxed(h).filter(|&i| self.owner[i] == me && self.risk[i] <= SEAT_RISK).max_by(|&a, &b| self.cost[a].total_cmp(&self.cost[b]));
+        let far = self
+            .boxed(h)
+            .filter(|&i| self.owner[i] == me && self.risk[i] <= SEAT_RISK)
+            .max_by(|&a, &b| self.cost[a].total_cmp(&self.cost[b]));
         let Some(i) = far else { return };
         let k = self.add(self.centre(i), s);
         self.tasks.push_front(Task::LayOut(k, true));
-        self.tasks.push_front(Task::Contest { h: k, margin: 0.0, slack: 0.0, only: Some(me) });
+        self.tasks.push_front(Task::Contest {
+            h: k,
+            margin: 0.0,
+            slack: 0.0,
+            only: Some(me),
+        });
     }
 
     /// Fit holding `h`'s box to its cells, then set its axis to its longest
@@ -780,7 +880,13 @@ impl Land {
         let (mx, my) = (sx / n, sy / n);
         let (a, d, c) = (sxx / n - mx * mx, syy / n - my * my, sxy / n - mx * my);
         let lambda = 0.5 * (a + d) + (0.25 * (a - d) * (a - d) + c * c).sqrt();
-        let v = if c.abs() > 1e-9 { [lambda - d, c] } else if a >= d { [1.0, 0.0] } else { [0.0, 1.0] };
+        let v = if c.abs() > 1e-9 {
+            [lambda - d, c]
+        } else if a >= d {
+            [1.0, 0.0]
+        } else {
+            [0.0, 1.0]
+        };
         let len = (v[0] * v[0] + v[1] * v[1]).sqrt();
         let axis = [v[0] / len, v[1] / len];
         let seed = (self.rng.next_u64() >> 40) as u32;
@@ -812,7 +918,13 @@ mod tests {
     }
 
     fn settings(time: f64) -> Settings {
-        Settings { time, width: 1.0, holding_area: 200.0, reorganise_time: 60.0, grazing_time: 100.0 }
+        Settings {
+            time,
+            width: 1.0,
+            holding_area: 200.0,
+            reorganise_time: 60.0,
+            grazing_time: 100.0,
+        }
     }
 
     fn seat_y(land: &Land, o: u32) -> f64 {
@@ -830,7 +942,11 @@ mod tests {
             let (o, y) = (land.owner[i], (i / land.cols) as f64 * 0.5 + 0.25);
             assert_eq!(o == NONE, !land.open[i], "every open cell is held");
             if o != NONE {
-                assert_eq!(y < 30.0, seat_y(&land, o) < 30.0, "a holding stays on its own side");
+                assert_eq!(
+                    y < 30.0,
+                    seat_y(&land, o) < 30.0,
+                    "a holding stays on its own side"
+                );
             }
         }
         for h in land.holdings.iter().flatten() {
@@ -848,14 +964,31 @@ mod tests {
         let mut busy = 0;
         for k in 1..=steps {
             let before = land.reorganisations;
-            land.tick(&field, &line, &widths, &walls, &settings(k as f64 * dt), k % SURVEY_STEPS);
-            assert!(land.reorganisations - before <= 1, "one reorganisation begins in a step at most");
+            land.tick(
+                &field,
+                &line,
+                &widths,
+                &walls,
+                &settings(k as f64 * dt),
+                k % SURVEY_STEPS,
+            );
+            assert!(
+                land.reorganisations - before <= 1,
+                "one reorganisation begins in a step at most"
+            );
             busy += !land.tasks.is_empty() as u32;
         }
         let expected = count * steps as f64 * dt / 60.0;
         let ratio = land.reorganisations as f64 / expected;
-        assert!((0.8..1.25).contains(&ratio), "{} reorganisations, {expected:.0} expected", land.reorganisations);
-        assert!((busy as f64) < 0.8 * steps as f64, "the queue keeps up: busy {busy} of {steps} steps");
+        assert!(
+            (0.8..1.25).contains(&ratio),
+            "{} reorganisations, {expected:.0} expected",
+            land.reorganisations
+        );
+        assert!(
+            (busy as f64) < 0.8 * steps as f64,
+            "the queue keeps up: busy {busy} of {steps} steps"
+        );
     }
 
     #[test]
@@ -867,7 +1000,12 @@ mod tests {
         // leaves behind grows over.
         let moved: Vec<P> = line.iter().map(|p| [p[0], 34.0]).collect();
         for y in 0..=8 {
-            field.sweep(&line.iter().map(|p| [p[0], 30.0 + 0.5 * y as f64]).collect::<Vec<_>>());
+            field.sweep(
+                &line
+                    .iter()
+                    .map(|p| [p[0], 30.0 + 0.5 * y as f64])
+                    .collect::<Vec<_>>(),
+            );
         }
         land.update(&field, &moved, &widths, &walls, &settings(1.0));
         for g in field.growth.iter_mut().filter(|g| **g == 0.0) {
@@ -878,7 +1016,10 @@ mod tests {
         for x in 0..land.cols {
             let o = land.owner[land.index([x as f64 * 0.5 + 0.25, 32.25])];
             assert_ne!(o, NONE);
-            assert!(seat_y(&land, o) < 30.0, "the south bank's holdings take the bar");
+            assert!(
+                seat_y(&land, o) < 30.0,
+                "the south bank's holdings take the bar"
+            );
         }
     }
 
@@ -897,7 +1038,10 @@ mod tests {
             })
             .collect();
         field.stamp_oxbow(&ring, &vec![1.0; ring.len()], 0.5, 0.0);
-        let still = Settings { reorganise_time: 1e9, ..settings(1.0) };
+        let still = Settings {
+            reorganise_time: 1e9,
+            ..settings(1.0)
+        };
         land.update(&field, &line, &widths, &walls, &still);
         assert_eq!(land.owner[inside], before);
     }

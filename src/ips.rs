@@ -68,6 +68,9 @@ mod tests {
         }
         // u_b = (U/2)(Ω Cw + Γ ⟨Cw⟩), with w = 1 and U = 1.
         let closed = 0.5 * (omega * curv(s) + gamma * mean);
-        assert!((u - closed).abs() < 1e-3 * closed.abs().max(0.1), "ode {u}, closed form {closed}");
+        assert!(
+            (u - closed).abs() < 1e-3 * closed.abs().max(0.1),
+            "ode {u}, closed form {closed}"
+        );
     }
 }

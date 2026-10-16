@@ -16,14 +16,14 @@ pub mod tributary;
 pub mod walls;
 pub mod wood;
 
-use geom::{P, curvature, dist, resample, right_normal};
-use field::{Erodibility, Flood, Ground};
-use land::Land;
-use rng::Rng;
-use walls::Walls;
 pub use crevasse::SplayMark;
+use field::{Erodibility, Flood, Ground};
+use geom::{P, curvature, dist, resample, right_normal};
+use land::Land;
 pub use mills::Mill;
+use rng::Rng;
 pub use tributary::Tributary;
+use walls::Walls;
 pub use wood::Jam;
 
 /// Point spacing as a fraction of the channel width.
@@ -537,7 +537,8 @@ impl Params {
             },
         }
         if self.physics {
-            (self.omega, self.gamma, self.alpha) = ips::coefficients(self.friction, self.aspect, self.froude, self.scour);
+            (self.omega, self.gamma, self.alpha) =
+                ips::coefficients(self.friction, self.aspect, self.froude, self.scour);
         }
         true
     }
@@ -575,7 +576,17 @@ impl Oxbow {
     /// cut off at `born`.
     pub fn lake(points: Vec<P>, widths: Vec<f64>, born: f64, entry: f64) -> Self {
         let length = geom::length(&points);
-        Self { points, widths, born, length, offset: 0.0, fill: 0.0, settling: 0.0, filled_at: f64::INFINITY, entry }
+        Self {
+            points,
+            widths,
+            born,
+            length,
+            offset: 0.0,
+            fill: 0.0,
+            settling: 0.0,
+            filled_at: f64::INFINITY,
+            entry,
+        }
     }
 
     pub fn is_lake(&self) -> bool {
@@ -703,12 +714,25 @@ fn smoothstep(t: f64) -> f64 {
 /// narrowing smoothly to `pinch` at each of `pinches` over `length` either
 /// side, and the fraction of the way from `pinch` to the full width it has
 /// widened, which is 1 away from the pinches.
-fn valley_at(x: f64, height: f64, valley: f64, pinches: &[f64], pinch: f64, length: f64) -> (f64, f64) {
-    let full = if valley > 0.0 { valley.min(height) } else { height };
+fn valley_at(
+    x: f64,
+    height: f64,
+    valley: f64,
+    pinches: &[f64],
+    pinch: f64,
+    length: f64,
+) -> (f64, f64) {
+    let full = if valley > 0.0 {
+        valley.min(height)
+    } else {
+        height
+    };
     if pinch <= 0.0 || pinch >= full || length <= 0.0 {
         return (full, 1.0);
     }
-    let d = pinches.iter().fold(f64::INFINITY, |d, &px| d.min((x - px).abs()));
+    let d = pinches
+        .iter()
+        .fold(f64::INFINITY, |d, &px| d.min((x - px).abs()));
     let f = smoothstep(d / length);
     (pinch + (full - pinch) * f, f)
 }
@@ -997,7 +1021,10 @@ struct Cells {
 
 impl Cells {
     fn cell(&self, p: P) -> (i64, i64) {
-        ((p[0] / self.size).floor() as i64, (p[1] / self.size).floor() as i64)
+        (
+            (p[0] / self.size).floor() as i64,
+            (p[1] / self.size).floor() as i64,
+        )
     }
 
     /// Cells along a row hash to consecutive buckets, so the three cells
@@ -1133,7 +1160,13 @@ impl Sim {
         self.land = Land::new(&self.erodibility, seed);
         self.read_valley();
         let s = self.land_settings();
-        self.land.update(&self.erodibility, &self.centerline, &self.widths, &self.valley, &s);
+        self.land.update(
+            &self.erodibility,
+            &self.centerline,
+            &self.widths,
+            &self.valley,
+            &s,
+        );
     }
 
     /// The valley floor's y range at `x`, between the feet of the walls,
@@ -1146,7 +1179,14 @@ impl Sim {
             return (0.0, h);
         }
         let (width, f) = if pinched {
-            valley_at(x, h, p.valley_width * p.width, &self.pinches, p.pinch_width * p.width, p.pinch_length * p.width)
+            valley_at(
+                x,
+                h,
+                p.valley_width * p.width,
+                &self.pinches,
+                p.pinch_width * p.width,
+                p.pinch_length * p.width,
+            )
         } else {
             ((p.valley_width * p.width).min(h), 1.0)
         };
@@ -1160,7 +1200,8 @@ impl Sim {
         let cell = self.erodibility.cell;
         let mut valley = std::mem::take(&mut self.valley);
         valley.clear();
-        valley.extend((0..self.erodibility.cols).map(|x| self.floor((x as f64 + 0.5) * cell, false)));
+        valley
+            .extend((0..self.erodibility.cols).map(|x| self.floor((x as f64 + 0.5) * cell, false)));
         self.valley = valley;
     }
 
@@ -1184,7 +1225,11 @@ impl Sim {
     pub fn sinuosity(&self) -> f64 {
         let pts = &self.centerline;
         let chord = dist(pts[0], pts[pts.len() - 1]);
-        if chord > 0.0 { geom::length(pts) / chord } else { 1.0 }
+        if chord > 0.0 {
+            geom::length(pts) / chord
+        } else {
+            1.0
+        }
     }
 
     pub fn step_n(&mut self, n: usize) {
@@ -1218,7 +1263,9 @@ impl Sim {
             self.track();
         }
         // Floods arrive as a Poisson process, approximated per step.
-        if self.params.flood_rate > 0.0 && self.rng.uniform() < self.params.flood_rate * self.params.dt {
+        if self.params.flood_rate > 0.0
+            && self.rng.uniform() < self.params.flood_rate * self.params.dt
+        {
             self.floods += 1;
             let magnitude = self.rng.uniform();
             self.flush_jams(magnitude);
@@ -1247,7 +1294,8 @@ impl Sim {
                 young: p.vegetation_time,
                 boost: &self.boost,
             };
-            self.erodibility.flood(&self.centerline, &self.widths, &flood);
+            self.erodibility
+                .flood(&self.centerline, &self.widths, &flood);
             // The flood breaks its levees in the next step, three months
             // on, so the deposit and the breach do not share a step.
             self.breach = Some(magnitude);
@@ -1260,21 +1308,36 @@ impl Sim {
         let (p, rows) = (&self.params, self.erodibility.rows as u64);
         let band = self.steps % GROWTH_EVERY;
         let (y0, y1) = (band * rows / GROWTH_EVERY, (band + 1) * rows / GROWTH_EVERY);
-        self.erodibility.grow_rows(GROWTH_EVERY as f64 * p.dt, p.vegetation_height, y0 as usize, y1 as usize);
+        self.erodibility.grow_rows(
+            GROWTH_EVERY as f64 * p.dt,
+            p.vegetation_height,
+            y0 as usize,
+            y1 as usize,
+        );
         self.feed_tributaries();
         let phase = self.steps % land::SURVEY_STEPS;
         if phase == 0 {
             self.read_valley();
         }
         let s = self.land_settings();
-        self.land.tick(&self.erodibility, &self.centerline, &self.widths, &self.valley, &s, phase);
+        self.land.tick(
+            &self.erodibility,
+            &self.centerline,
+            &self.widths,
+            &self.valley,
+            &s,
+            phase,
+        );
         self.recruit_wood();
         self.found_mill();
         self.age_splays();
         self.rework_oxbows();
         // Clearance fills lakes faster with the fine sediment it washes in.
         let supply = self.supply();
-        let (time, rate) = (self.time, supply * self.params.dt / self.params.oxbow_lifetime.max(1e-9));
+        let (time, rate) = (
+            self.time,
+            supply * self.params.dt / self.params.oxbow_lifetime.max(1e-9),
+        );
         // A lake fills at least as far as the silt on its bed, read every
         // step: the channel changes it between floods by sweeping some of
         // its cells, and applying that only at the next flood would change
@@ -1352,7 +1415,11 @@ impl Sim {
     fn erode_bluffs(&mut self) {
         let p = &self.params;
         let (w, n) = (p.width, self.centerline.len());
-        if p.bluff_rate <= 0.0 || p.valley_width <= 0.0 || p.edge_margin <= 0.0 || self.rate.len() != n {
+        if p.bluff_rate <= 0.0
+            || p.valley_width <= 0.0
+            || p.edge_margin <= 0.0
+            || self.rate.len() != n
+        {
             return;
         }
         let k = p.bluff_rate * p.dt * p.erodibility;
@@ -1369,22 +1436,27 @@ impl Sim {
             let off = r.signum() * (0.5 * self.widths[i] + BANK_BEYOND) * w;
             let bank = q[1] + off * nrm[1];
             let floor = self.floor(q[0], false);
-            let (side, gap, room) =
-                if toward < 0.0 { (0, bank - floor.0, floor.0) } else { (1, floor.1 - bank, h - floor.1) };
+            let (side, gap, room) = if toward < 0.0 {
+                (0, bank - floor.0, floor.0)
+            } else {
+                (1, floor.1 - bank, h - floor.1)
+            };
             let short = 1.0 - smoothstep(gap / margin);
             if short <= 0.0 {
                 continue;
             }
             let xw = q[0] / w;
             let limit = (self.walls.retreat(side, xw) + room / w - BLUFF_ROOM).min(BLUFF_MAX);
-            self.cuts.push((side, xw, k * r.abs() * toward.abs() * short * short, limit));
+            self.cuts
+                .push((side, xw, k * r.abs() * toward.abs() * short * short, limit));
         }
         for c in 0..self.cuts.len() {
             let (side, xw, amount, limit) = self.cuts[c];
             if let Some(x) = self.walls.erode(side, xw, amount, limit) {
                 let floor = self.floor(x * w, false);
                 let foot = [x * w, if side == 0 { floor.0 } else { floor.1 }];
-                self.erodibility.grow_cone(foot, SLUMP_RADIUS * w, SLUMP_HEIGHT, SLUMP_COARSE, 1.0);
+                self.erodibility
+                    .grow_cone(foot, SLUMP_RADIUS * w, SLUMP_HEIGHT, SLUMP_COARSE, 1.0);
                 self.wall_version += 1;
             }
         }
@@ -1411,7 +1483,13 @@ impl Sim {
 
     /// Resample the centreline to spacing close to `ds`.
     fn resample(&mut self, ds: f64) {
-        geom::resample_with(&self.centerline, &self.widths, ds, &mut self.tmp, &mut self.wtmp);
+        geom::resample_with(
+            &self.centerline,
+            &self.widths,
+            ds,
+            &mut self.tmp,
+            &mut self.wtmp,
+        );
         std::mem::swap(&mut self.centerline, &mut self.tmp);
         std::mem::swap(&mut self.widths, &mut self.wtmp);
         self.line_version += 1;
@@ -1445,7 +1523,8 @@ impl Sim {
         let floor = self.floor(q[0], true);
         let side = sign * (0.5 * self.widths[i] + BANK_BEYOND) * p.width;
         let bank = [q[0] + side * nrm[0], q[1] + side * nrm[1]];
-        edge_taper(bank, self.bounds, p.edge_margin * p.width, floor) * self.erodibility.at(bank, ground)
+        edge_taper(bank, self.bounds, p.edge_margin * p.width, floor)
+            * self.erodibility.at(bank, ground)
     }
 
     /// Widen each bend by a flood of magnitude `u`, in proportion to its
@@ -1459,7 +1538,8 @@ impl Sim {
         let ground = self.ground();
         for i in 1..n - 1 {
             let r = self.rate[i];
-            let e = self.bank_erodibility(i, right_normal(&self.centerline, i), r.signum(), &ground);
+            let e =
+                self.bank_erodibility(i, right_normal(&self.centerline, i), r.signum(), &ground);
             self.widths[i] = (self.widths[i] + k * e * r.abs()).clamp(MIN_WIDTH, MAX_WIDTH);
         }
     }
@@ -1474,7 +1554,11 @@ impl Sim {
         // Hickin–Nanson saturation: migration grows with w/r for gentle
         // bends, peaks at r = peak_radius·w, and falls for tighter bends.
         // c / (1 + (c/c0)²) peaks at c0 = 1/peak_radius.
-        let c0 = if p.peak_radius > 0.0 { 1.0 / p.peak_radius } else { f64::INFINITY };
+        let c0 = if p.peak_radius > 0.0 {
+            1.0 / p.peak_radius
+        } else {
+            f64::INFINITY
+        };
         for c in &mut self.curv {
             let cw = *c * p.width;
             *c = cw / (1.0 + (cw / c0).powi(2));
@@ -1507,7 +1591,11 @@ impl Sim {
         self.slope.extend((0..n).map(|i| {
             let (a, b) = (i.saturating_sub(k), (i + k).min(n - 1));
             let arc = (b - a) as f64 * spacing;
-            if arc > 0.0 { (dist(pts[a], pts[b]) / arc).clamp(1e-3, 1.0) } else { 1.0 }
+            if arc > 0.0 {
+                (dist(pts[a], pts[b]) / arc).clamp(1e-3, 1.0)
+            } else {
+                1.0
+            }
         }));
         // `powf` is a software routine in WASM, so the default exponent of
         // one half takes the square root, an instruction.
@@ -1533,7 +1621,11 @@ impl Sim {
         let limit = p.max_step * SPACING * p.width;
         let ground = self.ground();
         // Width lost per step to bar push towards the reference width.
-        let relax = if p.width_time > 0.0 { (p.dt / p.width_time).min(1.0) } else { 1.0 };
+        let relax = if p.width_time > 0.0 {
+            (p.dt / p.width_time).min(1.0)
+        } else {
+            1.0
+        };
 
         // Noise smoothed along the river by a forward and a backward
         // exponential filter, with correlation length `jitter_scale`, then
@@ -1582,7 +1674,11 @@ impl Sim {
             let (b, target) = (self.widths[i], self.target[i]);
             let demand = held * scale * self.rate[i].abs();
             let (pull, push) = ((e * demand).min(limit), (p.bar_push * demand).min(limit));
-            self.wtmp[i] = if p.width_time > 0.0 { b + (pull - push) / p.width - (b - target) * relax } else { 1.0 };
+            self.wtmp[i] = if p.width_time > 0.0 {
+                b + (pull - push) / p.width - (b - target) * relax
+            } else {
+                1.0
+            };
         }
         std::mem::swap(&mut self.centerline, &mut self.tmp);
         // Smooth the width along the river, with the ends held at 1.
@@ -1608,7 +1704,8 @@ impl Sim {
         for i in 1..n.saturating_sub(1) {
             let free = self.held.get(i).copied().unwrap_or(1.0);
             for d in 0..2 {
-                self.centerline[i][d] += free * k * (src[i - 1][d] + src[i + 1][d] - 2.0 * src[i][d]);
+                self.centerline[i][d] +=
+                    free * k * (src[i - 1][d] + src[i + 1][d] - 2.0 * src[i][d]);
             }
         }
     }
@@ -1639,7 +1736,11 @@ impl Sim {
         let n = pts.len();
         let buckets = (4 * n).next_power_of_two();
         let mask = buckets - 1;
-        let g = Cells { size, mask, stride: (self.bounds[0] / size).ceil() as i64 + 3 };
+        let g = Cells {
+            size,
+            mask,
+            stride: (self.bounds[0] / size).ceil() as i64 + 3,
+        };
         self.grid_start.clear();
         self.grid_start.resize(buckets + 1, 0);
         self.cell_of.clear();
@@ -1655,7 +1756,8 @@ impl Sim {
         self.grid_items.clear();
         self.grid_items.resize(n, 0);
         self.grid_fill.clear();
-        self.grid_fill.extend_from_slice(&self.grid_start[..buckets]);
+        self.grid_fill
+            .extend_from_slice(&self.grid_start[..buckets]);
         for (i, &b) in self.cell_of.iter().enumerate() {
             let slot = &mut self.grid_fill[b as usize];
             self.grid_items[*slot as usize] = i as u32;
@@ -1669,8 +1771,14 @@ impl Sim {
     /// of buckets, split in two where it wraps round the table.
     fn row(&self, g: Cells, cx: i64, cy: i64) -> [&[u32]; 2] {
         let (b, buckets) = (g.bucket(cx - 1, cy), g.mask + 1);
-        let items = |a: usize, e: usize| &self.grid_items[self.grid_start[a] as usize..self.grid_start[e] as usize];
-        if b + 3 <= buckets { [items(b, b + 3), &[]] } else { [items(b, buckets), items(0, b + 3 - buckets)] }
+        let items = |a: usize, e: usize| {
+            &self.grid_items[self.grid_start[a] as usize..self.grid_start[e] as usize]
+        };
+        if b + 3 <= buckets {
+            [items(b, b + 3), &[]]
+        } else {
+            [items(b, buckets), items(0, b + 3 - buckets)]
+        }
     }
 
     /// Call `f` with every point index above `after` in the 3 × 3 block of
@@ -1695,7 +1803,10 @@ impl Sim {
         let (cx, cy) = g.cell(p);
         let pts = &self.centerline;
         (cy - 1..=cy + 1).any(|y| {
-            self.row(g, cx, y).iter().any(|part| part.iter().any(|&j| geom::dist2(p, pts[j as usize]) < r * r))
+            self.row(g, cx, y).iter().any(|part| {
+                part.iter()
+                    .any(|&j| geom::dist2(p, pts[j as usize]) < r * r)
+            })
         })
     }
 
@@ -1776,9 +1887,17 @@ impl Sim {
         // Neck width breached between banks of the reference width; it
         // scales with the mean local width of each pair.
         let neck = (p.cutoff_dist + u * (p.breach_dist - p.cutoff_dist).max(0.0)) * w;
-        let min_ratio = if p.chute_ratio > 0.0 && u > 0.0 { p.chute_ratio / u } else { f64::INFINITY };
+        let min_ratio = if p.chute_ratio > 0.0 && u > 0.0 {
+            p.chute_ratio / u
+        } else {
+            f64::INFINITY
+        };
         let widest = neck * self.max_width();
-        let reach = if min_ratio.is_finite() { widest.max(CHUTE_CHORD * w) } else { widest };
+        let reach = if min_ratio.is_finite() {
+            widest.max(CHUTE_CHORD * w)
+        } else {
+            widest
+        };
         let k_sep = p.cutoff_min_sep;
         let n = self.centerline.len();
         if n < k_sep + 2 || reach <= 0.0 {
@@ -1859,7 +1978,8 @@ impl Sim {
         }
         let ds = geom::length(&self.centerline) / (n - 1) as f64;
         let plug = END_PLUG * self.params.width;
-        let g = self.build_grid((0.5 * d_cut * (self.max_width() + MAX_WIDTH)).max(self.params.width));
+        let g =
+            self.build_grid((0.5 * d_cut * (self.max_width() + MAX_WIDTH)).max(self.params.width));
         let (pts, widths) = (&self.centerline, &self.widths);
         let mut runs = std::mem::take(&mut self.contacts);
         // Captures that qualify, as (ratio, oxbow, A, B).
@@ -1881,7 +2001,10 @@ impl Sim {
                 }
                 // The fixed upstream end, index 0, cannot be taken up.
                 self.for_neighbours_after(q, g, 0, |j| {
-                    let (d2, r) = (geom::dist2(q, pts[j]), 0.5 * d_cut * (widths[j] + o.widths[m]));
+                    let (d2, r) = (
+                        geom::dist2(q, pts[j]),
+                        0.5 * d_cut * (widths[j] + o.widths[m]),
+                    );
                     if d2 < r * r && meet.is_none_or(|c| d2 < c.2) {
                         meet = Some((m, j, d2));
                     }
@@ -1963,8 +2086,12 @@ impl Sim {
         let pts = &self.centerline;
         let n = pts.len();
         route.windows(2).enumerate().any(|(k, s)| {
-            (0..n - 1).filter(|&c| c + 1 <= i || c >= j).any(|c| segments_cross(s[0], s[1], pts[c], pts[c + 1]))
-                || route[k + 2..].windows(2).any(|t| segments_cross(s[0], s[1], t[0], t[1]))
+            (0..n - 1)
+                .filter(|&c| c + 1 <= i || c >= j)
+                .any(|c| segments_cross(s[0], s[1], pts[c], pts[c + 1]))
+                || route[k + 2..]
+                    .windows(2)
+                    .any(|t| segments_cross(s[0], s[1], t[0], t[1]))
         })
     }
 
@@ -1988,13 +2115,22 @@ impl Sim {
         for (s, e) in [(0, lo + 1), (hi, o.points.len())] {
             if e - s >= MIN_OXBOW_POINTS {
                 let offset = o.offset + geom::length(&o.points[..=s]);
-                self.oxbows.push(Oxbow { points: o.points[s..e].to_vec(), widths: o.widths[s..e].to_vec(), offset, ..o });
+                self.oxbows.push(Oxbow {
+                    points: o.points[s..e].to_vec(),
+                    widths: o.widths[s..e].to_vec(),
+                    offset,
+                    ..o
+                });
             }
         }
         let old = self.centerline[i..=j].to_vec();
         let old_widths = self.widths[i..=j].to_vec();
-        self.centerline.splice(i + 1..j, route[1..route.len() - 1].iter().copied());
-        self.widths.splice(i + 1..j, route_widths[1..route_widths.len() - 1].iter().copied());
+        self.centerline
+            .splice(i + 1..j, route[1..route.len() - 1].iter().copied());
+        self.widths.splice(
+            i + 1..j,
+            route_widths[1..route_widths.len() - 1].iter().copied(),
+        );
         self.line_version += 1;
         self.abandon(old, old_widths, route[2.min(route.len() - 1)]);
         self.captures += 1;
@@ -2041,7 +2177,9 @@ impl Sim {
             let crossed = |k: usize| {
                 let (p, q) = (pts[k], pts[k + 1]);
                 self.any_segment_near(geom::lerp(p, q, 0.5), g, |a, b| {
-                    segments_cross(p, q, a, b) || geom::seg_dist2(a, p, q) < r2 || geom::seg_dist2(b, p, q) < r2
+                    segments_cross(p, q, a, b)
+                        || geom::seg_dist2(a, p, q) < r2
+                        || geom::seg_dist2(b, p, q) < r2
                 })
             };
             pieces.clear();
@@ -2068,7 +2206,12 @@ impl Sim {
             changed = true;
             for &(a, b) in &pieces {
                 let offset = o.offset + geom::length(&pts[..=a]);
-                kept.push(Oxbow { points: pts[a..b].to_vec(), widths: o.widths[a..b].to_vec(), offset, ..o });
+                kept.push(Oxbow {
+                    points: pts[a..b].to_vec(),
+                    widths: o.widths[a..b].to_vec(),
+                    offset,
+                    ..o
+                });
             }
         }
         self.oxbows = kept;
@@ -2126,7 +2269,12 @@ impl Sim {
                 let (a, b) = (start.saturating_sub(1), (k + 1).min(n));
                 if b - a >= MIN_OXBOW_POINTS {
                     let offset = o.offset + geom::length(&o.points[..=a]);
-                    kept.push(Oxbow { points: o.points[a..b].to_vec(), widths: o.widths[a..b].to_vec(), offset, ..o });
+                    kept.push(Oxbow {
+                        points: o.points[a..b].to_vec(),
+                        widths: o.widths[a..b].to_vec(),
+                        offset,
+                        ..o
+                    });
                 }
             }
         }
@@ -2145,8 +2293,16 @@ impl Sim {
             // Only the piece holding the original upstream end has the entrance.
             let mut inflow = 0.0;
             if o.offset == 0.0 && o.entry > 0.0 && length > 0.0 {
-                let gap = self.centerline.iter().map(|&c| geom::dist2(o.points[0], c)).fold(f64::INFINITY, f64::min);
-                inflow = supply * u * p.bedload_fill * o.entry * (-(gap.sqrt() - half * o.widths[0]).max(0.0) / length).exp();
+                let gap = self
+                    .centerline
+                    .iter()
+                    .map(|&c| geom::dist2(o.points[0], c))
+                    .fold(f64::INFINITY, f64::min);
+                inflow = supply
+                    * u
+                    * p.bedload_fill
+                    * o.entry
+                    * (-(gap.sqrt() - half * o.widths[0]).max(0.0) / length).exp();
             }
             o.settling = (o.settling + inflow).min(1.0 - o.fill);
         }
@@ -2176,7 +2332,10 @@ impl Sim {
             };
             if s != side {
                 if run.len() >= MIN_SCROLL_POINTS {
-                    added.push(Scroll { points: std::mem::take(&mut run), born: self.time });
+                    added.push(Scroll {
+                        points: std::mem::take(&mut run),
+                        born: self.time,
+                    });
                 }
                 run.clear();
                 side = s;
@@ -2192,7 +2351,8 @@ impl Sim {
         if !added.is_empty() {
             let p = &self.params;
             for s in &added {
-                self.erodibility.raise(&s.points, p.scroll_height, p.levee_height);
+                self.erodibility
+                    .raise(&s.points, p.scroll_height, p.levee_height);
             }
             self.scrolls.extend(added);
             self.scroll_version += 1;
@@ -2224,7 +2384,10 @@ impl Sim {
                 changed = true;
                 for piece in sc.points.split(|&q| wet(q)) {
                     if piece.len() >= MIN_SCROLL_POINTS {
-                        kept.push(Scroll { points: piece.to_vec(), born: sc.born });
+                        kept.push(Scroll {
+                            points: piece.to_vec(),
+                            born: sc.born,
+                        });
                     }
                 }
             }
@@ -2256,12 +2419,18 @@ impl Sim {
         let (a, b, c) = (loop_pts[0], loop_pts[1], toward);
         let (main, branch) = ([c[0] - a[0], c[1] - a[1]], [b[0] - a[0], b[1] - a[1]]);
         let norms = (geom::dist2(a, c) * geom::dist2(a, b)).sqrt();
-        let entry = if norms > 0.0 { ((main[0] * branch[0] + main[1] * branch[1]) / norms).max(0.0) } else { 0.0 };
+        let entry = if norms > 0.0 {
+            ((main[0] * branch[0] + main[1] * branch[1]) / norms).max(0.0)
+        } else {
+            0.0
+        };
         let mid = geom::lerp(a, loop_pts[loop_pts.len() - 1], 0.5);
         self.oxbow_version += 1;
-        self.erodibility.stamp_oxbow(&loop_pts, &loop_widths, 0.5 * self.params.width, self.time);
+        self.erodibility
+            .stamp_oxbow(&loop_pts, &loop_widths, 0.5 * self.params.width, self.time);
         self.absorb_oxbows(&loop_pts, &loop_widths);
-        self.oxbows.push(Oxbow::lake(loop_pts, loop_widths, self.time, entry));
+        self.oxbows
+            .push(Oxbow::lake(loop_pts, loop_widths, self.time, entry));
         self.recent_cuts.push((mid, self.steps + CUT_COOLDOWN));
         self.cutoffs += 1;
     }
@@ -2332,7 +2501,10 @@ mod tests {
         let (a1, _) = fundamental(&sim, wl);
         eprintln!("amplitude {a0} -> {a1}, drift {drift}");
         assert!(a1 > 1.2 * a0, "amplitude {a0} -> {a1} should grow");
-        assert!(drift > 0.5 * sim.params.width, "drift {drift} should be downstream (+x)");
+        assert!(
+            drift > 0.5 * sim.params.width,
+            "drift {drift} should be downstream (+x)"
+        );
     }
 
     #[test]
@@ -2342,15 +2514,27 @@ mod tests {
         gentle.migration_rate();
         let with = winding.migration_rate().to_vec();
         let mid = winding.centerline.len() / 2;
-        let (sg, sw) = (gentle.slope[gentle.centerline.len() / 2], winding.slope[mid]);
+        let (sg, sw) = (
+            gentle.slope[gentle.centerline.len() / 2],
+            winding.slope[mid],
+        );
         // A sine of amplitude kA = 1.26 has sinuosity about 1.32.
-        assert!((sg - 1.0).abs() < 0.02 && (1.0 / sw - 1.32).abs() < 0.03, "slopes {sg} and {sw}");
+        assert!(
+            (sg - 1.0).abs() < 0.02 && (1.0 / sw - 1.32).abs() < 0.03,
+            "slopes {sg} and {sw}"
+        );
         winding.params.slope_exponent = 0.0;
         let without = winding.migration_rate().to_vec();
         // Compare where the rate is largest, away from its zero crossings.
-        let i = (mid - 30..mid + 30).max_by(|&a, &b| without[a].abs().total_cmp(&without[b].abs())).unwrap();
+        let i = (mid - 30..mid + 30)
+            .max_by(|&a, &b| without[a].abs().total_cmp(&without[b].abs()))
+            .unwrap();
         let expected = (SLOPE_SINUOSITY * winding.slope[i]).sqrt();
-        assert!((with[i] / without[i] - expected).abs() < 1e-9, "rate ratio {} should be {expected}", with[i] / without[i]);
+        assert!(
+            (with[i] / without[i] - expected).abs() < 1e-9,
+            "rate ratio {} should be {expected}",
+            with[i] / without[i]
+        );
         assert!(expected < 1.0);
     }
 
@@ -2364,7 +2548,10 @@ mod tests {
         sim.step_n(200);
         let (a1, s1) = fundamental(&sim, wl);
         assert!(a1 > a0);
-        assert!((s1 - s0).abs() < 0.1 * wl * sim.params.width, "shift {s0} -> {s1}, amplitude {a0} -> {a1}");
+        assert!(
+            (s1 - s0).abs() < 0.1 * wl * sim.params.width,
+            "shift {s0} -> {s1}, amplitude {a0} -> {a1}"
+        );
     }
 
     #[test]
@@ -2374,7 +2561,11 @@ mod tests {
         for _ in 0..200 {
             sim.step_n(100);
             max_sin = max_sin.max(sim.sinuosity());
-            assert!(!geom::self_intersects(&sim.centerline), "self-intersection at step {}", sim.steps);
+            assert!(
+                !geom::self_intersects(&sim.centerline),
+                "self-intersection at step {}",
+                sim.steps
+            );
         }
         assert!(sim.cutoffs >= 3, "only {} cutoffs", sim.cutoffs);
         assert!(max_sin < 6.0, "sinuosity reached {max_sin}");
@@ -2397,9 +2588,14 @@ mod tests {
                     cut.push((o.born, o.length));
                 }
             }
-            assert!(!geom::self_intersects(&sim.centerline), "self-intersection at step {}", sim.steps);
+            assert!(
+                !geom::self_intersects(&sim.centerline),
+                "self-intersection at step {}",
+                sim.steps
+            );
         }
-        let loop_w = cut.iter().map(|c| c.1).sum::<f64>() / cut.len().max(1) as f64 / sim.params.width;
+        let loop_w =
+            cut.iter().map(|c| c.1).sum::<f64>() / cut.len().max(1) as f64 / sim.params.width;
         (sum / 150.0, loop_w, sim)
     }
 
@@ -2415,16 +2611,32 @@ mod tests {
         // here to isolate the cutoffs. Sinuosity is reported but not
         // compared: with bank reads by the rate's sign, floods no longer
         // lower it on every seed.
-        let isolated = Params { bar_factor: 1.0, overbank: 0.0, wood_rate: 0.0, ..Params::default() };
-        let calm = Params { flood_rate: 0.0, ..isolated.clone() };
-        let stormy = Params { flood_rate: 0.1, chute_ratio: 3.0, ..isolated };
+        let isolated = Params {
+            bar_factor: 1.0,
+            overbank: 0.0,
+            wood_rate: 0.0,
+            ..Params::default()
+        };
+        let calm = Params {
+            flood_rate: 0.0,
+            ..isolated.clone()
+        };
+        let stormy = Params {
+            flood_rate: 0.1,
+            chute_ratio: 3.0,
+            ..isolated
+        };
         // The four runs are independent, so each gets its own thread.
         std::thread::scope(|s| {
             let runs: Vec<_> = [3, 11]
                 .into_iter()
                 .map(|seed| {
                     let (calm, stormy) = (calm.clone(), stormy.clone());
-                    (seed, s.spawn(move || late_sinuosity(calm, seed)), s.spawn(move || late_sinuosity(stormy, seed)))
+                    (
+                        seed,
+                        s.spawn(move || late_sinuosity(calm, seed)),
+                        s.spawn(move || late_sinuosity(stormy, seed)),
+                    )
                 })
                 .collect();
             for (seed, calm, stormy) in runs {
@@ -2436,8 +2648,15 @@ mod tests {
                     sim.floods, sim.flood_cutoffs, sim.cutoffs
                 );
                 assert_eq!(calm_sim.flood_cutoffs, 0);
-                assert!(sim.flood_cutoffs >= 3, "only {} flood cutoffs", sim.flood_cutoffs);
-                assert!(l_storm < 0.9 * l_calm, "floods should cut loops off shorter");
+                assert!(
+                    sim.flood_cutoffs >= 3,
+                    "only {} flood cutoffs",
+                    sim.flood_cutoffs
+                );
+                assert!(
+                    l_storm < 0.9 * l_calm,
+                    "floods should cut loops off shorter"
+                );
             }
         });
     }
@@ -2451,7 +2670,8 @@ mod tests {
                 .into_iter()
                 .map(|seed| {
                     s.spawn(move || {
-                        let mut sim = Sim::new(Params::default(), [up + view + 20.0 * w, 480.0], seed, 0.5);
+                        let mut sim =
+                            Sim::new(Params::default(), [up + view + 20.0 * w, 480.0], seed, 0.5);
                         sim.pinches = vec![up, up + view];
                         for _ in 0..30 {
                             sim.step_n(1000);
@@ -2462,9 +2682,18 @@ mod tests {
                                     .filter(|s| (s[0][0] < px) != (s[1][0] < px))
                                     .map(|s| s[0][1])
                                     .collect();
-                                assert_eq!(crossings.len(), 1, "seed {seed}, step {}: crossings at x = {px}: {crossings:?}", sim.steps);
+                                assert_eq!(
+                                    crossings.len(),
+                                    1,
+                                    "seed {seed}, step {}: crossings at x = {px}: {crossings:?}",
+                                    sim.steps
+                                );
                                 let off = (crossings[0] - 240.0).abs();
-                                assert!(off < 0.5 * sim.params.pinch_width * w + w, "seed {seed}, step {}: crossing {off} off axis", sim.steps);
+                                assert!(
+                                    off < 0.5 * sim.params.pinch_width * w + w,
+                                    "seed {seed}, step {}: crossing {off} off axis",
+                                    sim.steps
+                                );
                             }
                         }
                     })
@@ -2476,10 +2705,16 @@ mod tests {
 
     #[test]
     fn physics_sets_the_kernel_weights() {
-        let mut p = Params { physics: false, ..Params::default() };
+        let mut p = Params {
+            physics: false,
+            ..Params::default()
+        };
         let alpha = p.alpha;
         p.set("friction", 0.02);
-        assert_eq!(p.alpha, alpha, "hand-tuned weights stay until physics is on");
+        assert_eq!(
+            p.alpha, alpha,
+            "hand-tuned weights stay until physics is on"
+        );
         p.set("physics", 1.0);
         assert_eq!(p.get("physics"), Some(1.0));
         assert_eq!(p.omega, -1.0);
@@ -2498,22 +2733,41 @@ mod tests {
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         // Straight lakes beside the channel, near and far, and one whose
         // entrance lies on the channel at a small diversion angle.
-        let lake = |x0: f64, y: f64| -> Vec<P> { (0..30).map(|k| [(x0 + 0.5 * k as f64) * w, mid + y * w]).collect() };
-        for (pts, entry) in [(lake(100.0, 2.0), 0.0), (lake(150.0, 10.0), 0.0), (lake(200.0, 0.0), 0.9)] {
+        let lake = |x0: f64, y: f64| -> Vec<P> {
+            (0..30)
+                .map(|k| [(x0 + 0.5 * k as f64) * w, mid + y * w])
+                .collect()
+        };
+        for (pts, entry) in [
+            (lake(100.0, 2.0), 0.0),
+            (lake(150.0, 10.0), 0.0),
+            (lake(200.0, 0.0), 0.9),
+        ] {
             let widths = vec![1.0; pts.len()];
             sim.erodibility.stamp_oxbow(&pts, &widths, 0.5 * w, 0.0);
             sim.oxbows.push(Oxbow::lake(pts, widths, 0.0, entry));
         }
         // The third lake runs along the channel; keep only its entrance there.
-        sim.oxbows[2].points.iter_mut().skip(1).for_each(|q| q[1] += 3.0 * w);
+        sim.oxbows[2]
+            .points
+            .iter_mut()
+            .skip(1)
+            .for_each(|q| q[1] += 3.0 * w);
         let fills = |sim: &Sim| sim.oxbows.iter().map(|o| o.fill).collect::<Vec<_>>();
         sim.step_n(1000);
         let f = fills(&sim);
         eprintln!("fills after {} floods: {f:?}", sim.floods);
         let quiet = sim.time / sim.params.oxbow_lifetime;
-        assert!((f[1] - quiet).abs() < 0.05, "a far lake fills only by the clock: {} against {quiet}", f[1]);
+        assert!(
+            (f[1] - quiet).abs() < 0.05,
+            "a far lake fills only by the clock: {} against {quiet}",
+            f[1]
+        );
         assert!(f[0] > f[1] + 0.2, "a near lake silts up faster");
-        assert!(f[2] > f[1] + 0.2, "a lake with an open entrance takes in bedload");
+        assert!(
+            f[2] > f[1] + 0.2,
+            "a lake with an open entrance takes in bedload"
+        );
     }
 
     #[test]
@@ -2526,32 +2780,53 @@ mod tests {
         let w = sim.params.width;
         let mid = sim.bounds[1] / 2.0;
         let line = sim.centerline.clone();
-        let gap = |q: P| line.iter().map(|&c| dist(q, c)).fold(f64::INFINITY, f64::min);
+        let gap = |q: P| {
+            line.iter()
+                .map(|&c| dist(q, c))
+                .fold(f64::INFINITY, f64::min)
+        };
         let widths = sim.widths.clone();
         let half = |q: P| {
-            let k = (0..line.len()).min_by(|&a, &b| dist(line[a], q).total_cmp(&dist(line[b], q))).unwrap();
+            let k = (0..line.len())
+                .min_by(|&a, &b| dist(line[a], q).total_cmp(&dist(line[b], q)))
+                .unwrap();
             0.5 * widths[k] * w
         };
         let mut bends = 0;
         for sc in &sim.scrolls {
             assert!(sc.points.len() >= MIN_SCROLL_POINTS);
             for &q in &sc.points {
-                assert!(gap(q) > half(q) && gap(q) < half(q) + 0.2 * w, "a ridge lies just off the bank");
+                assert!(
+                    gap(q) > half(q) && gap(q) < half(q) + 0.2 * w,
+                    "a ridge lies just off the bank"
+                );
             }
             // Bends grow outwards, so the ridge at a bend lies on its axis
             // side: inside the bend.
             let k = sc.points.len() / 2;
-            let c = line.iter().min_by(|a, b| dist(**a, sc.points[k]).total_cmp(&dist(**b, sc.points[k]))).unwrap();
+            let c = line
+                .iter()
+                .min_by(|a, b| dist(**a, sc.points[k]).total_cmp(&dist(**b, sc.points[k])))
+                .unwrap();
             if (c[1] - mid).abs() > 1.5 * w {
                 bends += 1;
-                assert!((sc.points[k][1] - mid).abs() < (c[1] - mid).abs(), "ridge at {:?}, channel at {c:?}", sc.points[k]);
+                assert!(
+                    (sc.points[k][1] - mid).abs() < (c[1] - mid).abs(),
+                    "ridge at {:?}, channel at {c:?}",
+                    sc.points[k]
+                );
             }
         }
         assert!(bends >= 4, "only {bends} ridges at bends");
         // The channel erodes a ridge it crosses.
         let v = sim.scroll_version;
-        let across: Vec<P> = (-10..=10).map(|k| [100.0 * w, mid + 0.5 * k as f64 * w]).collect();
-        sim.scrolls = vec![Scroll { points: across, born: sim.time }];
+        let across: Vec<P> = (-10..=10)
+            .map(|k| [100.0 * w, mid + 0.5 * k as f64 * w])
+            .collect();
+        sim.scrolls = vec![Scroll {
+            points: across,
+            born: sim.time,
+        }];
         sim.rework_scrolls();
         assert!(sim.scroll_version > v);
         for sc in &sim.scrolls {
@@ -2565,15 +2840,36 @@ mod tests {
         // as motion into it, so a reach that drifted there stayed straight.
         let mut sim = sine_sim(0.0, 40.0);
         let p = sim.params.clone();
-        let pts: Vec<P> = sim.centerline.iter().map(|q| [q[0], sim.floor(q[0], true).1 - 2.0 * p.width]).collect();
+        let pts: Vec<P> = sim
+            .centerline
+            .iter()
+            .map(|q| [q[0], sim.floor(q[0], true).1 - 2.0 * p.width])
+            .collect();
         sim.centerline = pts;
         let (i, ground) = (sim.centerline.len() / 2, sim.ground());
         let nrm = right_normal(&sim.centerline, i);
         // The bank on the side `sign` of the normal, and its erodibility.
-        let read = |sign: f64| (sim.centerline[i][1] + sign * nrm[1], sim.bank_erodibility(i, nrm, sign, &ground));
-        let (toward, away) = if read(1.0).0 > read(-1.0).0 { (read(1.0).1, read(-1.0).1) } else { (read(-1.0).1, read(1.0).1) };
-        let here = edge_taper(sim.centerline[i], sim.bounds, p.edge_margin * p.width, sim.floor(sim.centerline[i][0], true));
-        assert!(away > here && here > toward, "away {away}, at the centreline {here}, toward {toward}");
+        let read = |sign: f64| {
+            (
+                sim.centerline[i][1] + sign * nrm[1],
+                sim.bank_erodibility(i, nrm, sign, &ground),
+            )
+        };
+        let (toward, away) = if read(1.0).0 > read(-1.0).0 {
+            (read(1.0).1, read(-1.0).1)
+        } else {
+            (read(-1.0).1, read(1.0).1)
+        };
+        let here = edge_taper(
+            sim.centerline[i],
+            sim.bounds,
+            p.edge_margin * p.width,
+            sim.floor(sim.centerline[i][0], true),
+        );
+        assert!(
+            away > here && here > toward,
+            "away {away}, at the centreline {here}, toward {toward}"
+        );
     }
 
     #[test]
@@ -2581,16 +2877,27 @@ mod tests {
         let mut sim = sine_sim(0.0, 40.0);
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         // A vertical oxbow across the channel, and one well clear of it.
-        let across: Vec<P> = (-20..=20).map(|k| [100.0 * w, mid + 0.5 * k as f64 * w]).collect();
-        let clear: Vec<P> = (0..20).map(|k| [(150 + k) as f64 * w, mid + 20.0 * w]).collect();
-        sim.oxbows.push(Oxbow::lake(across, vec![1.0; 41], 0.0, 0.0));
-        sim.oxbows.push(Oxbow::lake(clear.clone(), vec![1.0; 20], 0.0, 0.0));
+        let across: Vec<P> = (-20..=20)
+            .map(|k| [100.0 * w, mid + 0.5 * k as f64 * w])
+            .collect();
+        let clear: Vec<P> = (0..20)
+            .map(|k| [(150 + k) as f64 * w, mid + 20.0 * w])
+            .collect();
+        sim.oxbows
+            .push(Oxbow::lake(across, vec![1.0; 41], 0.0, 0.0));
+        sim.oxbows
+            .push(Oxbow::lake(clear.clone(), vec![1.0; 20], 0.0, 0.0));
         sim.step();
         assert_eq!(sim.oxbows.len(), 3, "the crossed oxbow splits in two");
         assert_eq!(sim.oxbows[2].points, clear);
         // Each piece reaches one point under the water at the cut, and
         // keeps its place along the original oxbow.
-        let gap = |q: P| sim.centerline.iter().map(|&c| dist(q, c)).fold(f64::INFINITY, f64::min);
+        let gap = |q: P| {
+            sim.centerline
+                .iter()
+                .map(|&c| dist(q, c))
+                .fold(f64::INFINITY, f64::min)
+        };
         let (a, b) = (&sim.oxbows[0], &sim.oxbows[1]);
         for o in [a, b] {
             let m = o.points.len();
@@ -2606,8 +2913,11 @@ mod tests {
         let mut sim = sine_sim(0.0, 40.0);
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         // The channel runs between two points a quarter width either side.
-        let across: Vec<P> = (-20..20).map(|k| [100.0 * w, mid + (0.5 * k as f64 + 0.25) * w]).collect();
-        sim.oxbows.push(Oxbow::lake(across, vec![1.0; 40], 0.0, 0.0));
+        let across: Vec<P> = (-20..20)
+            .map(|k| [100.0 * w, mid + (0.5 * k as f64 + 0.25) * w])
+            .collect();
+        sim.oxbows
+            .push(Oxbow::lake(across, vec![1.0; 40], 0.0, 0.0));
         sim.step();
         assert_eq!(sim.oxbows.len(), 2, "the crossed oxbow splits in two");
         assert_eq!(sim.oxbows[0].points.len() + sim.oxbows[1].points.len(), 40);
@@ -2631,7 +2941,10 @@ mod tests {
         sim.step_n(300);
         let (fast, slow) = width_by_rate(&mut sim);
         eprintln!("soft banks: width {fast:.2} where migrating fastest, {slow:.2} slowest");
-        assert!(fast > 1.1 && fast > slow + 0.1, "the bank pulls ahead of the bar at a bend");
+        assert!(
+            fast > 1.1 && fast > slow + 0.1,
+            "the bank pulls ahead of the bar at a bend"
+        );
 
         // Old clay plugs everywhere erode slower than the bar advances.
         let mut sim = sine_sim(2.0, 30.0);
@@ -2640,8 +2953,15 @@ mod tests {
         sim.step_n(300);
         let (fast, slow) = width_by_rate(&mut sim);
         eprintln!("clay banks: width {fast:.2} where migrating fastest, {slow:.2} slowest");
-        assert!(fast < 0.95 && fast < slow - 0.03, "the bar pushes ahead of a clay bank");
-        assert!(sim.widths.iter().all(|&b| (MIN_WIDTH..=MAX_WIDTH).contains(&b)));
+        assert!(
+            fast < 0.95 && fast < slow - 0.03,
+            "the bar pushes ahead of a clay bank"
+        );
+        assert!(
+            sim.widths
+                .iter()
+                .all(|&b| (MIN_WIDTH..=MAX_WIDTH).contains(&b))
+        );
 
         // A width time of 0 holds the reference width.
         let mut sim = sine_sim(2.0, 30.0);
@@ -2657,25 +2977,43 @@ mod tests {
         sim.params.cutoff_dist = 1.0;
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         let r = 0.65 * w;
-        let mut pts: Vec<P> = (0..30).map(|k| [(100.0 + 0.5 * k as f64) * w, mid]).collect();
+        let mut pts: Vec<P> = (0..30)
+            .map(|k| [(100.0 + 0.5 * k as f64) * w, mid])
+            .collect();
         let x = pts[29][0];
         pts.extend((1..4).map(|k| {
             let t = std::f64::consts::PI * k as f64 / 4.0;
             [x + r * t.sin(), mid + r - r * t.cos()]
         }));
-        pts.extend((0..30).rev().map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 2.0 * r]));
+        pts.extend(
+            (0..30)
+                .rev()
+                .map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 2.0 * r]),
+        );
         sim.centerline = pts;
         sim.widths = vec![1.0; sim.centerline.len()];
         sim.line_version += 1;
-        assert!(!sim.cutoff(), "banks of the reference width are 0.3 widths apart");
+        assert!(
+            !sim.cutoff(),
+            "banks of the reference width are 0.3 widths apart"
+        );
         sim.widths.fill(1.5);
         sim.line_version += 1;
         assert!(sim.cutoff(), "banks 1.5 widths wide overlap");
         assert_eq!(sim.widths.len(), sim.centerline.len());
         let o = &sim.oxbows[0];
-        assert!(o.widths.len() == o.points.len() && o.widths.iter().all(|&b| b == 1.5), "the lake keeps the channel's width");
-        let side = [o.points[o.points.len() / 2][0], o.points[o.points.len() / 2][1] + 0.65 * w];
-        assert!(sim.erodibility.lake_silt_at(side).is_some(), "the footprint spans the wider channel");
+        assert!(
+            o.widths.len() == o.points.len() && o.widths.iter().all(|&b| b == 1.5),
+            "the lake keeps the channel's width"
+        );
+        let side = [
+            o.points[o.points.len() / 2][0],
+            o.points[o.points.len() / 2][1] + 0.65 * w,
+        ];
+        assert!(
+            sim.erodibility.lake_silt_at(side).is_some(),
+            "the footprint spans the wider channel"
+        );
     }
 
     #[test]
@@ -2686,22 +3024,37 @@ mod tests {
         sim.params.cutoff_dist = 1.0;
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         let r = 0.65 * w;
-        let mut pts: Vec<P> = (0..30).map(|k| [(100.0 + 0.5 * k as f64) * w, mid]).collect();
+        let mut pts: Vec<P> = (0..30)
+            .map(|k| [(100.0 + 0.5 * k as f64) * w, mid])
+            .collect();
         let x = pts[29][0];
         pts.extend((1..4).map(|k| {
             let t = std::f64::consts::PI * k as f64 / 4.0;
             [x + r * t.sin(), mid + r - r * t.cos()]
         }));
-        pts.extend((0..30).rev().map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 2.0 * r]));
+        pts.extend(
+            (0..30)
+                .rev()
+                .map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 2.0 * r]),
+        );
         sim.centerline = pts;
         sim.widths = vec![1.5; sim.centerline.len()];
-        let old: Vec<P> = (0..=10).map(|k| [105.0 * w, mid + 2.0 * r + 0.5 * k as f64 * w]).collect();
-        let clear: Vec<P> = (0..20).map(|k| [(150 + k) as f64 * w, mid + 20.0 * w]).collect();
-        sim.oxbows.push(Oxbow::lake(old.clone(), vec![1.0; 11], 0.0, 0.0));
-        sim.oxbows.push(Oxbow::lake(clear.clone(), vec![1.0; 20], 0.0, 0.0));
+        let old: Vec<P> = (0..=10)
+            .map(|k| [105.0 * w, mid + 2.0 * r + 0.5 * k as f64 * w])
+            .collect();
+        let clear: Vec<P> = (0..20)
+            .map(|k| [(150 + k) as f64 * w, mid + 20.0 * w])
+            .collect();
+        sim.oxbows
+            .push(Oxbow::lake(old.clone(), vec![1.0; 11], 0.0, 0.0));
+        sim.oxbows
+            .push(Oxbow::lake(clear.clone(), vec![1.0; 20], 0.0, 0.0));
         assert!(sim.cutoff());
         assert_eq!(sim.oxbows.len(), 3);
-        assert_eq!(sim.oxbows[1].points, clear, "a lake clear of the cut is left whole");
+        assert_eq!(
+            sim.oxbows[1].points, clear,
+            "a lake clear of the cut is left whole"
+        );
         // The new lake is 0.75 widths in half-width, so it covers the first
         // two points; the piece left reaches back to the second.
         let piece = &sim.oxbows[0];
@@ -2723,14 +3076,21 @@ mod tests {
         // The same flood, before and after clearance.
         let run = |time: f64| {
             let mut sim = sine_sim(0.0, 40.0);
-            (sim.params.flood_rate, sim.params.crevasse_drop, sim.time) = (1.0 / sim.params.dt, 0.0, time);
+            (sim.params.flood_rate, sim.params.crevasse_drop, sim.time) =
+                (1.0 / sim.params.dt, 0.0, time);
             sim.step();
             let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
             [1.5, 5.0].map(|y| sim.erodibility.deposit_at([100.0 * w, mid + y * w]))
         };
         let (before, after) = (run(0.0), run(2000.0));
-        assert!(after[0] > before[0], "more silt by the bank: {after:?} against {before:?}");
-        assert!(after[1] > 2.0 * before[1], "and carried farther out: {after:?} against {before:?}");
+        assert!(
+            after[0] > before[0],
+            "more silt by the bank: {after:?} against {before:?}"
+        );
+        assert!(
+            after[1] > 2.0 * before[1],
+            "and carried farther out: {after:?} against {before:?}"
+        );
     }
 
     /// A narrow bend: up from the line, across 4 widths, and back down.
@@ -2754,8 +3114,11 @@ mod tests {
     fn a_chute_crosses_bare_bar_but_not_vegetated() {
         let mut bare = narrow_bend();
         let (w, mid) = (bare.params.width, bare.bounds[1] / 2.0);
-        let bar: Vec<P> =
-            (0..=16).flat_map(|i| (0..=40).map(move |j| [(110.0 + 0.25 * i as f64) * w, mid + 0.25 * j as f64 * w])).collect();
+        let bar: Vec<P> = (0..=16)
+            .flat_map(|i| {
+                (0..=40).map(move |j| [(110.0 + 0.25 * i as f64) * w, mid + 0.25 * j as f64 * w])
+            })
+            .collect();
         bare.erodibility.sweep(&bar);
         let (a, b) = ([110.5 * w, mid + 5.0 * w], [113.5 * w, mid + 5.0 * w]);
         assert_eq!(bare.chute_resistance(a, b), 0.0, "fresh bar sand");
@@ -2773,14 +3136,32 @@ mod tests {
         let (w, i) = (sim.params.width, sim.centerline.len() / 2);
         let (q, nrm) = (sim.centerline[i], right_normal(&sim.centerline, i));
         let pos = [q[0] + 0.5 * w * nrm[0], q[1] + 0.5 * w * nrm[1]];
-        sim.jams.push(Jam { pos, down: [-nrm[1], nrm[0]], side: 1.0, size: 1.0, until: 1e9, at: i });
+        sim.jams.push(Jam {
+            pos,
+            down: [-nrm[1], nrm[0]],
+            side: 1.0,
+            size: 1.0,
+            until: 1e9,
+            at: i,
+        });
         sim.step_n(100);
         assert_eq!(sim.jams.len(), 1, "the jam keeps to the bank");
         assert_eq!(sim.jams[0].pos, pos, "where it lodged");
-        let p = sim.centerline.iter().min_by(|a, b| (a[0] - q[0]).abs().total_cmp(&(b[0] - q[0]).abs())).unwrap();
+        let p = sim
+            .centerline
+            .iter()
+            .min_by(|a, b| (a[0] - q[0]).abs().total_cmp(&(b[0] - q[0]).abs()))
+            .unwrap();
         let moved = (p[0] - q[0]) * nrm[0] + (p[1] - q[1]) * nrm[1];
-        assert!(moved < -0.05 * w, "the channel moves off the jam's bank: {moved}");
-        let far = sim.centerline.iter().find(|c| (c[0] - 50.0 * w).abs() < 0.3 * w).unwrap();
+        assert!(
+            moved < -0.05 * w,
+            "the channel moves off the jam's bank: {moved}"
+        );
+        let far = sim
+            .centerline
+            .iter()
+            .find(|c| (c[0] - 50.0 * w).abs() < 0.3 * w)
+            .unwrap();
         assert!((far[1] - q[1]).abs() < 1e-6, "and stays put away from it");
         sim.flush_jams(1.0);
         assert!(sim.jams.is_empty(), "the largest flood flushes every jam");
@@ -2790,7 +3171,11 @@ mod tests {
     fn a_bank_against_a_wall_cuts_it_back_and_slumps() {
         let mut sim = sine_sim(0.0, 40.0);
         let w = sim.params.width;
-        let pts: Vec<P> = sim.centerline.iter().map(|q| [q[0], sim.floor(q[0], false).1 - 2.0 * w]).collect();
+        let pts: Vec<P> = sim
+            .centerline
+            .iter()
+            .map(|q| [q[0], sim.floor(q[0], false).1 - 2.0 * w])
+            .collect();
         sim.centerline = pts;
         let n = sim.centerline.len();
         let towards = right_normal(&sim.centerline, n / 2)[1].signum();
@@ -2805,7 +3190,11 @@ mod tests {
         assert!(sim.floor(200.0 * w, false).1 > foot, "the floor widens");
         assert!(sim.wall_version > versions, "slumps redraw the wall");
         let lobe = [200.0 * w, sim.floor(200.0 * w, false).1];
-        let coarse = (0..8).map(|k| sim.erodibility.coarse[sim.erodibility.cell_index([lobe[0] + k as f64 * w, lobe[1]])]);
+        let coarse = (0..8).map(|k| {
+            sim.erodibility.coarse[sim
+                .erodibility
+                .cell_index([lobe[0] + k as f64 * w, lobe[1]])]
+        });
         assert!(coarse.fold(0.0f32, f32::max) > 0.3, "colluvium at the foot");
     }
 
@@ -2816,20 +3205,42 @@ mod tests {
         let coarse = |p: P| sim.erodibility.coarse[sim.erodibility.cell_index(p)] as f64;
         for t in &sim.tributaries {
             let c = coarse(t.mouth);
-            assert!(c >= t.scale - 0.1, "coarse at the apex: {c} for scale {}", t.scale);
+            assert!(
+                c >= t.scale - 0.1,
+                "coarse at the apex: {c} for scale {}",
+                t.scale
+            );
             let half = [t.mouth[0] + 0.5 * t.radius, t.mouth[1]];
-            assert!(coarse(half) >= 0.5f64.sqrt() * t.scale - 0.1, "falling towards the rim");
+            assert!(
+                coarse(half) >= 0.5f64.sqrt() * t.scale - 0.1,
+                "falling towards the rim"
+            );
         }
         // Clear of every fan, the ground holds no gravel.
-        let clear = |p: P| sim.tributaries.iter().all(|t| dist(p, t.mouth) > t.radius + sim.erodibility.cell);
+        let clear = |p: P| {
+            sim.tributaries
+                .iter()
+                .all(|t| dist(p, t.mouth) > t.radius + sim.erodibility.cell)
+        };
         let mid = sim.bounds[1] / 2.0;
-        assert!((0..400).map(|x| [(x as f64 + 0.5) * 8.0, mid]).filter(|&p| clear(p)).all(|p| coarse(p) == 0.0));
+        assert!(
+            (0..400)
+                .map(|x| [(x as f64 + 0.5) * 8.0, mid])
+                .filter(|&p| clear(p))
+                .all(|p| coarse(p) == 0.0)
+        );
         let fed = sim.migration_rate().to_vec();
         sim.params.tributary_boost = 0.0;
         let plain = sim.migration_rate().to_vec();
-        let t = sim.tributaries.iter().max_by(|a, b| a.scale.total_cmp(&b.scale)).unwrap();
+        let t = sim
+            .tributaries
+            .iter()
+            .max_by(|a, b| a.scale.total_cmp(&b.scale))
+            .unwrap();
         let r = sim.reach_points(TRIBUTARY_REACH);
-        let k = (t.at + 1..t.at + r).find(|&k| plain[k].abs() > 1e-6).unwrap();
+        let k = (t.at + 1..t.at + r)
+            .find(|&k| plain[k].abs() > 1e-6)
+            .unwrap();
         // Confluences close together each feed the reach below them.
         let want = sim
             .tributaries
@@ -2837,7 +3248,11 @@ mod tests {
             .filter(|u| (u.at..u.at + r).contains(&k))
             .map(|u| 1.0 + TRIBUTARY_BOOST * u.scale * (1.0 - (k - u.at) as f64 / r as f64))
             .product::<f64>();
-        assert!((fed[k] / plain[k] - want).abs() < 1e-9, "boost {} against {want}", fed[k] / plain[k]);
+        assert!(
+            (fed[k] / plain[k] - want).abs() < 1e-9,
+            "boost {} against {want}",
+            fed[k] / plain[k]
+        );
         let first = sim.tributaries.iter().map(|u| u.at).min().unwrap();
         if let Some(k) = (0..first).rev().find(|&k| plain[k].abs() > 1e-6) {
             assert_eq!(fed[k], plain[k], "nothing above the confluences");
@@ -2851,15 +3266,30 @@ mod tests {
         let i = n / 2;
         let free = sim.migration_rate().to_vec();
         let weir = sim.centerline[i];
-        sim.mills.push(Mill { weir, across: [0.0, 1.0], leat: Vec::new(), course: Vec::new(), born: 0.0, ruined_at: f64::INFINITY, at: i });
+        sim.mills.push(Mill {
+            weir,
+            across: [0.0, 1.0],
+            leat: Vec::new(),
+            course: Vec::new(),
+            born: 0.0,
+            ruined_at: f64::INFINITY,
+            at: i,
+        });
         let ponded = sim.migration_rate().to_vec();
         assert_eq!(sim.held[i], 0.0);
         let k = i - sim.reach_points(0.5 * sim.params.pond_length);
-        assert!(ponded[k].abs() < free[k].abs() && sim.target[k] > 1.0 && sim.boost[k] > 1.0, "the pond above");
+        assert!(
+            ponded[k].abs() < free[k].abs() && sim.target[k] > 1.0 && sim.boost[k] > 1.0,
+            "the pond above"
+        );
         assert_eq!(ponded[i + 20], free[i + 20], "nothing below");
         sim.step_n(300);
         assert!(sim.mills[0].working(), "the channel keeps to the weir");
-        let near = sim.centerline.iter().map(|&c| dist(c, weir)).fold(f64::INFINITY, f64::min);
+        let near = sim
+            .centerline
+            .iter()
+            .map(|&c| dist(c, weir))
+            .fold(f64::INFINITY, f64::min);
         assert!(near < 0.25 * w, "the weir holds its point: {near}");
         sim.flood_mills(1.0);
         assert!(!sim.mills[0].working(), "the greatest flood sweeps it away");
@@ -2875,7 +3305,15 @@ mod tests {
         let nrm = geom::right_normal(&sim.centerline, i);
         let course = sim.course(i - up, i + down, side);
         let (weir, across) = (sim.centerline[i], [side * nrm[0], side * nrm[1]]);
-        let mut m = Mill { weir, across, leat: Vec::new(), course, born: 0.0, ruined_at: f64::INFINITY, at: i };
+        let mut m = Mill {
+            weir,
+            across,
+            leat: Vec::new(),
+            course,
+            born: 0.0,
+            ruined_at: f64::INFINITY,
+            at: i,
+        };
         sim.rejoin(&mut m);
         sim.mills.push(m);
         sim
@@ -2888,17 +3326,30 @@ mod tests {
         let (course, intake) = (sim.mills[0].course.clone(), sim.mills[0].leat[0]);
         sim.step_n(300);
         let m = &sim.mills[0];
-        assert!(m.working() && m.course == course, "the course stays where it was dug");
+        assert!(
+            m.working() && m.course == course,
+            "the course stays where it was dug"
+        );
         let up = sim.reach_points(LEAT_UP);
-        for (end, k) in [(m.leat[0], m.at - up), (m.leat[m.leat.len() - 1], m.at - up + m.leat.len() - 1)] {
+        for (end, k) in [
+            (m.leat[0], m.at - up),
+            (m.leat[m.leat.len() - 1], m.at - up + m.leat.len() - 1),
+        ] {
             let gap = dist(end, sim.centerline[k]) - 0.5 * sim.widths[k] * w;
             assert!(gap.abs() < 0.05 * w, "the leat meets the bank: {gap}");
         }
-        assert!(dist(m.leat[0], intake) > 0.5 * w, "the intake moves with the bank: {}", dist(m.leat[0], intake));
+        assert!(
+            dist(m.leat[0], intake) > 0.5 * w,
+            "the intake moves with the bank: {}",
+            dist(m.leat[0], intake)
+        );
 
         let mut breached = mill_on_a_sine(1.0);
         breached.step_n(300);
-        assert!(!breached.mills[0].working(), "a bend that reaches the leat ruins the mill");
+        assert!(
+            !breached.mills[0].working(),
+            "a bend that reaches the leat ruins the mill"
+        );
     }
 
     #[test]
@@ -2913,8 +3364,15 @@ mod tests {
         let w = sim.params.width;
         assert!(!sim.mills.is_empty());
         for m in &sim.mills {
-            let off = m.leat.iter().map(|&c| (c[1] - m.weir[1]).abs()).fold(0.0, f64::max);
-            assert!((off - (0.5 + LEAT_OFFSET) * w).abs() < 0.1 * w, "the leat runs beside the bank: {off}");
+            let off = m
+                .leat
+                .iter()
+                .map(|&c| (c[1] - m.weir[1]).abs())
+                .fold(0.0, f64::max);
+            assert!(
+                (off - (0.5 + LEAT_OFFSET) * w).abs() < 0.1 * w,
+                "the leat runs beside the bank: {off}"
+            );
         }
         for (a, b) in sim.mills.iter().zip(sim.mills.iter().skip(1)) {
             assert!(dist(a.weir, b.weir) >= sim.params.mill_gap * w || sim.mills.len() < 2);
@@ -2958,14 +3416,21 @@ mod tests {
         assert!(sim.capture());
         assert_eq!((sim.captures, sim.cutoffs), (1, 1));
         assert_eq!(sim.widths.len(), sim.centerline.len());
-        assert!(sim.centerline.iter().all(|q| q[1] < mid + w), "the channel leaves the bend");
+        assert!(
+            sim.centerline.iter().all(|q| q[1] < mid + w),
+            "the channel leaves the bend"
+        );
         assert!(geom::length(&sim.centerline) < before - 15.0 * w);
         assert!(!geom::self_intersects(&sim.centerline));
         // The bend is the new lake; the old lake's middle is now channel.
         let bend = sim.oxbows.last().unwrap();
         assert!(bend.born == sim.time && bend.points.iter().any(|q| q[1] > mid + 9.0 * w));
         let middle = [113.0 * w, mid - 0.5 * w];
-        assert!(sim.oxbows.iter().all(|o| o.points.iter().all(|&q| dist(q, middle) > 1.0)));
+        assert!(
+            sim.oxbows
+                .iter()
+                .all(|o| o.points.iter().all(|&q| dist(q, middle) > 1.0))
+        );
         assert!(sim.centerline.iter().any(|&q| dist(q, middle) < 1e-9));
     }
 
@@ -2988,11 +3453,13 @@ mod tests {
         let mut sim = sine_sim(0.0, 40.0);
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         // Under the water on the channel side, but clear of the centreline.
-        let beside: Vec<P> = (0..20).map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 0.3 * w]).collect();
-        sim.oxbows.push(Oxbow::lake(beside.clone(), vec![1.0; 20], 0.0, 0.0));
+        let beside: Vec<P> = (0..20)
+            .map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 0.3 * w])
+            .collect();
+        sim.oxbows
+            .push(Oxbow::lake(beside.clone(), vec![1.0; 20], 0.0, 0.0));
         sim.step();
         assert_eq!(sim.oxbows.len(), 1);
         assert_eq!(sim.oxbows[0].points, beside);
     }
 }
-

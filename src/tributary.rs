@@ -20,7 +20,8 @@ use std::collections::BinaryHeap;
 use crate::field::{LAKE_DEPTH, lattice};
 use crate::geom::{self, P};
 use crate::{
-    Cells, FAN_HEIGHT, FAN_MAX_DEPTH, FAN_MIN_DEPTH, GROWTH_EVERY, JUNCTION_EVERY, Sim, TRIBUTARY_REACH,
+    Cells, FAN_HEIGHT, FAN_MAX_DEPTH, FAN_MIN_DEPTH, GROWTH_EVERY, JUNCTION_EVERY, Sim,
+    TRIBUTARY_REACH,
 };
 
 /// Spacing of the points of a stream's course, in channel widths.
@@ -138,7 +139,8 @@ impl Sim {
             }
         }
         for t in &found {
-            self.erodibility.grow_cone(t.mouth, t.radius, FAN_HEIGHT * t.scale, t.scale, 1.0);
+            self.erodibility
+                .grow_cone(t.mouth, t.radius, FAN_HEIGHT * t.scale, t.scale, 1.0);
         }
         self.tributaries = found;
         for k in 0..self.tributaries.len() {
@@ -159,7 +161,11 @@ impl Sim {
             course = vec![mouth];
             self.tributaries[k].version += 1;
         }
-        let (lo, hi) = course.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), q| (a.min(q[0]), b.max(q[0])));
+        let (lo, hi) = course
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), q| {
+                (a.min(q[0]), b.max(q[0]))
+            });
         let reach = STREAM_REACH * w;
         let lakes = self.lake_water(lo - reach, hi + reach);
         let mut wet = None;
@@ -193,7 +199,8 @@ impl Sim {
             }
             Some(Wet::Lake) => {
                 t.lake = true;
-                self.erodibility.delta(end, DELTA_RADIUS * w, amount * t.scale);
+                self.erodibility
+                    .delta(end, DELTA_RADIUS * w, amount * t.scale);
             }
             // Out of reach of water for now: it keeps its last confluence.
             None => {}
@@ -220,7 +227,10 @@ impl Sim {
         if let Some((_, j)) = best {
             return Some(Wet::Channel(j));
         }
-        lakes.iter().any(|&(c, r)| geom::dist2(q, c) < r * r).then_some(Wet::Lake)
+        lakes
+            .iter()
+            .any(|&(c, r)| geom::dist2(q, c) < r * r)
+            .then_some(Wet::Lake)
     }
 
     /// The points of open lake water between `x0` and `x1`, each with the
@@ -230,7 +240,11 @@ impl Sim {
     fn lake_water(&self, x0: f64, x1: f64) -> LakeWater {
         let (w, field) = (self.params.width, &self.erodibility);
         let mut out = Vec::new();
-        for o in self.oxbows.iter().filter(|o| o.is_lake() && o.fill < LAKE_OPEN) {
+        for o in self
+            .oxbows
+            .iter()
+            .filter(|o| o.is_lake() && o.fill < LAKE_OPEN)
+        {
             if !o.points.iter().any(|q| (x0..=x1).contains(&q[0])) {
                 continue;
             }
@@ -245,7 +259,9 @@ impl Sim {
                 if s < plug || s > o.length - plug || !(x0..=x1).contains(&q[0]) {
                     continue;
                 }
-                let Some(silt) = field.lake_silt_at(q) else { continue };
+                let Some(silt) = field.lake_silt_at(q) else {
+                    continue;
+                };
                 if silt - mean > DELTA_DRY * open {
                     continue;
                 }
@@ -266,7 +282,10 @@ impl Sim {
     fn stream_route(&self, from: P, lakes: &LakeWater, avoid: &[P]) -> Option<(Vec<P>, Wet)> {
         let (w, field) = (self.params.width, &self.erodibility);
         let cell = STREAM_BLOCK as f64 * field.cell;
-        let (cols, rows) = (field.cols.div_ceil(STREAM_BLOCK), field.rows.div_ceil(STREAM_BLOCK));
+        let (cols, rows) = (
+            field.cols.div_ceil(STREAM_BLOCK),
+            field.rows.div_ceil(STREAM_BLOCK),
+        );
         let to_col = |x: f64| ((x / cell).max(0.0) as usize).min(cols - 1);
         let to_row = |y: f64| ((y / cell).max(0.0) as usize).min(rows - 1);
         let reach = STREAM_REACH * w;
@@ -274,7 +293,12 @@ impl Sim {
         let (bw, bh) = (x1 - x0 + 1, rows);
         let local = |x: usize, y: usize| y * bw + (x - x0);
         let inside = |q: P| (x0..=x1).contains(&to_col(q[0]));
-        let centre = |l: usize| [(x0 + l % bw) as f64 * cell + 0.5 * cell, (l / bw) as f64 * cell + 0.5 * cell];
+        let centre = |l: usize| {
+            [
+                (x0 + l % bw) as f64 * cell + 0.5 * cell,
+                (l / bw) as f64 * cell + 0.5 * cell,
+            ]
+        };
         // Ground cost: each block as low as its lowest cell, above a fresh
         // lake bed, and its noise.
         let mut ground = vec![0.0f32; bw * bh];
@@ -288,8 +312,15 @@ impl Sim {
                     noise += field.noise[i] / (STREAM_BLOCK * STREAM_BLOCK) as f32;
                 }
             }
-            let jitter = lattice(field.seed ^ JITTER_SEED, (x0 + l % bw) as i64, (l / bw) as i64) as f32;
-            *c = STREAM_BASE + STREAM_RISE * (low + LAKE_DEPTH as f32).max(0.0) + STREAM_NOISE * noise + STREAM_JITTER * jitter;
+            let jitter = lattice(
+                field.seed ^ JITTER_SEED,
+                (x0 + l % bw) as i64,
+                (l / bw) as i64,
+            ) as f32;
+            *c = STREAM_BASE
+                + STREAM_RISE * (low + LAKE_DEPTH as f32).max(0.0)
+                + STREAM_NOISE * noise
+                + STREAM_JITTER * jitter;
         }
         for &q in avoid.iter().filter(|&&q| inside(q)) {
             let l = local(to_col(q[0]), to_row(q[1]));
@@ -316,7 +347,12 @@ impl Sim {
             label[l] = LAKE;
             lake_at.push(q);
         }
-        for (j, &q) in self.centerline.iter().enumerate().filter(|(_, q)| inside(**q)) {
+        for (j, &q) in self
+            .centerline
+            .iter()
+            .enumerate()
+            .filter(|(_, q)| inside(**q))
+        {
             let l = local(to_col(q[0]), to_row(q[1]));
             if label[l] >= LAKE || (label[l] as usize) > j {
                 label[l] = j as u32;
@@ -361,7 +397,10 @@ impl Sim {
         // End on the water point itself, which the walk finds wet.
         let (end, wet) = if label[l] == LAKE {
             let c = centre(l);
-            let q = lake_at.iter().copied().min_by(|a, b| geom::dist2(*a, c).total_cmp(&geom::dist2(*b, c)))?;
+            let q = lake_at
+                .iter()
+                .copied()
+                .min_by(|a, b| geom::dist2(*a, c).total_cmp(&geom::dist2(*b, c)))?;
             (q, Wet::Lake)
         } else {
             let j = label[l] as usize;
@@ -403,7 +442,8 @@ impl Sim {
             }
             if fan_time > 0.0 && (self.steps + k as u64) % GROWTH_EVERY == 0 {
                 let t = &self.tributaries[k];
-                self.erodibility.grow_cone(t.mouth, t.radius, FAN_HEIGHT * t.scale, t.scale, frac);
+                self.erodibility
+                    .grow_cone(t.mouth, t.radius, FAN_HEIGHT * t.scale, t.scale, frac);
             }
         }
     }
@@ -424,7 +464,11 @@ impl Sim {
             }
             let pick = self.streams.uniform();
             let t = &self.tributaries[k];
-            let on_fan = t.course.iter().take_while(|&&q| geom::dist2(q, t.mouth) < t.radius * t.radius).count();
+            let on_fan = t
+                .course
+                .iter()
+                .take_while(|&&q| geom::dist2(q, t.mouth) < t.radius * t.radius)
+                .count();
             if on_fan < 2 {
                 continue;
             }
@@ -432,7 +476,9 @@ impl Sim {
             let (from, old) = (t.course[node], t.course[node + 1..].to_vec());
             let reach = STREAM_REACH * w;
             let lakes = self.lake_water(from[0] - reach, from[0] + reach);
-            let Some((route, wet)) = self.stream_route(from, &lakes, &old) else { continue };
+            let Some((route, wet)) = self.stream_route(from, &lakes, &old) else {
+                continue;
+            };
             let t = &mut self.tributaries[k];
             t.course.truncate(node + 1);
             join(&mut t.course, &route);
@@ -502,7 +548,9 @@ mod tests {
     fn a_stream_keeps_its_course_and_ends_in_a_lake_across_it() {
         let mut sim = Sim::new(Params::default(), [400.0 * 8.0, 60.0 * 8.0], 1, 0.5);
         let w = sim.params.width;
-        let k = (0..sim.tributaries.len()).max_by_key(|&k| sim.tributaries[k].course.len()).unwrap();
+        let k = (0..sim.tributaries.len())
+            .max_by_key(|&k| sim.tributaries[k].course.len())
+            .unwrap();
         let course = sim.tributaries[k].course.clone();
         assert!(course.len() >= 12, "a course of {} points", course.len());
         assert!(!sim.tributaries[k].lake);
@@ -513,21 +561,37 @@ mod tests {
         assert_eq!(sim.tributaries[k].course, course);
         // A lake across the middle of the course.
         let c = course[course.len() / 2];
-        let lake: Vec<P> = (0..41).map(|i| [c[0] + (i as f64 - 20.0) * 0.5 * w, c[1]]).collect();
+        let lake: Vec<P> = (0..41)
+            .map(|i| [c[0] + (i as f64 - 20.0) * 0.5 * w, c[1]])
+            .collect();
         let widths = vec![1.0; lake.len()];
-        sim.erodibility.stamp_oxbow(&lake, &widths, 0.5 * w, sim.time);
+        sim.erodibility
+            .stamp_oxbow(&lake, &widths, 0.5 * w, sim.time);
         sim.oxbows.push(Oxbow::lake(lake, widths, sim.time, 0.0));
         sim.join_tributary(k);
         let t = &sim.tributaries[k];
         assert!(t.lake, "ends in the lake");
-        assert!(t.course.len() <= course.len() / 2 + 2, "cut at the lake: {} of {}", t.course.len(), course.len());
-        assert_eq!(t.course[..], course[..t.course.len()], "the course above the lake stays put");
+        assert!(
+            t.course.len() <= course.len() / 2 + 2,
+            "cut at the lake: {} of {}",
+            t.course.len(),
+            course.len()
+        );
+        assert_eq!(
+            t.course[..],
+            course[..t.course.len()],
+            "the course above the lake stays put"
+        );
         let end = *t.course.last().unwrap();
         let silt = sim.erodibility.silt_at(end);
         for _ in 0..50 {
             sim.join_tributary(k);
         }
-        assert!(sim.erodibility.silt_at(end) > silt + 0.01, "the delta builds: {silt} to {}", sim.erodibility.silt_at(end));
+        assert!(
+            sim.erodibility.silt_at(end) > silt + 0.01,
+            "the delta builds: {silt} to {}",
+            sim.erodibility.silt_at(end)
+        );
         // Its bedload stays in the lake.
         let fed = sim.migration_rate().to_vec();
         sim.tributaries.remove(k);

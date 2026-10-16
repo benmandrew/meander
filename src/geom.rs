@@ -15,7 +15,11 @@ pub fn dist2(a: P, b: P) -> f64 {
 pub fn seg_dist2(p: P, a: P, b: P) -> f64 {
     let (ab, ap) = ([b[0] - a[0], b[1] - a[1]], [p[0] - a[0], p[1] - a[1]]);
     let len2 = ab[0] * ab[0] + ab[1] * ab[1];
-    let t = if len2 > 0.0 { ((ap[0] * ab[0] + ap[1] * ab[1]) / len2).clamp(0.0, 1.0) } else { 0.0 };
+    let t = if len2 > 0.0 {
+        ((ap[0] * ab[0] + ap[1] * ab[1]) / len2).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
     dist2(p, lerp(a, b, t))
 }
 
@@ -46,7 +50,11 @@ pub fn resample_into(pts: &[P], ds: f64, out: &mut Vec<P>) {
 pub fn resample_with(pts: &[P], vals: &[f64], ds: f64, out: &mut Vec<P>, out_vals: &mut Vec<f64>) {
     out_vals.clear();
     resample_core(pts, ds, out, |seg, t| {
-        let v = if seg + 1 < vals.len() { vals[seg] + (vals[seg + 1] - vals[seg]) * t } else { vals[seg] };
+        let v = if seg + 1 < vals.len() {
+            vals[seg] + (vals[seg + 1] - vals[seg]) * t
+        } else {
+            vals[seg]
+        };
         out_vals.push(v);
     });
 }
@@ -102,7 +110,11 @@ pub fn curvature(pts: &[P], out: &mut Vec<f64>) {
         let b = [p2[0] - p1[0], p2[1] - p1[1]];
         let cross = a[0] * b[1] - a[1] * b[0];
         let denom = dist(p0, p1) * dist(p1, p2) * dist(p0, p2);
-        out[i] = if denom > 0.0 { 2.0 * cross / denom } else { 0.0 };
+        out[i] = if denom > 0.0 {
+            2.0 * cross / denom
+        } else {
+            0.0
+        };
     }
 }
 
@@ -165,7 +177,10 @@ mod tests {
         let mut c = Vec::new();
         curvature(&pts, &mut c);
         for &k in &c[1..99] {
-            assert!((k - 1.0 / r).abs() < 1e-6, "counter-clockwise turn is positive");
+            assert!(
+                (k - 1.0 / r).abs() < 1e-6,
+                "counter-clockwise turn is positive"
+            );
         }
     }
 }

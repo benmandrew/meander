@@ -19,13 +19,24 @@ fn svg(sim: &Sim, x0: f64, w: f64) -> String {
     let (cols, c) = (land.cols, land.cell);
     let tint = |o: u32| {
         let h = (o as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
-        format!("rgb({},{},{})", 150 + (h & 63), 160 + ((h >> 6) & 63), 110 + ((h >> 12) & 63))
+        format!(
+            "rgb({},{},{})",
+            150 + (h & 63),
+            160 + ((h >> 6) & 63),
+            110 + ((h >> 12) & 63)
+        )
     };
     for y in 0..land.rows {
         for x in 0..cols {
             let o = land.owner[y * cols + x];
             if o != meander_core::land::NONE {
-                let _ = write!(s, "<rect x='{:.1}' y='{:.1}' width='{c:.1}' height='{c:.1}' fill='{}'/>", x as f64 * c, y as f64 * c, tint(o));
+                let _ = write!(
+                    s,
+                    "<rect x='{:.1}' y='{:.1}' width='{c:.1}' height='{c:.1}' fill='{}'/>",
+                    x as f64 * c,
+                    y as f64 * c,
+                    tint(o)
+                );
             }
         }
     }
@@ -42,14 +53,27 @@ fn svg(sim: &Sim, x0: f64, w: f64) -> String {
             }
         }
     }
-    let _ = write!(s, "<path d='{edges}' stroke='#3c5a2c' stroke-width='0.8' fill='none'/>");
+    let _ = write!(
+        s,
+        "<path d='{edges}' stroke='#3c5a2c' stroke-width='0.8' fill='none'/>"
+    );
     for h in land.holdings.iter().flatten() {
-        let _ = write!(s, "<circle cx='{:.1}' cy='{:.1}' r='3' fill='#7a3b2a'/>", h.seat[0], h.seat[1]);
+        let _ = write!(
+            s,
+            "<circle cx='{:.1}' cy='{:.1}' r='3' fill='#7a3b2a'/>",
+            h.seat[0], h.seat[1]
+        );
     }
     let path = |pts: &[[f64; 2]]| {
         let mut d = String::new();
         for (i, p) in pts.iter().enumerate() {
-            let _ = write!(d, "{}{:.2},{:.2} ", if i == 0 { "M" } else { "L" }, p[0], p[1]);
+            let _ = write!(
+                d,
+                "{}{:.2},{:.2} ",
+                if i == 0 { "M" } else { "L" },
+                p[0],
+                p[1]
+            );
         }
         d
     };
@@ -60,7 +84,9 @@ fn svg(sim: &Sim, x0: f64, w: f64) -> String {
             "<path d='{}' fill='none' stroke='#5b8a9a' stroke-opacity='{:.2}' stroke-width='{:.2}' stroke-linejoin='round' stroke-linecap='round'/>",
             path(&o.points),
             1.0 - age,
-            o.widths.iter().sum::<f64>() / o.widths.len() as f64 * sim.params.width * (1.0 - 0.7 * age)
+            o.widths.iter().sum::<f64>() / o.widths.len() as f64
+                * sim.params.width
+                * (1.0 - 0.7 * age)
         );
     }
     // Tributary streams, red where they end in a lake.
@@ -80,7 +106,11 @@ fn svg(sim: &Sim, x0: f64, w: f64) -> String {
         let _ = write!(
             s,
             "<path d='M{:.2},{:.2} L{:.2},{:.2}' stroke='#2f6f8f' stroke-width='{:.2}' stroke-linecap='round'/>",
-            seg[0][0], seg[0][1], seg[1][0], seg[1][1], b * sim.params.width
+            seg[0][0],
+            seg[0][1],
+            seg[1][0],
+            seg[1][1],
+            b * sim.params.width
         );
     }
     s.push_str("</svg>");
@@ -97,10 +127,20 @@ fn width_stats(sim: &Sim) -> [f64; 5] {
     ws.sort_by(f64::total_cmp);
     let q = |f: f64| ws[((ws.len() - 1) as f64 * f) as usize];
     let mean = |keep: &dyn Fn(f64) -> bool| {
-        let (s, n) = c.iter().zip(&sim.widths).filter(|(k, _)| keep(k.abs() * w)).fold((0.0, 0), |(s, n), (_, b)| (s + b, n + 1));
+        let (s, n) = c
+            .iter()
+            .zip(&sim.widths)
+            .filter(|(k, _)| keep(k.abs() * w))
+            .fold((0.0, 0), |(s, n), (_, b)| (s + b, n + 1));
         s / n.max(1) as f64
     };
-    [q(0.1), q(0.5), q(0.9), mean(&|k| k < 0.1), mean(&|k| k > 1.0 / 3.0)]
+    [
+        q(0.1),
+        q(0.5),
+        q(0.9),
+        mean(&|k| k < 0.1),
+        mean(&|k| k > 1.0 / 3.0),
+    ]
 }
 
 /// Fraction of interior points with bend radius under 1.5 channel widths.
@@ -120,7 +160,9 @@ fn reach_sinuosity(sim: &mut Sim) -> f64 {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let out = args.get(1).expect("usage: snapshot <out_dir> [steps] [every] [seed]");
+    let out = args
+        .get(1)
+        .expect("usage: snapshot <out_dir> [steps] [every] [seed]");
     let steps: usize = args.get(2).map_or(20000, |s| s.parse().unwrap());
     let every: usize = args.get(3).map_or(2000, |s| s.parse().unwrap());
     let seed: u64 = args.get(4).map_or(1, |s| s.parse().unwrap());
@@ -171,7 +213,11 @@ fn main() {
                 format!("{lo:.2}/{mid:.2}/{hi:.2} gentle {gentle:.2} sharp {sharp:.2}")
             }
         );
-        let retreat = |side| (0..(sim.bounds[0] / sim.params.width) as usize).map(|x| sim.walls.retreat(side, x as f64)).fold(0.0f64, f64::max);
+        let retreat = |side| {
+            (0..(sim.bounds[0] / sim.params.width) as usize)
+                .map(|x| sim.walls.retreat(side, x as f64))
+                .fold(0.0f64, f64::max)
+        };
         println!(
             "        supply {:4.2}  jams {:2}  splays {:2}  avulsions {:2}  captures {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {} ({} into lakes)",
             sim.supply(),
@@ -188,7 +234,11 @@ fn main() {
             sim.tributaries.len(),
             sim.tributaries.iter().filter(|t| t.lake).count(),
         );
-        std::fs::write(format!("{out}/step{:06}.svg", sim.steps), svg(&sim, up, view_w)).unwrap();
+        std::fs::write(
+            format!("{out}/step{:06}.svg", sim.steps),
+            svg(&sim, up, view_w),
+        )
+        .unwrap();
         for o in sim.oxbows.iter().filter(|o| !o.is_lake()) {
             let key = (o.born.to_bits(), o.length.to_bits());
             if !lake_lives.iter().any(|l| l.0 == key) {
@@ -200,12 +250,27 @@ fn main() {
     lives.sort_by(f64::total_cmp);
     if !lives.is_empty() {
         let q = |f: f64| lives[((lives.len() - 1) as f64 * f) as usize];
-        println!("{} lakes filled; time to fill: quartiles {:.0} {:.0} {:.0}", lives.len(), q(0.25), q(0.5), q(0.75));
+        println!(
+            "{} lakes filled; time to fill: quartiles {:.0} {:.0} {:.0}",
+            lives.len(),
+            q(0.25),
+            q(0.5),
+            q(0.75)
+        );
     }
-    println!("{:.3} ms/step", t0.elapsed().as_secs_f64() * 1e3 / steps as f64);
+    println!(
+        "{:.3} ms/step",
+        t0.elapsed().as_secs_f64() * 1e3 / steps as f64
+    );
     times.sort_by(f64::total_cmp);
     if !times.is_empty() {
         let q = |f: f64| times[((times.len() - 1) as f64 * f) as usize];
-        println!("step time: median {:.3}  99% {:.3}  99.9% {:.3}  max {:.3} ms", q(0.5), q(0.99), q(0.999), q(1.0));
+        println!(
+            "step time: median {:.3}  99% {:.3}  99.9% {:.3}  max {:.3} ms",
+            q(0.5),
+            q(0.99),
+            q(0.999),
+            q(1.0)
+        );
     }
 }

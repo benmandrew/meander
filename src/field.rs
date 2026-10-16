@@ -40,7 +40,9 @@ const BARE_GROWTH: f32 = 0.6;
 const HIGH_GROWTH: f32 = 1.6;
 
 pub(crate) fn lattice(seed: u64, x: i64, y: i64) -> f64 {
-    let mut h = seed ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    let mut h = seed
+        ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
     h ^= h >> 33;
@@ -247,7 +249,8 @@ impl Erodibility {
         } else {
             // Never-swept ground has infinite growth and a multiplier of 1.
             let growth = self.growth[i] as f64;
-            let shrub = g.bar + (g.shrub - g.bar) * (growth / g.vegetation.max(1e-9)).clamp(0.0, 1.0);
+            let shrub =
+                g.bar + (g.shrub - g.bar) * (growth / g.vegetation.max(1e-9)).clamp(0.0, 1.0);
             shrub + (1.0 - shrub) * ((growth - g.vegetation) / g.forest.max(1e-9)).clamp(0.0, 1.0)
         };
         let coarse = 1.0 - (1.0 - g.coarse) * self.coarse[i] as f64;
@@ -281,7 +284,9 @@ impl Erodibility {
     /// cells are half a width across, so the channel sweeps cells under
     /// lake points beside it, and their silt is that of fresh bar sand.
     pub fn lake_silt_at(&self, p: P) -> Option<f64> {
-        self.cut_at[self.index(p)].is_finite().then(|| self.silt_at(p))
+        self.cut_at[self.index(p)]
+            .is_finite()
+            .then(|| self.silt_at(p))
     }
 
     /// Mean of [`Erodibility::lake_silt_at`] over the interior points of an
@@ -320,7 +325,11 @@ impl Erodibility {
             return;
         }
         let widest = widths.iter().fold(1.0f64, |a, &b| a.max(b));
-        let beyond = if deposits { LEVEE_REACH * f.length } else { 0.0 };
+        let beyond = if deposits {
+            LEVEE_REACH * f.length
+        } else {
+            0.0
+        };
         self.find_nearest(pts, widest * f.half + beyond.max(f.scour));
         let young = f.young as f32;
         let cells = self.deposit.iter_mut().zip(&mut self.growth);
@@ -377,10 +386,15 @@ impl Erodibility {
             self.row_start[y] += self.row_start[y - 1];
         }
         self.row_points.clear();
-        self.row_points.resize(self.row_start[self.rows] as usize, 0);
+        self.row_points
+            .resize(self.row_start[self.rows] as usize, 0);
         self.order.clear();
         self.order.extend(0..pts.len() as u32);
-        self.order.sort_unstable_by(|&a, &b| pts[a as usize][0].total_cmp(&pts[b as usize][0]).then(a.cmp(&b)));
+        self.order.sort_unstable_by(|&a, &b| {
+            pts[a as usize][0]
+                .total_cmp(&pts[b as usize][0])
+                .then(a.cmp(&b))
+        });
         for &k in self.order.iter().rev() {
             for y in rows_of(pts[k as usize]) {
                 self.row_start[y] -= 1;
@@ -565,7 +579,11 @@ impl Erodibility {
             for x in x0..=x1 {
                 let (dx, i) = ((x as f64 + 0.5) * c - s.apex[0], y * self.cols + x);
                 let d = (dx * dx + dy * dy).sqrt();
-                let cos = if d > 0.0 { (dx * s.dir[0] + dy * s.dir[1]) / d } else { 1.0 };
+                let cos = if d > 0.0 {
+                    (dx * s.dir[0] + dy * s.dir[1]) / d
+                } else {
+                    1.0
+                };
                 if d >= s.length || cos < s.spread {
                     continue;
                 }
@@ -574,7 +592,11 @@ impl Erodibility {
                 let across = ((cos - s.spread) / (1.0 - s.spread).max(1e-9)).min(1.0);
                 let t = (1.0 - d / s.length) * across.sqrt();
                 let h = &mut self.deposit[i];
-                let room = if s.stage > 0.0 { (1.0 - *h as f64 / s.stage).max(0.0) } else { 0.0 };
+                let room = if s.stage > 0.0 {
+                    (1.0 - *h as f64 / s.stage).max(0.0)
+                } else {
+                    0.0
+                };
                 *h += (s.sand * t * room) as f32;
                 self.growth[i] = self.growth[i].min(s.mature as f32) * (1.0 - t) as f32;
                 count += 1;
@@ -627,24 +649,55 @@ mod tests {
     #[test]
     fn height_is_bounded_and_varies_along_an_oxbow() {
         let e = Erodibility::new([100.0, 100.0], 1.0, 25.0, 3);
-        let h: Vec<f64> = (0..400).map(|k| e.height([k as f64 * 0.25, 50.0])).collect();
+        let h: Vec<f64> = (0..400)
+            .map(|k| e.height([k as f64 * 0.25, 50.0]))
+            .collect();
         assert!(h.iter().all(|v| (0.0..=1.0).contains(v)));
-        let (lo, hi) = h.iter().fold((1.0f64, 0.0f64), |(a, b), &v| (a.min(v), b.max(v)));
+        let (lo, hi) = h
+            .iter()
+            .fold((1.0f64, 0.0f64), |(a, b), &v| (a.min(v), b.max(v)));
         assert!(hi - lo > 0.1, "range {lo}..{hi}");
     }
 
     /// A flood that lays the deposit, up to the flood level `stage`.
     fn deposit(stage: f64) -> Flood<'static> {
-        Flood { half: 1.0, amount: 0.3, length: 2.0, stage, scour: 0.0, young: 0.0, boost: &[] }
+        Flood {
+            half: 1.0,
+            amount: 0.3,
+            length: 2.0,
+            stage,
+            scour: 0.0,
+            young: 0.0,
+            boost: &[],
+        }
     }
 
     /// A flood that only strips vegetation younger than `young`.
     fn scour(reach: f64, young: f64) -> Flood<'static> {
-        Flood { half: 1.0, amount: 0.0, length: 0.0, stage: 0.0, scour: reach, young, boost: &[] }
+        Flood {
+            half: 1.0,
+            amount: 0.0,
+            length: 0.0,
+            stage: 0.0,
+            scour: reach,
+            young,
+            boost: &[],
+        }
     }
 
     fn ground(time: f64) -> Ground {
-        Ground { time, heterogeneity: 0.0, lake_life: 100.0, lake: 3.0, clay: 0.3, bar: 2.0, vegetation: 50.0, shrub: 1.0, forest: 1.0, coarse: 0.5 }
+        Ground {
+            time,
+            heterogeneity: 0.0,
+            lake_life: 100.0,
+            lake: 3.0,
+            clay: 0.3,
+            bar: 2.0,
+            vegetation: 50.0,
+            shrub: 1.0,
+            forest: 1.0,
+            coarse: 0.5,
+        }
     }
 
     #[test]
@@ -663,7 +716,11 @@ mod tests {
     #[test]
     fn a_point_bar_grows_shrub_then_forest() {
         let mut e = Erodibility::new([10.0, 10.0], 1.0, 5.0, 0);
-        let g = Ground { shrub: 1.5, forest: 200.0, ..ground(0.0) };
+        let g = Ground {
+            shrub: 1.5,
+            forest: 200.0,
+            ..ground(0.0)
+        };
         let at = |e: &Erodibility| e.at([5.0, 5.0], &g);
         assert_eq!(at(&e), 1.0, "never swept");
         e.sweep(&[[5.0, 5.0]]);
@@ -684,7 +741,10 @@ mod tests {
         let (low, high) = ([2.5, 5.5], [7.5, 5.5]);
         e.sweep(&[low, high]);
         e.raise(&[high, high], 0.1, 1.0);
-        assert!((e.deposit_at(high) - 0.1).abs() < 1e-6, "a ridge raises its cell once");
+        assert!(
+            (e.deposit_at(high) - 0.1).abs() < 1e-6,
+            "a ridge raises its cell once"
+        );
         e.grow(10.0, 0.1);
         let growth = |p| e.growth[e.index(p)];
         assert!((growth(low) - 10.0 * BARE_GROWTH).abs() < 1e-4);
@@ -696,17 +756,25 @@ mod tests {
         let mut e = Erodibility::new([40.0, 30.0], 0.5, 5.0, 0);
         // A winding channel that doubles back, with points above one
         // another, and some outside the grid.
-        let mut pts: Vec<P> = (0..300).map(|k| {
-            let t = k as f64 * 0.1;
-            [2.0 + 1.2 * t + 6.0 * (0.7 * t).sin(), 15.0 + 9.0 * (0.45 * t).cos()]
-        }).collect();
+        let mut pts: Vec<P> = (0..300)
+            .map(|k| {
+                let t = k as f64 * 0.1;
+                [
+                    2.0 + 1.2 * t + 6.0 * (0.7 * t).sin(),
+                    15.0 + 9.0 * (0.45 * t).cos(),
+                ]
+            })
+            .collect();
         pts.extend([[10.0, 5.0], [10.0, 7.0], [-3.0, 12.0], [45.0, 20.0]]);
         let reach = 4.0;
         e.find_nearest(&pts, reach);
         for y in 0..e.rows {
             for x in 0..e.cols {
                 let (cx, cy) = ((x as f64 + 0.5) * e.cell, (y as f64 + 0.5) * e.cell);
-                let best = pts.iter().map(|p| (cx - p[0]).powi(2) + (cy - p[1]).powi(2)).fold(f64::INFINITY, f64::min);
+                let best = pts
+                    .iter()
+                    .map(|p| (cx - p[0]).powi(2) + (cy - p[1]).powi(2))
+                    .fold(f64::INFINITY, f64::min);
                 let i = y * e.cols + x;
                 if best >= reach * reach {
                     assert!(e.near[i].is_infinite(), "cell {x}, {y} is out of reach");
@@ -714,7 +782,10 @@ mod tests {
                 }
                 let p = pts[e.nearest[i] as usize];
                 let found = (cx - p[0]).powi(2) + (cy - p[1]).powi(2);
-                assert!((found - best).abs() < 1e-9 && (e.near[i] as f64 - best).abs() < 1e-4, "cell {x}, {y}: {found} for {best}");
+                assert!(
+                    (found - best).abs() < 1e-9 && (e.near[i] as f64 - best).abs() < 1e-4,
+                    "cell {x}, {y}: {found} for {best}"
+                );
             }
         }
     }
@@ -732,7 +803,10 @@ mod tests {
         let growth = |p| e.growth[e.index(p)];
         // The cell centre lies a quarter cell along from the nearest point.
         let d = (1.25f64 * 1.25 + 0.25 * 0.25).sqrt();
-        assert!((growth(young) as f64 - 10.0 * (d - 1.0) / 2.0).abs() < 1e-4, "scaled by the distance from the bank");
+        assert!(
+            (growth(young) as f64 - 10.0 * (d - 1.0) / 2.0).abs() < 1e-4,
+            "scaled by the distance from the bank"
+        );
         assert_eq!(growth(old), 210.0, "established vegetation holds");
         assert_eq!(growth(far), 10.0, "beyond the reach");
     }
@@ -750,7 +824,11 @@ mod tests {
         for _ in 0..200 {
             e.flood(&channel, &vec![1.0; channel.len()], &deposit(1.0));
         }
-        assert!(h(&e, 21.25) <= 1.0 && h(&e, 21.25) > 0.95, "levee {}", h(&e, 21.25));
+        assert!(
+            h(&e, 21.25) <= 1.0 && h(&e, 21.25) > 0.95,
+            "levee {}",
+            h(&e, 21.25)
+        );
         let at = |e: &Erodibility, y| e.at([20.0, y], &ground(0.0));
         assert!((at(&e, 21.25) - 1.0 / (1.0 + h(&e, 21.25))).abs() < 1e-9);
         e.sweep(&[[20.0, 21.25]]);
@@ -768,12 +846,18 @@ mod tests {
         e.flood(&channel, &vec![1.0; channel.len()], &deposit(0.25));
         let silt = e.silt_at([20.0, 22.25]);
         assert!(silt > 0.3 && silt < 1.0, "silt {silt}");
-        assert!((at(&e) - (3.0 - 2.7 * silt)).abs() < 1e-6, "stiffens with the silt");
+        assert!(
+            (at(&e) - (3.0 - 2.7 * silt)).abs() < 1e-6,
+            "stiffens with the silt"
+        );
         for _ in 0..50 {
             e.flood(&channel, &vec![1.0; channel.len()], &deposit(0.25));
         }
         assert_eq!(e.silt_at([20.0, 22.25]), 1.0);
-        assert!(e.deposit_at([20.0, 22.25]) <= 0.25, "fills no higher than the flood level");
+        assert!(
+            e.deposit_at([20.0, 22.25]) <= 0.25,
+            "fills no higher than the flood level"
+        );
     }
 
     #[test]
@@ -782,28 +866,63 @@ mod tests {
         let (apex, toe) = ([20.0, 20.0], [23.25, 20.25]);
         e.grow_cone(apex, 5.0, 0.5, 1.0, 1.0);
         let at = |e: &Erodibility, p| e.at(p, &ground(0.0));
-        assert!(e.coarse[e.index(apex)] > 0.95 && e.deposit_at(apex) > 0.45, "full cone at the apex");
-        assert!(at(&e, toe) < 1.0 && at(&e, toe) > at(&e, apex), "coarse ground erodes slowly, the apex slowest");
+        assert!(
+            e.coarse[e.index(apex)] > 0.95 && e.deposit_at(apex) > 0.45,
+            "full cone at the apex"
+        );
+        assert!(
+            at(&e, toe) < 1.0 && at(&e, toe) > at(&e, apex),
+            "coarse ground erodes slowly, the apex slowest"
+        );
         assert_eq!(e.coarse[e.index([30.0, 20.0])], 0.0, "beyond the rim");
         let full = e.coarse[e.index(toe)];
         e.sweep(&[toe]);
-        assert!((e.coarse[e.index(toe)] - 0.5 * full).abs() < 1e-6, "the channel reworks half the gravel");
+        assert!(
+            (e.coarse[e.index(toe)] - 0.5 * full).abs() < 1e-6,
+            "the channel reworks half the gravel"
+        );
         e.grow_cone(apex, 5.0, 0.5, 1.0, 0.5);
         let back = e.coarse[e.index(toe)];
-        assert!(back > 0.5 * full && back < full, "builds halfway back: {back} of {full}");
+        assert!(
+            back > 0.5 * full && back < full,
+            "builds halfway back: {back} of {full}"
+        );
         e.grow_cone(apex, 5.0, 0.0, 0.0, 1.0);
-        assert_eq!(e.coarse[e.index(toe)], back, "a cone never lowers the ground");
+        assert_eq!(
+            e.coarse[e.index(toe)],
+            back,
+            "a cone never lowers the ground"
+        );
     }
 
     #[test]
     fn a_splay_buries_vegetation_in_a_lobe() {
         let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
         e.growth.fill(500.0);
-        let s = Splay { apex: [10.0, 20.0], dir: [1.0, 0.0], spread: 0.8, length: 10.0, sand: 0.3, stage: 0.25, mature: 500.0 };
+        let s = Splay {
+            apex: [10.0, 20.0],
+            dir: [1.0, 0.0],
+            spread: 0.8,
+            length: 10.0,
+            sand: 0.3,
+            stage: 0.25,
+            mature: 500.0,
+        };
         assert!(e.splay(&s) > 50);
-        let (near, far, behind, flank) = ([11.25, 20.25], [18.75, 20.25], [8.25, 20.25], [12.25, 26.25]);
-        assert!(e.growth_at(near) < 100.0 && e.deposit_at(near) > 0.15, "buried under sand at the apex");
-        assert!(e.growth_at(far) > 400.0 && e.deposit_at(far) < 0.05, "thin at the edge");
+        let (near, far, behind, flank) = (
+            [11.25, 20.25],
+            [18.75, 20.25],
+            [8.25, 20.25],
+            [12.25, 26.25],
+        );
+        assert!(
+            e.growth_at(near) < 100.0 && e.deposit_at(near) > 0.15,
+            "buried under sand at the apex"
+        );
+        assert!(
+            e.growth_at(far) > 400.0 && e.deposit_at(far) < 0.05,
+            "thin at the edge"
+        );
         assert_eq!(e.growth_at(behind), 500.0, "nothing behind the breach");
         assert_eq!(e.growth_at(flank), 500.0, "nothing outside the lobe");
         assert!(e.deposit_at(near) <= 0.25, "no higher than the flood level");
@@ -818,11 +937,17 @@ mod tests {
         e.stamp_oxbow(&[[5.0, 5.0]], &[1.0], 1.0, 10.0);
         e.sweep(&[[5.5, 5.5]]);
         let at = |e: &Erodibility| e.at([5.5, 5.5], &ground(10.0));
-        assert!((at(&e) - 2.0).abs() < 1e-12, "the channel replaces the oxbow fill with sand");
+        assert!(
+            (at(&e) - 2.0).abs() < 1e-12,
+            "the channel replaces the oxbow fill with sand"
+        );
         e.grow(25.0, 0.0);
         assert!((at(&e) - 1.5).abs() < 1e-12);
         e.grow(75.0, 0.0);
         assert!((at(&e) - 1.0).abs() < 1e-12);
-        assert!((e.at([4.5, 5.5], &ground(10.0)) - 3.0).abs() < 1e-12, "only the swept cell changes");
+        assert!(
+            (e.at([4.5, 5.5], &ground(10.0)) - 3.0).abs() < 1e-12,
+            "only the swept cell changes"
+        );
     }
 }

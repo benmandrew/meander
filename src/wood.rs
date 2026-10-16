@@ -65,7 +65,9 @@ impl Sim {
         let g = self.build_grid(JAM_HOLD * w);
         let mut jams = std::mem::take(&mut self.jams);
         jams.retain_mut(|j| {
-            let Some(i) = self.nearest_point(j.pos, JAM_HOLD * w, g) else { return false };
+            let Some(i) = self.nearest_point(j.pos, JAM_HOLD * w, g) else {
+                return false;
+            };
             let n = self.centerline.len();
             if i == 0 || i + 1 >= n {
                 return false;
@@ -100,9 +102,14 @@ impl Sim {
                 let (q, nrm) = (self.centerline[i], right_normal(&self.centerline, i));
                 let off = d.signum() * (0.5 * self.widths[i] + BANK_BEYOND) * w;
                 let bank = [q[0] + off * nrm[0], q[1] + off * nrm[1]];
-                let maturity = ((field.growth_at(bank) - p.vegetation_time) / p.forest_time).clamp(0.0, 1.0);
+                let maturity =
+                    ((field.growth_at(bank) - p.vegetation_time) / p.forest_time).clamp(0.0, 1.0);
                 if maturity > 0.0 {
-                    let farmed = self.land.owner.get(field.cell_index(bank)).is_some_and(|&o| o != land::NONE);
+                    let farmed = self
+                        .land
+                        .owner
+                        .get(field.cell_index(bank))
+                        .is_some_and(|&o| o != land::NONE);
                     weight = maturity * if farmed { FARM_WOOD } else { 1.0 } * d.abs() / w;
                 }
             }
@@ -114,7 +121,11 @@ impl Sim {
             return;
         }
         let pick = self.events.uniform() * total;
-        let i = self.weights.partition_point(|&c| c < pick).min(n - 2).max(1);
+        let i = self
+            .weights
+            .partition_point(|&c| c < pick)
+            .min(n - 2)
+            .max(1);
         let side = self.shift[i].signum();
         let (q, nrm) = (self.centerline[i], right_normal(&self.centerline, i));
         let off = side * 0.5 * self.widths[i] * w;
@@ -123,12 +134,23 @@ impl Sim {
         // A tree joins a jam already near it on either bank: jams pushing
         // from both banks close together would kink the channel.
         let merge = (JAM_MERGE * w).powi(2);
-        if let Some(j) = self.jams.iter_mut().find(|j| geom::dist2(j.pos, pos) < merge) {
+        if let Some(j) = self
+            .jams
+            .iter_mut()
+            .find(|j| geom::dist2(j.pos, pos) < merge)
+        {
             j.size = (j.size + TREE).min(1.0);
             j.until = j.until.max(time + life * j.size);
         } else if self.jams.len() < MAX_JAMS {
             let down = [-nrm[1], nrm[0]];
-            self.jams.push(Jam { pos, down, side, size: TREE, until: time + life * TREE, at: i });
+            self.jams.push(Jam {
+                pos,
+                down,
+                side,
+                size: TREE,
+                until: time + life * TREE,
+                at: i,
+            });
         }
     }
 
@@ -180,6 +202,9 @@ impl Sim {
     /// channel of point `i`.
     pub(crate) fn jam_near(&self, i: usize) -> f64 {
         let (r, life) = (self.reach_points(JAM_REACH), self.params.jam_lifetime);
-        self.jams.iter().filter(|j| j.at.abs_diff(i) <= r).fold(0.0, |m, j| m.max(j.strength(self.time, life)))
+        self.jams
+            .iter()
+            .filter(|j| j.at.abs_diff(i) <= r)
+            .fold(0.0, |m, j| m.max(j.strength(self.time, life)))
     }
 }

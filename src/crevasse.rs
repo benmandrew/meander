@@ -12,8 +12,9 @@ use std::collections::BinaryHeap;
 use crate::field::{LAKE_DEPTH, Splay};
 use crate::geom::{self, P, right_normal};
 use crate::{
-    AVULSION_BASE, AVULSION_JOIN, AVULSION_REACH, AVULSION_RISE, AVULSION_SMOOTH, AVULSION_WIDTH, CUT_COOLDOWN, JAM_CREVASSE,
-    PINCH_CLEAR, SPLAY_LIFE, SPLAY_PROBE, SPLAY_SAND, SPLAY_SPREAD, Sim, edge_taper,
+    AVULSION_BASE, AVULSION_JOIN, AVULSION_REACH, AVULSION_RISE, AVULSION_SMOOTH, AVULSION_WIDTH,
+    CUT_COOLDOWN, JAM_CREVASSE, PINCH_CLEAR, SPLAY_LIFE, SPLAY_PROBE, SPLAY_SAND, SPLAY_SPREAD,
+    Sim, edge_taper,
 };
 
 /// Spacing of the points tested for a breach, in centreline points.
@@ -71,7 +72,9 @@ impl Sim {
             return false;
         }
         self.migration_rate();
-        let Some(b) = self.find_breach(u) else { return false };
+        let Some(b) = self.find_breach(u) else {
+            return false;
+        };
         let p = &self.params;
         let splay = Splay {
             apex: b.apex,
@@ -83,7 +86,12 @@ impl Sim {
             mature: p.vegetation_time + p.forest_time,
         };
         self.erodibility.splay(&splay);
-        self.splays.push(SplayMark { apex: b.apex, dir: b.dir, length: splay.length, born: self.time });
+        self.splays.push(SplayMark {
+            apex: b.apex,
+            dir: b.dir,
+            length: splay.length,
+            born: self.time,
+        });
         if self.splays.len() > MAX_SPLAYS {
             self.splays.remove(0);
         }
@@ -118,7 +126,14 @@ impl Sim {
             let needed = p.crevasse_drop / u / (1.0 + JAM_CREVASSE * self.jam_near(i));
             let score = fall / needed;
             if score >= 1.0 && best.as_ref().is_none_or(|(s, _)| score > *s) {
-                best = Some((score, Breach { at: i, apex: crest, dir }));
+                best = Some((
+                    score,
+                    Breach {
+                        at: i,
+                        apex: crest,
+                        dir,
+                    },
+                ));
             }
         }
         best.map(|(_, b)| b)
@@ -133,7 +148,9 @@ impl Sim {
     /// longer than the route by `avulsion_ratio`, and the route neither
     /// crosses the channel nor turns sharply. Returns whether it did.
     fn avulse(&mut self, b: &Breach) -> bool {
-        let Some((j, cells)) = self.avulsion_search(b) else { return false };
+        let Some((j, cells)) = self.avulsion_search(b) else {
+            return false;
+        };
         let n = self.centerline.len();
         // The route leaves the channel [`AVULSION_JOIN`] points above the
         // breach and rejoins it as far below where the search reached it,
@@ -165,7 +182,8 @@ impl Sim {
         let old_widths = self.widths[i..=j].to_vec();
         let inner = &route[1..route.len() - 1];
         self.centerline.splice(i + 1..j, inner.iter().copied());
-        self.widths.splice(i + 1..j, std::iter::repeat_n(AVULSION_WIDTH, inner.len()));
+        self.widths
+            .splice(i + 1..j, std::iter::repeat_n(AVULSION_WIDTH, inner.len()));
         self.line_version += 1;
         self.abandon(old, old_widths, route[2.min(route.len() - 1)]);
         self.recent_cuts.push((b.apex, self.steps + CUT_COOLDOWN));
@@ -189,15 +207,26 @@ impl Sim {
         // each as low as its lowest cell, so a lake a width across stays
         // open. The route is smoothed afterwards in any case.
         let cell = SEARCH_BLOCK as f64 * field.cell;
-        let (cols, rows) = (field.cols.div_ceil(SEARCH_BLOCK), field.rows.div_ceil(SEARCH_BLOCK));
+        let (cols, rows) = (
+            field.cols.div_ceil(SEARCH_BLOCK),
+            field.rows.div_ceil(SEARCH_BLOCK),
+        );
         let to_col = |x: f64| ((x / cell).max(0.0) as usize).min(cols - 1);
         let to_row = |y: f64| ((y / cell).max(0.0) as usize).min(rows - 1);
-        let (x0, x1) = (to_col(b.apex[0] - AVULSION_BACK * w), to_col(b.apex[0] + AVULSION_REACH * w));
+        let (x0, x1) = (
+            to_col(b.apex[0] - AVULSION_BACK * w),
+            to_col(b.apex[0] + AVULSION_REACH * w),
+        );
         let (lo, hi) = self.floor(b.apex[0], false);
         let (y0, y1) = (to_row(lo), to_row(hi));
         let (bw, bh) = (x1 - x0 + 1, y1 - y0 + 1);
         let local = |x: usize, y: usize| (y - y0) * bw + (x - x0);
-        let centre = |l: usize| [(x0 + l % bw) as f64 * cell + 0.5 * cell, (y0 + l / bw) as f64 * cell + 0.5 * cell];
+        let centre = |l: usize| {
+            [
+                (x0 + l % bw) as f64 * cell + 0.5 * cell,
+                (y0 + l / bw) as f64 * cell + 0.5 * cell,
+            ]
+        };
         let mut low = vec![f32::INFINITY; bw * bh];
         for (l, h) in low.iter_mut().enumerate() {
             let (bx, by) = ((x0 + l % bw) * SEARCH_BLOCK, (y0 + l / bw) * SEARCH_BLOCK);
@@ -236,13 +265,20 @@ impl Sim {
                     if geom::dist2(centre(l), q) > half * half {
                         continue;
                     }
-                    label[l] = if k >= first && k + 1 < n && label[l] != SHUT { label[l].min(k as u32) } else { SHUT };
+                    label[l] = if k >= first && k + 1 < n && label[l] != SHUT {
+                        label[l].min(k as u32)
+                    } else {
+                        SHUT
+                    };
                 }
             }
         }
         // Start from the first open cell out through the breach.
         let s = (0..4).find_map(|k| {
-            let c = [b.apex[0] + k as f64 * cell * b.dir[0], b.apex[1] + k as f64 * cell * b.dir[1]];
+            let c = [
+                b.apex[0] + k as f64 * cell * b.dir[0],
+                b.apex[1] + k as f64 * cell * b.dir[1],
+            ];
             let (x, y) = (to_col(c[0]), to_row(c[1]));
             let inside = (x0..=x1).contains(&x) && (y0..=y1).contains(&y);
             (inside && label[local(x, y)] == OPEN).then(|| local(x, y))
@@ -325,7 +361,13 @@ mod tests {
     /// A straight channel across a domain 400 widths long, with levees of
     /// full height along it.
     fn levee_sim() -> Sim {
-        let params = Params { flood_rate: 0.0, jitter: 0.0, heterogeneity: 0.0, wood_rate: 0.0, ..Params::default() };
+        let params = Params {
+            flood_rate: 0.0,
+            jitter: 0.0,
+            heterogeneity: 0.0,
+            wood_rate: 0.0,
+            ..Params::default()
+        };
         let w = params.width;
         let mut sim = Sim::new(params, [400.0 * w, 100.0 * w], 1, 0.0);
         sim.erodibility.deposit.fill(sim.params.levee_height as f32);
@@ -355,21 +397,39 @@ mod tests {
         assert_eq!(sim.splays.len(), 1, "a breach towards the lake");
         let s = &sim.splays[0];
         let toward = s.dir[0] * nrm[0] + s.dir[1] * nrm[1];
-        assert!((s.apex[0] - q[0]).abs() < 6.0 * w && toward > 0.9, "beside the lake, out towards it: {s:?}");
+        assert!(
+            (s.apex[0] - q[0]).abs() < 6.0 * w && toward > 0.9,
+            "beside the lake, out towards it: {s:?}"
+        );
         let inside = [s.apex[0] + w * s.dir[0], s.apex[1] + w * s.dir[1]];
-        assert!(sim.erodibility.growth_at(inside) < growth, "sand buries the forest");
+        assert!(
+            sim.erodibility.growth_at(inside) < growth,
+            "sand buries the forest"
+        );
         // A shallow fall holds against a flood unless a jam on the far bank
         // backs it up and turns the flow onto this one.
         let mut sim = levee_sim();
-        let dip: Vec<P> = (-10..10).flat_map(|x| (6..12).map(move |d| out(0.5 * d as f64, 0.5 * x as f64))).collect();
+        let dip: Vec<P> = (-10..10)
+            .flat_map(|x| (6..12).map(move |d| out(0.5 * d as f64, 0.5 * x as f64)))
+            .collect();
         for &p in &dip {
             let k = sim.erodibility.cell_index(p);
             sim.erodibility.deposit[k] = 0.15;
         }
         assert!(!sim.crevasse(1.0), "a fall of 0.1 holds");
         let pos = out(-0.5, 0.0);
-        sim.jams.push(crate::Jam { pos, down: [1.0, 0.0], side: -1.0, size: 1.0, until: 1e9, at: i });
-        assert!(sim.crevasse(1.0) || !sim.splays.is_empty(), "a jam breaks it");
+        sim.jams.push(crate::Jam {
+            pos,
+            down: [1.0, 0.0],
+            side: -1.0,
+            size: 1.0,
+            until: 1e9,
+            at: i,
+        });
+        assert!(
+            sim.crevasse(1.0) || !sim.splays.is_empty(),
+            "a jam breaks it"
+        );
         assert_eq!(sim.splays.len(), 1);
     }
 
@@ -391,13 +451,25 @@ mod tests {
         let old: Vec<P> = (0..=40).map(|k| at(112.0 + 0.5 * k as f64, 2.0)).collect();
         trench(&mut sim, &old);
         let i = 220 + 4;
-        let b = Breach { at: i, apex: at(111.0, 2.0), dir: [1.0, 0.0] };
+        let b = Breach {
+            at: i,
+            apex: at(111.0, 2.0),
+            dir: [1.0, 0.0],
+        };
         let (cutoffs, n) = (sim.cutoffs, sim.centerline.len());
         assert!(sim.avulse(&b), "the river takes the old channel");
         assert_eq!((sim.avulsions, sim.cutoffs), (1, cutoffs + 1));
         assert!(sim.centerline.len() < n - 40, "a shorter course");
-        assert!(sim.centerline.iter().all(|q| q[1] < mid + 6.0 * w), "the bend is left");
+        assert!(
+            sim.centerline.iter().all(|q| q[1] < mid + 6.0 * w),
+            "the bend is left"
+        );
         assert!(!geom::self_intersects(&sim.centerline));
-        assert!(sim.oxbows.iter().any(|o| o.points.iter().any(|q| q[1] > mid + 11.0 * w)), "as an oxbow");
+        assert!(
+            sim.oxbows
+                .iter()
+                .any(|o| o.points.iter().any(|q| q[1] > mid + 11.0 * w)),
+            "as an oxbow"
+        );
     }
 }

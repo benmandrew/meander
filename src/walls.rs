@@ -63,9 +63,15 @@ impl Walls {
         let mut wall = || {
             let octaves: Vec<Vec<f64>> = KNOTS
                 .iter()
-                .map(|len| (0..(length / len).ceil() as usize + 2).map(|_| rng.uniform()).collect())
+                .map(|len| {
+                    (0..(length / len).ceil() as usize + 2)
+                        .map(|_| rng.uniform())
+                        .collect()
+                })
                 .collect();
-            let count = (COMBES * length / 100.0 + rng.uniform() - 0.5).round().max(0.0) as usize;
+            let count = (COMBES * length / 100.0 + rng.uniform() - 0.5)
+                .round()
+                .max(0.0) as usize;
             let between = |[a, b]: [f64; 2], u: f64| a + (b - a) * u;
             let combes: Vec<Combe> = (0..count)
                 .map(|_| Combe {
@@ -81,7 +87,8 @@ impl Walls {
                     for (m, (len, knots)) in KNOTS.iter().zip(&octaves).enumerate() {
                         let t = x / len;
                         let j = t as usize;
-                        u += (knots[j] + (knots[j + 1] - knots[j]) * smoothstep(t - j as f64)) / (m + 1) as f64;
+                        u += (knots[j] + (knots[j + 1] - knots[j]) * smoothstep(t - j as f64))
+                            / (m + 1) as f64;
                     }
                     WANDER * u / total + combe_cut(&combes, x, 1.0)
                 })
@@ -115,7 +122,9 @@ impl Walls {
     /// Distance wall `side` has retreated at `x`.
     pub fn retreat(&self, side: usize, x: f64) -> f64 {
         let back = &self.retreat[side];
-        back.get(((x / STEP).round().max(0.0) as usize).min(back.len().saturating_sub(1))).copied().unwrap_or(0.0)
+        back.get(((x / STEP).round().max(0.0) as usize).min(back.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(0.0)
     }
 
     /// Erode wall `side` back by `amount` about `x`, spread over
@@ -152,7 +161,11 @@ impl Walls {
 pub fn combe_cut(combes: &[Combe], x: f64, scale: f64) -> f64 {
     combes.iter().fold(0.0, |m, c| {
         let t = (x - c.x).abs() / (scale * c.span);
-        if t < 1.0 { m.max(scale * c.depth * (1.0 - t) * (1.0 - t) * (1.0 + 2.0 * t)) } else { m }
+        if t < 1.0 {
+            m.max(scale * c.depth * (1.0 - t) * (1.0 - t) * (1.0 + 2.0 * t))
+        } else {
+            m
+        }
     })
 }
 
@@ -164,10 +177,15 @@ mod tests {
     fn walls_wander_outwards_within_their_bounds() {
         let walls = Walls::new(300.0, 7);
         for side in 0..2 {
-            let deepest = walls.combes[side].iter().fold(0.0f64, |m, c| m.max(c.depth));
+            let deepest = walls.combes[side]
+                .iter()
+                .fold(0.0f64, |m, c| m.max(c.depth));
             for k in 0..=600 {
                 let out = walls.out(side, 0.5 * k as f64);
-                assert!(out >= 0.0 && out <= WANDER + deepest + 1e-9, "side {side} at {k}: {out}");
+                assert!(
+                    out >= 0.0 && out <= WANDER + deepest + 1e-9,
+                    "side {side} at {k}: {out}"
+                );
             }
         }
         assert!(walls.combes.iter().map(Vec::len).sum::<usize>() > 0);
@@ -182,10 +200,23 @@ mod tests {
         for _ in 0..20 {
             slumps += walls.erode(0, 50.0, 0.125, 2.0).is_some() as u32;
         }
-        assert!((walls.out(0, 50.0) - at - 2.0).abs() < 1e-9, "capped at the limit");
-        assert!(walls.out(0, 51.0) - beside > 0.5 && walls.out(0, 51.0) - beside < 2.0, "less to the side");
+        assert!(
+            (walls.out(0, 50.0) - at - 2.0).abs() < 1e-9,
+            "capped at the limit"
+        );
+        assert!(
+            walls.out(0, 51.0) - beside > 0.5 && walls.out(0, 51.0) - beside < 2.0,
+            "less to the side"
+        );
         assert_eq!(walls.out(0, 60.0), far, "untouched beyond the spread");
-        assert_eq!(walls.out(1, 50.0), Walls::new(100.0, 3).out(1, 50.0), "the other wall is untouched");
-        assert_eq!(slumps, 4, "a slump for each half width of retreat, to the limit");
+        assert_eq!(
+            walls.out(1, 50.0),
+            Walls::new(100.0, 3).out(1, 50.0),
+            "the other wall is untouched"
+        );
+        assert_eq!(
+            slumps, 4,
+            "a slump for each half width of retreat, to the limit"
+        );
     }
 }

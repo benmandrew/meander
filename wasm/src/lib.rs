@@ -125,10 +125,16 @@ impl River {
     /// Copy the centreline into a flat buffer, and its local widths.
     pub fn sync_line(&mut self) {
         self.line.clear();
-        self.line.extend(self.sim.centerline.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
+        self.line.extend(
+            self.sim
+                .centerline
+                .iter()
+                .flat_map(|p| [p[0] as f32, p[1] as f32]),
+        );
         let w = self.sim.params.width;
         self.widths.clear();
-        self.widths.extend(self.sim.widths.iter().map(|&b| (b * w) as f32));
+        self.widths
+            .extend(self.sim.widths.iter().map(|&b| (b * w) as f32));
     }
 
     /// Copy the centreline and oxbow polylines into flat buffers, and the
@@ -150,8 +156,10 @@ impl River {
             for o in &sim.oxbows {
                 self.oxbow_widths.extend(o.widths.iter().map(|&b| b as f32));
                 self.oxbow_offsets.push((self.oxbow_line.len() / 2) as u32);
-                self.oxbow_line.extend(o.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
-                self.oxbow_heights.extend(o.points.iter().map(|&p| sim.erodibility.height(p) as f32));
+                self.oxbow_line
+                    .extend(o.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
+                self.oxbow_heights
+                    .extend(o.points.iter().map(|&p| sim.erodibility.height(p) as f32));
                 self.oxbow_lengths.push(o.length as f32);
                 self.oxbow_offsets_along.push(o.offset as f32);
             }
@@ -164,9 +172,17 @@ impl River {
             // A point beside the channel whose cell it has swept takes the
             // lake's mean, so the drawn lake does not dry out there.
             let (field, mean) = (&sim.erodibility, sim.erodibility.lake_silt(&o.points));
-            self.oxbow_silts.extend(o.points.iter().map(|&p| field.lake_silt_at(p).unwrap_or(mean) as f32));
+            self.oxbow_silts.extend(
+                o.points
+                    .iter()
+                    .map(|&p| field.lake_silt_at(p).unwrap_or(mean) as f32),
+            );
             self.oxbow_fills.push(o.fill as f32);
-            self.oxbow_scar_ages.push(if o.is_lake() { 0.0 } else { (sim.time - o.filled_at) as f32 });
+            self.oxbow_scar_ages.push(if o.is_lake() {
+                0.0
+            } else {
+                (sim.time - o.filled_at) as f32
+            });
         }
     }
 
@@ -178,11 +194,14 @@ impl River {
         self.scroll_offsets.clear();
         self.scroll_ages.clear();
         for s in &sim.scrolls {
-            self.scroll_offsets.push((self.scroll_line.len() / 2) as u32);
-            self.scroll_line.extend(s.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
+            self.scroll_offsets
+                .push((self.scroll_line.len() / 2) as u32);
+            self.scroll_line
+                .extend(s.points.iter().flat_map(|p| [p[0] as f32, p[1] as f32]));
             self.scroll_ages.push((sim.time - s.born) as f32);
         }
-        self.scroll_offsets.push((self.scroll_line.len() / 2) as u32);
+        self.scroll_offsets
+            .push((self.scroll_line.len() / 2) as u32);
     }
 
     pub fn scroll_line_ptr(&self) -> *const f32 {
@@ -297,7 +316,13 @@ impl River {
     pub fn sync_plugs(&mut self) {
         self.plugs.clear();
         let (cut, now) = (&self.sim.erodibility.cut_at, self.sim.time);
-        self.plugs.extend(cut.iter().map(|&t| if t.is_finite() { (now - t).max(0.0) as f32 } else { -1.0 }));
+        self.plugs.extend(cut.iter().map(|&t| {
+            if t.is_finite() {
+                (now - t).max(0.0) as f32
+            } else {
+                -1.0
+            }
+        }));
     }
     pub fn plugs_ptr(&self) -> *const f32 {
         self.plugs.as_ptr()
@@ -314,7 +339,11 @@ impl River {
         let field = &self.sim.erodibility;
         self.forest.clear();
         self.forest.extend(
-            field.cut_at.iter().zip(&field.growth).map(|(&cut, &g)| if cut.is_finite() { 0.0 } else { g.min(full) }),
+            field
+                .cut_at
+                .iter()
+                .zip(&field.growth)
+                .map(|(&cut, &g)| if cut.is_finite() { 0.0 } else { g.min(full) }),
         );
     }
     pub fn forest_ptr(&self) -> *const f32 {
@@ -346,7 +375,12 @@ impl River {
             // against the jam's side of it.
             let (down, into) = (j.down, [-j.side * j.down[1], j.side * j.down[0]]);
             let s = j.strength(sim.time, life);
-            out.extend([j.pos[0], j.pos[1], down[0], down[1], into[0], into[1], s, j.until].map(|v| v as f32));
+            out.extend(
+                [
+                    j.pos[0], j.pos[1], down[0], down[1], into[0], into[1], s, j.until,
+                ]
+                .map(|v| v as f32),
+            );
         }
         out
     }
@@ -359,7 +393,12 @@ impl River {
         let mut out = Vec::with_capacity(7 * sim.splays.len());
         for s in &sim.splays {
             let age = (sim.time - s.born) / SPLAY_LIFE;
-            out.extend([s.apex[0], s.apex[1], s.dir[0], s.dir[1], s.length, age, s.born].map(|v| v as f32));
+            out.extend(
+                [
+                    s.apex[0], s.apex[1], s.dir[0], s.dir[1], s.length, age, s.born,
+                ]
+                .map(|v| v as f32),
+            );
         }
         out
     }
@@ -381,8 +420,17 @@ impl River {
         for t in &sim.tributaries {
             let len = t.course.len();
             out.extend(
-                [t.side as f64, t.mouth[0], t.mouth[1], start as f64, len as f64, t.version as f64, t.scale, t.scale * FAN_MAX_DEPTH * w]
-                    .map(|v| v as f32),
+                [
+                    t.side as f64,
+                    t.mouth[0],
+                    t.mouth[1],
+                    start as f64,
+                    len as f64,
+                    t.version as f64,
+                    t.scale,
+                    t.scale * FAN_MAX_DEPTH * w,
+                ]
+                .map(|v| v as f32),
             );
             start += len;
         }
@@ -391,7 +439,11 @@ impl River {
     /// Every tributary's course from its mouth to the water it meets, back
     /// to back, as flat x, y pairs; see `tributaries`.
     pub fn tributary_courses(&self) -> Vec<f32> {
-        self.sim.tributaries.iter().flat_map(|t| t.course.iter().flat_map(|p| [p[0] as f32, p[1] as f32])).collect()
+        self.sim
+            .tributaries
+            .iter()
+            .flat_map(|t| t.course.iter().flat_map(|p| [p[0] as f32, p[1] as f32]))
+            .collect()
     }
 
     /// The mills, eleven values each: the weir's x and y, the unit vector
@@ -406,13 +458,33 @@ impl River {
         let (mut out, mut start) = (Vec::with_capacity(10 * sim.mills.len()), 0);
         for m in &sim.mills {
             let working = m.working();
-            let ruin = if working { 0.0 } else { (sim.time - m.ruined_at) / MILL_RUIN };
-            let at = if working && m.at < sim.centerline.len() { m.at as f64 } else { -1.0 };
+            let ruin = if working {
+                0.0
+            } else {
+                (sim.time - m.ruined_at) / MILL_RUIN
+            };
+            let at = if working && m.at < sim.centerline.len() {
+                m.at as f64
+            } else {
+                -1.0
+            };
             let width = sim.widths.get(m.at).map_or(w, |&b| b * w);
             let len = m.leat.len();
             out.extend(
-                [m.weir[0], m.weir[1], m.across[0], m.across[1], working as u8 as f64, ruin, at, width, m.born, start as f64, len as f64]
-                    .map(|v| v as f32),
+                [
+                    m.weir[0],
+                    m.weir[1],
+                    m.across[0],
+                    m.across[1],
+                    working as u8 as f64,
+                    ruin,
+                    at,
+                    width,
+                    m.born,
+                    start as f64,
+                    len as f64,
+                ]
+                .map(|v| v as f32),
             );
             start += len;
         }
@@ -420,7 +492,11 @@ impl River {
     }
     /// Every mill's leat, back to back, as flat x, y pairs; see `mills`.
     pub fn mill_leats(&self) -> Vec<f32> {
-        self.sim.mills.iter().flat_map(|m| m.leat.iter().flat_map(|p| [p[0] as f32, p[1] as f32])).collect()
+        self.sim
+            .mills
+            .iter()
+            .flat_map(|m| m.leat.iter().flat_map(|p| [p[0] as f32, p[1] as f32]))
+            .collect()
     }
     /// Changes whenever a mill is founded or falls into ruin.
     pub fn mill_version(&self) -> f64 {
@@ -457,7 +533,14 @@ impl River {
         self.holdings.clear();
         for slot in &self.sim.land.holdings {
             match slot {
-                Some(h) => self.holdings.extend([1.0, h.seat[0] as f32, h.seat[1] as f32, h.axis[0] as f32, h.axis[1] as f32, h.seed as f32]),
+                Some(h) => self.holdings.extend([
+                    1.0,
+                    h.seat[0] as f32,
+                    h.seat[1] as f32,
+                    h.axis[0] as f32,
+                    h.axis[1] as f32,
+                    h.seed as f32,
+                ]),
                 None => self.holdings.extend([0.0; 6]),
             }
         }

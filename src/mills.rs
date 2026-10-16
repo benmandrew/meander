@@ -8,8 +8,8 @@
 
 use crate::geom::{self, P, right_normal};
 use crate::{
-    LEAT_DOWN, LEAT_OFFSET, LEAT_UP, MILL_FLOOD, MILL_RUIN, MILL_SNAP, MILL_STRAIGHT, POND_SILT, POND_WIDEN, Sim,
-    WEIR_HOLD, land, smoothstep,
+    LEAT_DOWN, LEAT_OFFSET, LEAT_UP, MILL_FLOOD, MILL_RUIN, MILL_SNAP, MILL_STRAIGHT, POND_SILT,
+    POND_WIDEN, Sim, WEIR_HOLD, land, smoothstep,
 };
 
 /// Distance over which a leat leaves the bank at either end, in channel
@@ -131,7 +131,11 @@ impl Sim {
             return;
         }
         let i = up + 1 + (self.events.uniform() * (n - up - down - 2) as f64) as usize;
-        let side = if self.events.uniform() < 0.5 { -1.0 } else { 1.0 };
+        let side = if self.events.uniform() < 0.5 {
+            -1.0
+        } else {
+            1.0
+        };
         let q = self.centerline[i];
         let margin = p.edge_margin * w;
         if q[0] < margin || q[0] > self.bounds[0] - margin {
@@ -142,7 +146,11 @@ impl Sim {
             return;
         }
         let gap = (p.mill_gap * w).powi(2);
-        if self.mills.iter().any(|m| m.working() && geom::dist2(m.weir, q) < gap) {
+        if self
+            .mills
+            .iter()
+            .any(|m| m.working() && geom::dist2(m.weir, q) < gap)
+        {
             return;
         }
         let nrm = right_normal(&self.centerline, i);
@@ -157,7 +165,12 @@ impl Sim {
         };
         self.rejoin(&mut mill);
         let (leat, field) = (&mill.leat, &self.erodibility);
-        let owned = |c: P| self.land.owner.get(field.cell_index(c)).is_some_and(|&o| o != land::NONE);
+        let owned = |c: P| {
+            self.land
+                .owner
+                .get(field.cell_index(c))
+                .is_some_and(|&o| o != land::NONE)
+        };
         if (leat.iter().filter(|&&c| owned(c)).count() as f64) < LEAT_OWNED * leat.len() as f64 {
             return;
         }
@@ -205,8 +218,12 @@ impl Sim {
             let off = side * 0.5 * self.widths[k] * w;
             let bank = [q[0] + off * nrm[0], q[1] + off * nrm[1]];
             let t = smoothstep(j.min(len - 1 - j) as f64 / ramp);
-            breached |= t >= 1.0 && side * ((c[0] - bank[0]) * nrm[0] + (c[1] - bank[1]) * nrm[1]) < 0.0;
-            [bank[0] + t * (c[0] - bank[0]), bank[1] + t * (c[1] - bank[1])]
+            breached |=
+                t >= 1.0 && side * ((c[0] - bank[0]) * nrm[0] + (c[1] - bank[1]) * nrm[1]) < 0.0;
+            [
+                bank[0] + t * (c[0] - bank[0]),
+                bank[1] + t * (c[1] - bank[1]),
+            ]
         }));
         breached
     }
@@ -216,7 +233,11 @@ impl Sim {
     /// the channel off a weir that holds it.
     pub(crate) fn pin_weirs(&mut self) {
         let n = self.centerline.len();
-        for m in self.mills.iter().filter(|m| m.working() && m.at > 0 && m.at + 1 < n) {
+        for m in self
+            .mills
+            .iter()
+            .filter(|m| m.working() && m.at > 0 && m.at + 1 < n)
+        {
             self.centerline[m.at] = m.weir;
         }
     }
@@ -232,7 +253,10 @@ impl Sim {
             v.clear();
             v.resize(n, 1.0);
         }
-        let (hold, pond) = (self.reach_points(WEIR_HOLD), self.reach_points(self.params.pond_length).max(1));
+        let (hold, pond) = (
+            self.reach_points(WEIR_HOLD),
+            self.reach_points(self.params.pond_length).max(1),
+        );
         let backwater = self.params.weir_backwater;
         for m in self.mills.iter().filter(|m| m.working() && m.at < n) {
             for k in m.at.saturating_sub(pond)..m.at {
