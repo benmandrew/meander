@@ -121,10 +121,15 @@ const MIN_LAKE = 3;
 // it, is drawn dry. A channel that has migrated along an old lake would
 // otherwise show it as a second bank beside its own. Points within
 // `ALONGSIDE_END` widths of either end of a piece keep their water, so a
-// lake still joins the channel at a cut.
+// lake still joins the channel at a cut. Each test ramps over the band
+// `ALONGSIDE_RAMP` either side of its threshold, as a fraction of it, and
+// the lake there shoals, so the channel's jitter from step to step moves
+// the lake's outline a little and does not split it on and off.
 const ALONGSIDE_GAP = 0.5;
 const ALONGSIDE_COS = 0.7;
 const ALONGSIDE_END = 2;
+const ALONGSIDE_RAMP = 0.5;
+const ALONGSIDE_SPAN = 3;
 // A centreline is kept once some part of it has moved this many widths from
 // the last kept one, so the swept area has no gaps.
 const BAR_STEP = 0.5;
@@ -375,8 +380,9 @@ function blobData(rand, cx, cy, rx, ry) {
 // `half` by the old banks. The depth is `level` less the bed's rise, which
 // is `relief` × 4 × (height − 0.5) for the land heights in `heights`, plus
 // the flood silt in `silts` above its mean over the lake's interior points;
-// the mean is part of the fill that sets `level`. Points marked in `dry`,
-// if given, hold no water. Where the bed rises above the water the lake
+// the mean is part of the fill that sets `level`. Each point's depth moves
+// by its fraction in `dry`, if given, towards `level` above the water.
+// Where the bed rises above the water the lake
 // splits into pools, one subpath each, and the parabola gives each pool a
 // round tip there. A plugged end is a round cap when young, lengthening by
 // `PLUG_TIP` times the half-width with `age` in [0, 1]. An end cut by the
@@ -394,7 +400,8 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
   // The end points lie under the channel at a cut, swept clear of silt.
   for (let k = 0; k < m; k++) {
     const extra = k > 0 && k < m - 1 ? silts[start + k] - silt : 0;
-    depth[k] = dry?.[k] ? -level : level - 4 * relief * (heights[start + k] - 0.5) - extra;
+    const wet = level - 4 * relief * (heights[start + k] - 0.5) - extra;
+    depth[k] = wet - (dry ? dry[k] * (wet + level) : 0);
   }
   for (let k = 1; k < m; k++) {
     const i = 2 * (start + k);
@@ -453,7 +460,10 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
   let path = '';
   j = 0;
   for (const [u0, v0] of runs) {
-    if (v0 - u0 < wide) continue;
+    // A pool shorter than the half-width narrows with its length, so it
+    // shrinks away and does not vanish at once.
+    const thin = smoothstep((v0 - u0) / wide);
+    if (thin < 0.02) continue;
     // Each end: a round cap of the local width at a plugged or cut end, or
     // a parabolic tip where the bed rises above the water, sampled densely
     // near the tip.
@@ -477,7 +487,7 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
       const i = 2 * (start + j);
       const x = pts[i] + (pts[i + 2] - pts[i]) * f, y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * f;
       const nx = -(ty[j] + (ty[j + 1] - ty[j]) * f), ny = tx[j] + (tx[j + 1] - tx[j]) * f;
-      const h = shape * width(j, f, depthAt(j, f)) / (Math.hypot(nx, ny) || 1);
+      const h = thin * shape * width(j, f, depthAt(j, f)) / (Math.hypot(nx, ny) || 1);
       left.push((x + nx * h).toFixed(1) + ' ' + (y + ny * h).toFixed(1));
       right.push((x - nx * h).toFixed(1) + ' ' + (y - ny * h).toFixed(1));
     };
@@ -600,34 +610,56 @@ function pieceLength(pts, start, end) {
   return len;
 }
 
-// Lake points [start, end) of a flat x, y array that lie beside the
-// channel, as a mask by index into the piece, or null if there are none,
-// and a key that changes when the mask does. See `ALONGSIDE_GAP`.
+// How far `v` is past `threshold`, from 0 at `ALONGSIDE_RAMP` × `threshold`
+// below it to 1 as far above it, eased at both ends.
+function ramp(v, threshold) {
+  const band = ALONGSIDE_RAMP * threshold;
+  return smoothstep((v - threshold + band) / (2 * band));
+}
+
+// How dry each lake point [start, end) of a flat x, y array is drawn for
+// lying beside the channel, from 0 to 1 by index into the piece, or null if
+// none is, and a key that changes when it does. See `ALONGSIDE_GAP`.
 // `oxWidths` is in multiples of the reference width `w` and `widths` in
-// world units; `channel` is a grid of the channel points `line`, with its
-// `frame`.
-function alongside(pts, oxWidths, start, end, line, widths, frame, channel, w) {
+// world units; `channel` is a grid of the channel points `line`.
+function alongside(pts, oxWidths, start, end, line, widths, channel, w) {
   const m = end - start;
   let dry = null, key = 0, s = 0;
   const ends = ALONGSIDE_END * w, total = pieceLength(pts, start, end);
   for (let k = 1; k < m - 1; k++) {
     const i = start + k;
     s += Math.hypot(pts[2 * i] - pts[2 * i - 2], pts[2 * i + 1] - pts[2 * i - 1]);
-    if (s < ends || total - s < ends) continue;
+    const inner = ramp(Math.min(s, total - s), ends);
+    if (inner <= 0) continue;
     const [x, y] = [pts[2 * i], pts[2 * i + 1]];
     const j = channel.nearest(x, y, channel.size);
     if (j < 0) continue;
-    const c = j >> 1;
-    const gap = Math.hypot(line[j] - x, line[j + 1] - y) - 0.5 * (widths[c] + w * oxWidths[i]);
-    if (gap > ALONGSIDE_GAP * w) continue;
-    // Unit tangents: the lake's by central difference, the channel's from
-    // its left normal.
-    const tx = pts[2 * i + 2] - pts[2 * i - 2], ty = pts[2 * i + 3] - pts[2 * i - 1];
-    const cos = (tx * frame.ny[c] - ty * frame.nx[c]) / (Math.hypot(tx, ty) || 1);
-    if (Math.abs(cos) < ALONGSIDE_COS) continue;
-    dry ??= new Uint8Array(m);
-    dry[k] = 1;
-    key = (31 * key + k) | 0;
+    // Tangents over `ALONGSIDE_SPAN` points either side, which steadies
+    // them against the channel's jitter and resampling from step to step.
+    const c = j >> 1, nc = line.length / 2;
+    const [c0, c1] = [Math.max(0, c - ALONGSIDE_SPAN), Math.min(nc - 1, c + ALONGSIDE_SPAN)];
+    const [i0, i1] = [Math.max(start, i - ALONGSIDE_SPAN), Math.min(end - 1, i + ALONGSIDE_SPAN)];
+    const ux = line[2 * c1] - line[2 * c0], uy = line[2 * c1 + 1] - line[2 * c0 + 1];
+    const tx = pts[2 * i1] - pts[2 * i0], ty = pts[2 * i1 + 1] - pts[2 * i0 + 1];
+    const ul = Math.hypot(ux, uy) || 1;
+    // The gap to the channel's segments, not its nearest point, so it does
+    // not move with the spacing of the channel's points along it.
+    let across = Infinity;
+    for (let a = c0; a < c1; a++) {
+      const [ax, ay] = [line[2 * a], line[2 * a + 1]];
+      const [bx, by] = [line[2 * a + 2] - ax, line[2 * a + 3] - ay];
+      const t = clamp01(((x - ax) * bx + (y - ay) * by) / (bx * bx + by * by || 1));
+      across = Math.min(across, Math.hypot(x - ax - t * bx, y - ay - t * by));
+    }
+    const gap = across - 0.5 * (widths[c] + w * oxWidths[i]);
+    const near = 1 - ramp(gap, ALONGSIDE_GAP * w);
+    if (near <= 0) continue;
+    const cos = (tx * ux + ty * uy) / (ul * (Math.hypot(tx, ty) || 1));
+    const d = inner * near * ramp(Math.abs(cos), ALONGSIDE_COS);
+    if (d <= 0) continue;
+    dry ??= new Float32Array(m);
+    dry[k] = d;
+    key = (31 * key + k * 64 + Math.round(63 * d)) | 0;
   }
   return { dry, key };
 }
@@ -985,7 +1017,7 @@ class SvgRenderer {
       // Floods and the channel change the silt without reshaping the oxbow.
       let silt = 0;
       for (let i = oxOff[k]; i < oxOff[k + 1]; i++) silt += oxSilt[i];
-      const { dry, key } = alongside(oxPts, oxWidth, oxOff[k], oxOff[k + 1], line, widths, frame, channel, w);
+      const { dry, key } = alongside(oxPts, oxWidth, oxOff[k], oxOff[k + 1], line, widths, channel, w);
       const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief} ${key}`;
       if (lake.inputs !== inputs) {
         lake.inputs = inputs;
