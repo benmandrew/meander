@@ -10,6 +10,7 @@ pub mod geom;
 pub mod ips;
 pub mod land;
 pub mod rng;
+pub mod tributary;
 pub mod walls;
 pub mod wood;
 
@@ -18,6 +19,7 @@ use field::{Erodibility, Flood, Ground};
 use land::Land;
 use rng::Rng;
 use walls::Walls;
+pub use tributary::Tributary;
 pub use wood::Jam;
 
 /// Point spacing as a fraction of the channel width.
@@ -178,12 +180,12 @@ pub struct Params {
     /// `vegetation_time`, so holdings follow the channel onto bars long
     /// before shrub binds them.
     pub grazing_time: f64,
-    /// Erodibility multiplier on wholly coarse ground: colluvium slumped
-    /// from a valley wall. 1 disables.
+    /// Erodibility multiplier on wholly coarse ground: the gravel of a
+    /// tributary fan, or colluvium slumped from a valley wall. 1 disables.
     pub coarse_factor: f64,
     /// Time the upland clearance begins. Fine sediment from cleared
-    /// slopes multiplies overbank deposition and the filling of lakes by
-    /// [`Sim::supply`].
+    /// slopes multiplies overbank deposition, the filling of lakes and the
+    /// growth of tributary fans by [`Sim::supply`].
     pub clearance_start: f64,
     /// Time over which the supply rises to `clearance_supply`.
     pub clearance_time: f64,
@@ -209,6 +211,17 @@ pub struct Params {
     /// Rate at which a bank pressing against a valley wall erodes it back,
     /// as a fraction of the bank's migration demand. 0 disables.
     pub bluff_rate: f64,
+    /// Radius of the fan a tributary builds at the mouth of the deepest
+    /// combe, in channel widths. Shallower combes build smaller fans, and
+    /// combes under [`FAN_MIN_DEPTH`] carry no tributary. 0 disables.
+    pub fan_radius: f64,
+    /// Time a fan takes to build back what the channel has trimmed, at a
+    /// sediment supply of 1.
+    pub fan_time: f64,
+    /// Increase in the migration rate at a confluence from a tributary of
+    /// the deepest combe, falling to nothing [`TRIBUTARY_REACH`] widths
+    /// downstream: the tributary's bedload feeds the bars.
+    pub tributary_boost: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -287,6 +300,9 @@ impl Default for Params {
             jam_lifetime: JAM_LIFETIME,
             jam_push: JAM_PUSH,
             bluff_rate: BLUFF_RATE,
+            fan_radius: FAN_RADIUS,
+            fan_time: FAN_TIME,
+            tributary_boost: TRIBUTARY_BOOST,
             physics: true,
             friction,
             aspect,
@@ -354,6 +370,9 @@ impl Params {
         "jam_lifetime",
         "jam_push",
         "bluff_rate",
+        "fan_radius",
+        "fan_time",
+        "tributary_boost",
         "physics",
         "friction",
         "aspect",
@@ -417,6 +436,9 @@ impl Params {
             "jam_lifetime" => &mut self.jam_lifetime,
             "jam_push" => &mut self.jam_push,
             "bluff_rate" => &mut self.bluff_rate,
+            "fan_radius" => &mut self.fan_radius,
+            "fan_time" => &mut self.fan_time,
+            "tributary_boost" => &mut self.tributary_boost,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -543,6 +565,8 @@ pub struct Sim {
     pub captures: u64,
     /// Jams of large wood against the banks.
     pub jams: Vec<Jam>,
+    /// Tributaries entering from the deeper combes, with their fans.
+    pub tributaries: Vec<Tributary>,
     /// Counts slumps from the valley walls, so a renderer can redraw the
     /// walls after bluff erosion.
     pub wall_version: u64,
@@ -711,8 +735,8 @@ const SCROLL_REWORK_EVERY: u64 = 10;
 const LEVEE_LENGTH: f64 = 2.0;
 const LEVEE_HEIGHT: f64 = 0.25;
 
-/// Default coarse ground; see [`Params`]. Colluvium erodes at 0.4 of
-/// the floodplain's rate.
+/// Default coarse ground; see [`Params`]. Gravel and colluvium erode
+/// at 0.4 of the floodplain's rate.
 const COARSE_FACTOR: f64 = 0.4;
 /// Default upland clearance; see [`Params`]. It begins 100 units, 250
 /// years, after the default warm-up of 500, and the supply triples over
@@ -755,6 +779,22 @@ const BLUFF_ROOM: f64 = 1.0;
 const SLUMP_RADIUS: f64 = 1.5;
 const SLUMP_HEIGHT: f64 = 0.4;
 const SLUMP_COARSE: f64 = 0.8;
+/// Default tributary fans; see [`Params`]. A fan the channel trims
+/// builds back over 400 units, 1,000 years, at the wooded upland's supply.
+const FAN_RADIUS: f64 = 7.0;
+const FAN_TIME: f64 = 400.0;
+const TRIBUTARY_BOOST: f64 = 0.3;
+/// Combe depth, in channel widths, below which a combe carries no
+/// tributary, and the depth of the deepest combe; see [`walls`].
+pub const FAN_MIN_DEPTH: f64 = 3.0;
+const FAN_MAX_DEPTH: f64 = 4.5;
+/// Height of a fan at its apex above fresh bar sand, in channel depths.
+const FAN_HEIGHT: f64 = 0.6;
+/// Distance downstream of a confluence over which the tributary's bedload
+/// speeds migration, in channel widths.
+pub const TRIBUTARY_REACH: f64 = 30.0;
+/// Steps between searches for each tributary's confluence.
+const JUNCTION_EVERY: u64 = 10;
 
 /// Longest chute a flood can cut, in channel widths.
 pub const CHUTE_CHORD: f64 = 5.0;
@@ -841,6 +881,7 @@ impl Sim {
             flood_cutoffs: 0,
             captures: 0,
             jams: Vec::new(),
+            tributaries: Vec::new(),
             wall_version: 0,
             rng: Rng::new(seed),
             events: Rng::new(seed ^ EVENTS_SEED),
@@ -909,6 +950,7 @@ impl Sim {
         self.captures = 0;
         self.jams.clear();
         self.wall_version += 1;
+        self.place_tributaries();
         self.land = Land::new(&self.erodibility, seed);
         self.read_valley();
         let s = self.land_settings();
@@ -1026,6 +1068,7 @@ impl Sim {
         let band = self.steps % GROWTH_EVERY;
         let (y0, y1) = (band * rows / GROWTH_EVERY, (band + 1) * rows / GROWTH_EVERY);
         self.erodibility.grow_rows(GROWTH_EVERY as f64 * p.dt, p.vegetation_height, y0 as usize, y1 as usize);
+        self.feed_tributaries();
         let phase = self.steps % land::SURVEY_STEPS;
         if phase == 0 {
             self.read_valley();
@@ -1279,6 +1322,7 @@ impl Sim {
                 *r *= if e == 0.5 { x.sqrt() } else { x.powf(e) };
             }
         }
+        self.feed_bars();
         self.push_jams();
         &self.rate
     }
@@ -2560,6 +2604,41 @@ mod tests {
         let lobe = [200.0 * w, sim.floor(200.0 * w, false).1];
         let coarse = (0..8).map(|k| sim.erodibility.coarse[sim.erodibility.cell_index([lobe[0] + k as f64 * w, lobe[1]])]);
         assert!(coarse.fold(0.0f32, f32::max) > 0.3, "colluvium at the foot");
+    }
+
+    #[test]
+    fn tributaries_build_fans_and_feed_the_bars_below() {
+        let mut sim = Sim::new(Params::default(), [400.0 * 8.0, 60.0 * 8.0], 1, 0.5);
+        assert!(!sim.tributaries.is_empty());
+        let coarse = |p: P| sim.erodibility.coarse[sim.erodibility.cell_index(p)] as f64;
+        for t in &sim.tributaries {
+            let c = coarse(t.mouth);
+            assert!(c >= t.scale - 0.1, "coarse at the apex: {c} for scale {}", t.scale);
+            let half = [t.mouth[0] + 0.5 * t.radius, t.mouth[1]];
+            assert!(coarse(half) >= 0.5f64.sqrt() * t.scale - 0.1, "falling towards the rim");
+        }
+        // Clear of every fan, the ground holds no gravel.
+        let clear = |p: P| sim.tributaries.iter().all(|t| dist(p, t.mouth) > t.radius + sim.erodibility.cell);
+        let mid = sim.bounds[1] / 2.0;
+        assert!((0..400).map(|x| [(x as f64 + 0.5) * 8.0, mid]).filter(|&p| clear(p)).all(|p| coarse(p) == 0.0));
+        let fed = sim.migration_rate().to_vec();
+        sim.params.tributary_boost = 0.0;
+        let plain = sim.migration_rate().to_vec();
+        let t = sim.tributaries.iter().max_by(|a, b| a.scale.total_cmp(&b.scale)).unwrap();
+        let r = sim.reach_points(TRIBUTARY_REACH);
+        let k = (t.at + 1..t.at + r).find(|&k| plain[k].abs() > 1e-6).unwrap();
+        // Confluences close together each feed the reach below them.
+        let want = sim
+            .tributaries
+            .iter()
+            .filter(|u| (u.at..u.at + r).contains(&k))
+            .map(|u| 1.0 + TRIBUTARY_BOOST * u.scale * (1.0 - (k - u.at) as f64 / r as f64))
+            .product::<f64>();
+        assert!((fed[k] / plain[k] - want).abs() < 1e-9, "boost {} against {want}", fed[k] / plain[k]);
+        let first = sim.tributaries.iter().map(|u| u.at).min().unwrap();
+        if let Some(k) = (0..first).rev().find(|&k| plain[k].abs() > 1e-6) {
+            assert_eq!(fed[k], plain[k], "nothing above the confluences");
+        }
     }
 
     /// A channel along x with a bend 10 widths high between x = 110 and

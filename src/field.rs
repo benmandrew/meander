@@ -4,8 +4,8 @@
 //! they fill. The same noise, with a finer layer added, gives the height of
 //! the land. Floods lay overbank deposits on top, thickest beside the
 //! channel as natural levees, and a higher bank erodes more slowly.
-//! Slumps from the valley walls leave coarse ground, colluvium, which
-//! erodes more slowly still.
+//! Tributary fans and slumps from the valley walls leave coarse ground,
+//! gravel and colluvium, which erodes more slowly still.
 
 use crate::geom::P;
 
@@ -130,9 +130,9 @@ pub struct Erodibility {
     /// depths. The channel resets it to 0 where it sweeps, and a cutoff
     /// sets it to −`LAKE_DEPTH` over the oxbow footprint.
     pub deposit: Vec<f32>,
-    /// Share of coarse material in each cell, in [0, 1]: colluvium
-    /// slumped from a valley wall. The channel halves it where it sweeps,
-    /// as it reworks the coarse material into its bars.
+    /// Share of coarse material in each cell, in [0, 1]: gravel on a
+    /// tributary fan, colluvium slumped from a valley wall. The channel
+    /// halves it where it sweeps, as it reworks the gravel into its bars.
     pub coarse: Vec<f32>,
     /// Scratch: squared distance from each cell to the channel during a
     /// flood.
@@ -480,7 +480,8 @@ impl Erodibility {
     /// surface stands `top` channel depths above fresh bar sand at the
     /// apex and its share of coarse material is `coarse` there, both
     /// falling to nothing at the rim. Each cell moves the fraction `frac`
-    /// of the way up to the cone, never down. Lake footprints are left alone.
+    /// of the way up to the cone, never down, so a fan the channel has
+    /// trimmed builds back over time. Lake footprints are left alone.
     pub fn grow_cone(&mut self, apex: P, radius: f64, top: f64, coarse: f64, frac: f64) {
         if radius <= 0.0 || frac <= 0.0 {
             return;
@@ -694,6 +695,25 @@ mod tests {
         }
         assert_eq!(e.silt_at([20.0, 22.25]), 1.0);
         assert!(e.deposit_at([20.0, 22.25]) <= 0.25, "fills no higher than the flood level");
+    }
+
+    #[test]
+    fn a_fan_builds_back_after_the_channel_trims_it() {
+        let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
+        let (apex, toe) = ([20.0, 20.0], [23.25, 20.25]);
+        e.grow_cone(apex, 5.0, 0.5, 1.0, 1.0);
+        let at = |e: &Erodibility, p| e.at(p, &ground(0.0));
+        assert!(e.coarse[e.index(apex)] > 0.95 && e.deposit_at(apex) > 0.45, "full cone at the apex");
+        assert!(at(&e, toe) < 1.0 && at(&e, toe) > at(&e, apex), "coarse ground erodes slowly, the apex slowest");
+        assert_eq!(e.coarse[e.index([30.0, 20.0])], 0.0, "beyond the rim");
+        let full = e.coarse[e.index(toe)];
+        e.sweep(&[toe]);
+        assert!((e.coarse[e.index(toe)] - 0.5 * full).abs() < 1e-6, "the channel reworks half the gravel");
+        e.grow_cone(apex, 5.0, 0.5, 1.0, 0.5);
+        let back = e.coarse[e.index(toe)];
+        assert!(back > 0.5 * full && back < full, "builds halfway back: {back} of {full}");
+        e.grow_cone(apex, 5.0, 0.0, 0.0, 1.0);
+        assert_eq!(e.coarse[e.index(toe)], back, "a cone never lowers the ground");
     }
 
     #[test]
