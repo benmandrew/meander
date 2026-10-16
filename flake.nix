@@ -85,7 +85,7 @@
             installPhase = ''
               runHook preInstall
               mkdir -p $out
-              cp web/index.html web/style.css web/*.js $out/
+              cp web/index.html web/style.css web/favicon.svg web/*.js $out/
               cp -r web/fonts $out/fonts
               cp -r pkg $out/pkg
               runHook postInstall

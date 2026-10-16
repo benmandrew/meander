@@ -54,10 +54,6 @@ pub struct River {
     scroll_offsets: Vec<u32>,
     /// Age of each scroll bar in simulation time.
     scroll_ages: Vec<f32>,
-    /// Each crevasse splay as apex x, y, direction x, y, length and birth
-    /// time, then for each ray its direction x, y and the inner and outer
-    /// distances from the apex between which sand remains.
-    splay_data: Vec<f32>,
 }
 
 #[wasm_bindgen]
@@ -83,7 +79,6 @@ impl River {
             scroll_line: Vec::new(),
             scroll_offsets: Vec::new(),
             scroll_ages: Vec::new(),
-            splay_data: Vec::new(),
         }
     }
 
@@ -163,36 +158,6 @@ impl River {
             self.oxbow_fills.push(o.fill as f32);
             self.oxbow_scar_ages.push(if o.is_lake() { 0.0 } else { (sim.time - o.filled_at) as f32 });
         }
-    }
-
-    /// Copy the crevasse splays into a flat buffer; see `splay_stride`.
-    pub fn sync_splays(&mut self) {
-        self.splay_data.clear();
-        for s in &self.sim.splays {
-            self.splay_data.extend([s.apex[0], s.apex[1], s.dir[0], s.dir[1], s.length, s.born].map(|v| v as f32));
-            for (v, [a, b]) in &s.rays {
-                self.splay_data.extend([v[0], v[1], *a, *b].map(|x| x as f32));
-            }
-        }
-    }
-
-    pub fn splay_data_ptr(&self) -> *const f32 {
-        self.splay_data.as_ptr()
-    }
-    pub fn splay_count(&self) -> usize {
-        self.sim.splays.len()
-    }
-    /// Floats per splay in the splay buffer.
-    pub fn splay_stride(&self) -> usize {
-        6 + 4 * meander_core::SPLAY_RAYS
-    }
-    /// Changes whenever a splay forms, erodes or is dropped.
-    pub fn splay_version(&self) -> f64 {
-        self.sim.splay_version as f64
-    }
-    /// Crevasse splays so far, including those since dropped.
-    pub fn crevasses(&self) -> u32 {
-        self.sim.crevasses as u32
     }
 
     /// Copy the scroll bars into flat buffers. They change only at floods

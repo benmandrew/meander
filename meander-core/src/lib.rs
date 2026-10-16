@@ -66,13 +66,6 @@ pub struct Params {
     pub bedload_fill: f64,
     /// Simulation time a filled oxbow stays as a scar before it is dropped.
     pub scar_lifetime: f64,
-    /// Chance that the largest flood breaches the levee at a sharp outer
-    /// bend and spreads a crevasse splay over the floodplain. It falls to 0
-    /// for floods of magnitude [`SPLAY_MIN_FLOOD`]. 0 disables splays.
-    pub splay_chance: f64,
-    /// Simulation time a splay takes to vegetate over, after which it is
-    /// dropped.
-    pub splay_lifetime: f64,
     /// Simulation time a scroll bar, the ridge a flood leaves along the
     /// inner bank, lasts before it is dropped. 0 disables scroll bars.
     pub scroll_lifetime: f64,
@@ -146,15 +139,22 @@ pub struct Params {
 
 impl Default for Params {
     fn default() -> Self {
+        // A lowland sand-bed river: friction and Froude number in the
+        // ranges measured on such rivers, a width 30 times the depth, and
+        // the scour factor from Ikeda (1981). The linear theory's fastest
+        // growing bend then has a wavelength of 2π / (α √(√Γ − 1)) ≈ 12
+        // channel widths, inside the 10 to 14 seen on real rivers.
+        let (friction, aspect, froude, scour) = (0.01, 30.0, 0.3, 2.89);
+        let (omega, gamma, alpha) = ips::coefficients(friction, aspect, froude, scour);
         Self {
             width: 8.0,
             width_time: WIDTH_TIME,
             bar_push: BAR_PUSH,
             flood_widening: FLOOD_WIDENING,
             erodibility: 1.0,
-            omega: -1.0,
-            gamma: 2.5,
-            alpha: 0.6,
+            omega,
+            gamma,
+            alpha,
             peak_radius: 2.5,
             dt: 0.1,
             smoothing: 0.1,
@@ -165,8 +165,6 @@ impl Default for Params {
             bedload_fill: BEDLOAD_FILL,
             scar_lifetime: 1600.0,
             scroll_lifetime: SCROLL_LIFETIME,
-            splay_chance: SPLAY_CHANCE,
-            splay_lifetime: SPLAY_LIFETIME,
             jitter: 0.05,
             jitter_scale: 3.0,
             valley_width: 45.0,
@@ -184,11 +182,11 @@ impl Default for Params {
             overbank: OVERBANK,
             levee_length: LEVEE_LENGTH,
             levee_height: LEVEE_HEIGHT,
-            physics: false,
-            friction: 0.01,
-            aspect: 30.0,
-            froude: 0.3,
-            scour: 2.89,
+            physics: true,
+            friction,
+            aspect,
+            froude,
+            scour,
         }
     }
 }
@@ -214,8 +212,6 @@ impl Params {
         "bedload_fill",
         "scar_lifetime",
         "scroll_lifetime",
-        "splay_chance",
-        "splay_lifetime",
         "jitter",
         "jitter_scale",
         "valley_width",
@@ -259,8 +255,6 @@ impl Params {
             "bedload_fill" => &mut self.bedload_fill,
             "scar_lifetime" => &mut self.scar_lifetime,
             "scroll_lifetime" => &mut self.scroll_lifetime,
-            "splay_chance" => &mut self.splay_chance,
-            "splay_lifetime" => &mut self.splay_lifetime,
             "jitter" => &mut self.jitter,
             "jitter_scale" => &mut self.jitter_scale,
             "valley_width" => &mut self.valley_width,
@@ -360,27 +354,6 @@ pub struct Scroll {
     pub born: f64,
 }
 
-/// A crevasse splay: a fan of sand a flood spreads through a breach in
-/// the levee, from `apex` on the outer bank along the unit vector `dir`.
-#[derive(Clone, Debug)]
-pub struct Splay {
-    pub apex: P,
-    pub dir: P,
-    pub length: f64,
-    pub born: f64,
-    /// [`SPLAY_RAYS`] rays fanning across the splay, each a unit direction
-    /// and the distances from the apex, inner then outer, between which
-    /// its sand remains. The channel erodes the sand from either end.
-    pub rays: Vec<(P, [f64; 2])>,
-}
-
-impl Splay {
-    /// Whether the channel has eroded all of the splay.
-    pub fn is_gone(&self) -> bool {
-        self.rays.iter().all(|r| r.1[0] >= r.1[1])
-    }
-}
-
 pub struct Sim {
     pub params: Params,
     /// Domain is `[0, bounds[0]] × [0, bounds[1]]`.
@@ -402,11 +375,6 @@ pub struct Sim {
     pub scrolls: Vec<Scroll>,
     /// Counts changes to `scrolls`, so a renderer can skip redrawing them.
     pub scroll_version: u64,
-    pub splays: Vec<Splay>,
-    /// Counts changes to `splays`, so a renderer can skip redrawing them.
-    pub splay_version: u64,
-    /// Crevasse splays so far.
-    pub crevasses: u64,
     pub erodibility: Erodibility,
     pub time: f64,
     pub steps: u64,
@@ -515,30 +483,6 @@ const SCROLL_MIN_RATE: f64 = 0.05;
 /// Scroll bars and pieces with fewer points than this are dropped.
 const MIN_SCROLL_POINTS: usize = 6;
 
-const SPLAY_CHANCE: f64 = 1.0;
-const SPLAY_LIFETIME: f64 = 2000.0;
-
-/// Smallest flood magnitude that can breach a levee.
-pub const SPLAY_MIN_FLOOD: f64 = 0.6;
-
-/// Random points tried for a breach; the sharpest bend among them wins.
-const SPLAY_TRIES: usize = 20;
-
-/// Gentlest bend, as curvature in inverse channel widths, that a flood
-/// can breach: a radius of 5 widths.
-const SPLAY_MIN_CURVATURE: f64 = 0.2;
-
-/// Length of a splay in channel widths: this much for the weakest flood
-/// that breaches, plus [`SPLAY_EXTRA`] times the magnitude.
-const SPLAY_BASE: f64 = 3.0;
-const SPLAY_EXTRA: f64 = 5.0;
-
-/// Spread of a splay across per unit along it: tan 35°.
-pub const SPLAY_SPREAD: f64 = 0.7;
-
-/// Rays across a splay that track how much of it the channel has eroded.
-pub const SPLAY_RAYS: usize = 9;
-
 /// Steps between checks for scroll bars under the channel. They do not
 /// affect the dynamics, so the check need not run every step.
 const SCROLL_REWORK_EVERY: u64 = 10;
@@ -604,9 +548,6 @@ impl Sim {
             oxbow_version: 0,
             scrolls: Vec::new(),
             scroll_version: 0,
-            splays: Vec::new(),
-            splay_version: 0,
-            crevasses: 0,
             erodibility: Erodibility::new([1.0, 1.0], 1.0, 1.0, 0),
             time: 0.0,
             steps: 0,
@@ -663,9 +604,6 @@ impl Sim {
         self.line_version += 1;
         self.scrolls.clear();
         self.scroll_version += 1;
-        self.splays.clear();
-        self.splay_version += 1;
-        self.crevasses = 0;
         self.recent_cuts.clear();
         self.time = 0.0;
         self.steps = 0;
@@ -717,7 +655,6 @@ impl Sim {
             self.erodibility.flood(&self.centerline, &self.widths, 0.5 * p.width, magnitude * p.overbank, p.levee_length * p.width, p.levee_height);
             self.fill_lakes(magnitude);
             self.add_scrolls();
-            self.crevasse(magnitude);
         }
         self.erodibility.sweep(&self.centerline, self.time);
         self.time += self.params.dt;
@@ -737,7 +674,6 @@ impl Sim {
         }
         if self.steps % SCROLL_REWORK_EVERY == 0 {
             self.rework_scrolls();
-            self.erode_splays();
         }
         let steps = self.steps;
         self.recent_cuts.retain(|&(_, until)| until > steps);
@@ -1270,91 +1206,6 @@ impl Sim {
         }
     }
 
-    /// During a flood of magnitude `u`, perhaps breach the levee at the
-    /// sharpest of a few random bends and spread a splay of sand from the
-    /// outer bank, as deep as the flood level at its apex. Returns whether
-    /// a splay formed.
-    fn crevasse(&mut self, u: f64) -> bool {
-        let p = &self.params;
-        if p.splay_chance <= 0.0 || u <= SPLAY_MIN_FLOOD {
-            return false;
-        }
-        let chance = p.splay_chance * (u - SPLAY_MIN_FLOOD) / (1.0 - SPLAY_MIN_FLOOD);
-        let n = self.centerline.len();
-        if n < 3 || self.rng.uniform() >= chance {
-            return false;
-        }
-        curvature(&self.centerline, &mut self.curv);
-        let w = self.params.width;
-        let mut best = (0, 0.0f64);
-        for _ in 0..SPLAY_TRIES {
-            let i = (1 + (self.rng.uniform() * (n - 2) as f64) as usize).min(n - 2);
-            let c = self.curv[i] * w;
-            if c.abs() > best.1.abs() {
-                best = (i, c);
-            }
-        }
-        let (i, c) = best;
-        if c.abs() < SPLAY_MIN_CURVATURE {
-            return false;
-        }
-        // A left bend (positive curvature) has its outer bank on the right.
-        let nrm = right_normal(&self.centerline, i);
-        let s = c.signum();
-        let dir = [s * nrm[0], s * nrm[1]];
-        let q = self.centerline[i];
-        let half = 0.5 * self.widths[i] * w;
-        let apex = [q[0] + half * dir[0], q[1] + half * dir[1]];
-        let length = (SPLAY_BASE + SPLAY_EXTRA * u) * w;
-        let thickness = u * self.params.levee_height;
-        self.erodibility.stamp_splay(apex, dir, length, SPLAY_SPREAD, thickness, self.time);
-        // The rim is rounded, shorter at the flanks, and a little uneven.
-        let rays = (0..SPLAY_RAYS)
-            .map(|k| {
-                let f = 2.0 * k as f64 / (SPLAY_RAYS - 1) as f64 - 1.0;
-                let v = [dir[0] - f * SPLAY_SPREAD * dir[1], dir[1] + f * SPLAY_SPREAD * dir[0]];
-                let m = (v[0] * v[0] + v[1] * v[1]).sqrt();
-                let rim = length * (1.0 - 0.25 * f * f) * (0.8 + 0.2 * self.rng.uniform());
-                ([v[0] / m, v[1] / m], [0.0, rim])
-            })
-            .collect();
-        self.splays.push(Splay { apex, dir, length, born: self.time, rays });
-        self.splay_version += 1;
-        self.crevasses += 1;
-        true
-    }
-
-    /// Trim each splay's rays back from either end past the ground the
-    /// channel has crossed since the splay formed, and drop splays that are
-    /// vegetated over or wholly eroded.
-    fn erode_splays(&mut self) {
-        let (time, life) = (self.time, self.params.splay_lifetime);
-        let step = self.erodibility.cell;
-        let field = &self.erodibility;
-        let mut changed = false;
-        for s in &mut self.splays {
-            for (v, ends) in &mut s.rays {
-                let at = |r: f64| [s.apex[0] + r * v[0], s.apex[1] + r * v[1]];
-                let [mut a, mut b] = *ends;
-                while a < b && field.swept_since(at(a), s.born) {
-                    a += step;
-                }
-                while a < b && field.swept_since(at(b), s.born) {
-                    b -= step;
-                }
-                if [a, b] != *ends {
-                    *ends = [a, b];
-                    changed = true;
-                }
-            }
-        }
-        let before = self.splays.len();
-        self.splays.retain(|s| time - s.born < life && !s.is_gone());
-        if changed || self.splays.len() != before {
-            self.splay_version += 1;
-        }
-    }
-
     /// Drop scroll bars past their lifetime and the parts of the rest
     /// within half a width of the channel, which has eroded them.
     fn rework_scrolls(&mut self) {
@@ -1538,7 +1389,7 @@ mod tests {
             );
             assert_eq!(calm_sim.flood_cutoffs, 0);
             assert!(sim.flood_cutoffs >= 3, "only {} flood cutoffs", sim.flood_cutoffs);
-            assert!(l_storm < 0.85 * l_calm, "floods should cut loops off shorter");
+            assert!(l_storm < 0.9 * l_calm, "floods should cut loops off shorter");
         }
     }
 
@@ -1568,7 +1419,7 @@ mod tests {
 
     #[test]
     fn physics_sets_the_kernel_weights() {
-        let mut p = Params::default();
+        let mut p = Params { physics: false, ..Params::default() };
         let alpha = p.alpha;
         p.set("friction", 0.02);
         assert_eq!(p.alpha, alpha, "hand-tuned weights stay until physics is on");
@@ -1649,58 +1500,6 @@ mod tests {
         for sc in &sim.scrolls {
             assert!(sc.points.iter().all(|&q| gap(q) >= 0.5 * w));
         }
-    }
-
-    #[test]
-    fn a_big_flood_breaches_an_outer_bend() {
-        // Curvature peaks at 4·(2π/20)² ≈ 0.39 per width, over the 0.2 a breach needs.
-        let mut sim = sine_sim(4.0, 20.0);
-        sim.params.splay_chance = 1.0;
-        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
-        assert!(!sim.crevasse(SPLAY_MIN_FLOOD), "too small a flood");
-        assert!(sim.crevasse(1.0));
-        let s = &sim.splays[0];
-        assert!((s.length - 8.0 * w).abs() < 1e-9);
-        // The sharpest bends are the crests, so the splay runs away from the axis.
-        assert!((s.apex[1] - mid).abs() > 2.4 * w, "apex {:?}", s.apex);
-        assert!((s.apex[1] + s.dir[1] - mid).abs() > (s.apex[1] - mid).abs(), "dir {:?}", s.dir);
-        let inside = [s.apex[0] + 0.3 * s.length * s.dir[0], s.apex[1] + 0.3 * s.length * s.dir[1]];
-        assert!(sim.erodibility.deposit_at(inside) > 0.1 * sim.params.levee_height);
-    }
-
-    #[test]
-    fn the_channel_erodes_a_splay_from_the_breach() {
-        let mut sim = sine_sim(4.0, 20.0);
-        sim.params.splay_chance = 1.0;
-        assert!(sim.crevasse(1.0));
-        let w = sim.params.width;
-        let s = sim.splays[0].clone();
-        let perp = [-s.dir[1], s.dir[0]];
-        // The bend moves 1.5 widths into the splay.
-        sim.time += 1.0;
-        let swept: Vec<P> = (0..=6)
-            .flat_map(|i| (-40..=40).map(move |j| (0.25 * i as f64 * w, 0.1 * j as f64 * w)))
-            .map(|(r, x)| [s.apex[0] + r * s.dir[0] + x * perp[0], s.apex[1] + r * s.dir[1] + x * perp[1]])
-            .collect();
-        sim.erodibility.sweep(&swept, sim.time);
-        let v = sim.splay_version;
-        sim.erode_splays();
-        assert!(sim.splay_version > v);
-        let left = &sim.splays[0];
-        let v8 = left.rays[8].0;
-        for (k, (_, [a, b])) in left.rays.iter().enumerate() {
-            // The channel reaches 0.75 widths past the band, give or take a
-            // cell, and flank rays cross it obliquely.
-            assert!(*a > 1.5 * w && *a <= 3.5 * w, "ray {k} eroded to {a}");
-            assert_eq!(*b, s.rays[k].1[1], "the rim is untouched");
-        }
-        // Once the channel has crossed all of it, the splay is gone.
-        let all: Vec<P> = (0..=4 * 9).flat_map(|i| (-60..=60).map(move |j| (0.25 * i as f64 * w, 0.1 * j as f64 * w)))
-            .map(|(r, x)| [s.apex[0] + r * s.dir[0] + x * perp[0], s.apex[1] + r * s.dir[1] + x * perp[1]])
-            .collect();
-        sim.erodibility.sweep(&all, sim.time);
-        sim.erode_splays();
-        assert!(sim.splays.is_empty());
     }
 
     #[test]

@@ -128,6 +128,5 @@ fn main() {
         let q = |f: f64| lives[((lives.len() - 1) as f64 * f) as usize];
         println!("{} lakes filled; time to fill: quartiles {:.0} {:.0} {:.0}", lives.len(), q(0.25), q(0.5), q(0.75));
     }
-    println!("{} crevasse splays", sim.crevasses);
     println!("{:.2} ms/step", t0.elapsed().as_secs_f64() * 1e3 / steps as f64);
 }
