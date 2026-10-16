@@ -7,4 +7,4 @@ test:
 	cargo test --release -p meander-core
 
 serve: build
-	python3 -m http.server 8000 --directory web
+	python3 -m http.server 8000 --bind 127.0.0.1 --directory web
