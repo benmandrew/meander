@@ -69,6 +69,12 @@ fn tight_fraction(sim: &Sim) -> f64 {
     tight as f64 / c.len().max(1) as f64
 }
 
+/// Mean sinuosity of the reaches that set the channel slope.
+fn reach_sinuosity(sim: &mut Sim) -> f64 {
+    sim.migration_rate();
+    sim.slope.iter().map(|s| 1.0 / s).sum::<f64>() / sim.slope.len().max(1) as f64
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = args.get(1).expect("usage: snapshot <out_dir> [steps] [every] [seed]");
@@ -98,12 +104,14 @@ fn main() {
         if k > 0 {
             sim.step_n(every);
         }
+        let reach = reach_sinuosity(&mut sim);
         println!(
-            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  tight {:4.2}  cutoffs {:4} ({:4} in {:4} floods)  oxbows {:3}  width {}",
+            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  reach {:4.2}  tight {:4.2}  cutoffs {:4} ({:4} in {:4} floods)  oxbows {:3}  width {}",
             sim.steps,
             sim.time,
             sim.centerline.len(),
             sim.sinuosity(),
+            reach,
             tight_fraction(&sim),
             sim.cutoffs,
             sim.flood_cutoffs,

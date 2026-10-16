@@ -47,6 +47,16 @@ pub struct Params {
     /// Bend radius, in channel widths, at which migration is fastest; tighter
     /// bends migrate more slowly. 0 disables the saturation.
     pub peak_radius: f64,
+    /// Exponent of the channel slope in the migration rate. The channel
+    /// falls as far as the valley over a reach, so its slope is the valley
+    /// slope divided by the reach's sinuosity, and a winding reach migrates
+    /// more slowly than a straight one. Near-bank velocity goes as the
+    /// square root of slope at a fixed depth (Chézy), so 0.5. 0 disables.
+    pub slope_exponent: f64,
+    /// Sinuosity of a reach at which the slope leaves the migration rate
+    /// unchanged. Straighter reaches migrate faster and more winding ones
+    /// more slowly.
+    pub slope_sinuosity: f64,
     pub dt: f64,
     /// Laplacian smoothing strength per step.
     pub smoothing: f64,
@@ -181,6 +191,8 @@ impl Default for Params {
             gamma,
             alpha,
             peak_radius: 2.5,
+            slope_exponent: SLOPE_EXPONENT,
+            slope_sinuosity: SLOPE_SINUOSITY,
             dt: 0.1,
             smoothing: 0.03,
             cutoff_dist: 1.0,
@@ -234,6 +246,8 @@ impl Params {
         "gamma",
         "alpha",
         "peak_radius",
+        "slope_exponent",
+        "slope_sinuosity",
         "dt",
         "smoothing",
         "cutoff_dist",
@@ -284,6 +298,8 @@ impl Params {
             "gamma" => &mut self.gamma,
             "alpha" => &mut self.alpha,
             "peak_radius" => &mut self.peak_radius,
+            "slope_exponent" => &mut self.slope_exponent,
+            "slope_sinuosity" => &mut self.slope_sinuosity,
             "dt" => &mut self.dt,
             "smoothing" => &mut self.smoothing,
             "cutoff_dist" => &mut self.cutoff_dist,
@@ -414,6 +430,10 @@ pub struct Sim {
     /// relaxes to 1 over [`Params::width_time`] (after the bank-pull and
     /// bar-push model of Parker et al. 2011).
     pub widths: Vec<f64>,
+    /// Channel slope at each centreline point as a fraction of the valley
+    /// slope: the inverse of the sinuosity of the reach [`SLOPE_REACH`]
+    /// widths either side. Set by [`Sim::migration_rate`].
+    pub slope: Vec<f64>,
     pub oxbows: Vec<Oxbow>,
     /// Counts changes to the oxbow polylines, but not to their fill, so a
     /// renderer can skip rebuilding what depends only on their shape.
@@ -497,6 +517,15 @@ const BANK_BEYOND: f64 = 0.25;
 const WIDTH_TIME: f64 = 3.0;
 const BAR_PUSH: f64 = 0.6;
 const FLOOD_WIDENING: f64 = 1.0;
+
+/// Default slope feedback; see [`Params`].
+const SLOPE_EXPONENT: f64 = 0.5;
+const SLOPE_SINUOSITY: f64 = 1.25;
+
+/// Arc length either side of a point over which its reach's sinuosity, and
+/// so its slope, is measured, in channel widths: about one meander
+/// wavelength, so a single bend does not set it alone.
+pub const SLOPE_REACH: f64 = 12.0;
 
 /// Range of the local width, in multiples of the reference width.
 pub const MIN_WIDTH: f64 = 0.5;
@@ -625,6 +654,7 @@ impl Sim {
             pinches: Vec::new(),
             centerline: Vec::new(),
             widths: Vec::new(),
+            slope: Vec::new(),
             oxbows: Vec::new(),
             oxbow_version: 0,
             scrolls: Vec::new(),
@@ -874,6 +904,27 @@ impl Sim {
             }
             let upstream = if norm > 0.0 { acc / norm } else { 0.0 };
             self.rate[i] = p.omega * self.curv[i] + p.gamma * upstream;
+        }
+        // The water surface falls as far as the valley floor over a reach,
+        // so a reach of sinuosity σ has 1/σ of the valley slope. Points are
+        // evenly spaced after resampling, so the reach's arc length is its
+        // count of segments times the spacing.
+        let k = ((SLOPE_REACH / ds_w).round() as usize).max(1);
+        let spacing = ds_w * p.width;
+        self.slope.clear();
+        self.slope.extend((0..n).map(|i| {
+            let (a, b) = (i.saturating_sub(k), (i + k).min(n - 1));
+            let arc = (b - a) as f64 * spacing;
+            if arc > 0.0 { (dist(pts[a], pts[b]) / arc).clamp(1e-3, 1.0) } else { 1.0 }
+        }));
+        // `powf` is a software routine in WASM, so the default exponent of
+        // one half takes the square root, an instruction.
+        let e = p.slope_exponent;
+        if e != 0.0 {
+            for (r, s) in self.rate.iter_mut().zip(&self.slope) {
+                let x = p.slope_sinuosity * s;
+                *r *= if e == 0.5 { x.sqrt() } else { x.powf(e) };
+            }
         }
         &self.rate
     }
@@ -1656,6 +1707,25 @@ mod tests {
         eprintln!("amplitude {a0} -> {a1}, drift {drift}");
         assert!(a1 > 1.2 * a0, "amplitude {a0} -> {a1} should grow");
         assert!(drift > 0.5 * sim.params.width, "drift {drift} should be downstream (+x)");
+    }
+
+    #[test]
+    fn winding_reaches_are_gentler_and_migrate_more_slowly() {
+        let wl = 15.0;
+        let (mut gentle, mut winding) = (sine_sim(0.5, wl), sine_sim(3.0, wl));
+        gentle.migration_rate();
+        let with = winding.migration_rate().to_vec();
+        let mid = winding.centerline.len() / 2;
+        let (sg, sw) = (gentle.slope[gentle.centerline.len() / 2], winding.slope[mid]);
+        // A sine of amplitude kA = 1.26 has sinuosity about 1.32.
+        assert!((sg - 1.0).abs() < 0.02 && (1.0 / sw - 1.32).abs() < 0.03, "slopes {sg} and {sw}");
+        winding.params.slope_exponent = 0.0;
+        let without = winding.migration_rate().to_vec();
+        // Compare where the rate is largest, away from its zero crossings.
+        let i = (mid - 30..mid + 30).max_by(|&a, &b| without[a].abs().total_cmp(&without[b].abs())).unwrap();
+        let expected = (SLOPE_SINUOSITY * winding.slope[i]).sqrt();
+        assert!((with[i] / without[i] - expected).abs() < 1e-9, "rate ratio {} should be {expected}", with[i] / without[i]);
+        assert!(expected < 1.0);
     }
 
     #[test]
