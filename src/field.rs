@@ -91,7 +91,7 @@ pub struct Ground {
 
 /// One flood's work on the floodplain beside a channel; see
 /// [`Erodibility::flood`]. Lengths are in world units.
-pub struct Flood {
+pub struct Flood<'a> {
     /// Half the channel width, which each point's local width multiplies.
     pub half: f64,
     /// Overbank deposit at the bank, in channel depths.
@@ -104,6 +104,9 @@ pub struct Flood {
     pub scour: f64,
     /// Growth below which vegetation is young enough to strip.
     pub young: f64,
+    /// Factor on the deposit beside each channel point, as a mill pond
+    /// raises it, or empty for 1 everywhere.
+    pub boost: &'a [f64],
 }
 
 /// A crevasse splay: a lobe of sand a flood spreads through a breach in
@@ -328,7 +331,8 @@ impl Erodibility {
             }
             if deposits {
                 let room = (1.0 - *h as f64 / f.stage).max(0.0);
-                *h += (f.amount * (-(d - bank) / f.length).exp() * room) as f32;
+                let boost = f.boost.get(k as usize).copied().unwrap_or(1.0);
+                *h += (boost * f.amount * (-(d - bank) / f.length).exp() * room) as f32;
             }
             if scours && *g < young {
                 *g *= ((d - bank) / f.scour).min(1.0) as f32;
@@ -606,13 +610,13 @@ mod tests {
     }
 
     /// A flood that lays the deposit, up to the flood level `stage`.
-    fn deposit(stage: f64) -> Flood {
-        Flood { half: 1.0, amount: 0.3, length: 2.0, stage, scour: 0.0, young: 0.0 }
+    fn deposit(stage: f64) -> Flood<'static> {
+        Flood { half: 1.0, amount: 0.3, length: 2.0, stage, scour: 0.0, young: 0.0, boost: &[] }
     }
 
     /// A flood that only strips vegetation younger than `young`.
-    fn scour(reach: f64, young: f64) -> Flood {
-        Flood { half: 1.0, amount: 0.0, length: 0.0, stage: 0.0, scour: reach, young }
+    fn scour(reach: f64, young: f64) -> Flood<'static> {
+        Flood { half: 1.0, amount: 0.0, length: 0.0, stage: 0.0, scour: reach, young, boost: &[] }
     }
 
     fn ground(time: f64) -> Ground {

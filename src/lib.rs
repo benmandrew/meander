@@ -10,6 +10,7 @@ pub mod field;
 pub mod geom;
 pub mod ips;
 pub mod land;
+pub mod mills;
 pub mod rng;
 pub mod tributary;
 pub mod walls;
@@ -21,6 +22,7 @@ use land::Land;
 use rng::Rng;
 use walls::Walls;
 pub use crevasse::SplayMark;
+pub use mills::Mill;
 pub use tributary::Tributary;
 pub use wood::Jam;
 
@@ -238,6 +240,16 @@ pub struct Params {
     pub avulsion_ratio: f64,
     /// Least flood magnitude whose breach can avulse.
     pub avulsion_flood: f64,
+    /// Mills founded per unit time along the whole river, by holdings on
+    /// straight reaches beside their ground. 0 disables.
+    pub mill_rate: f64,
+    /// Least distance between two working mills, in channel widths.
+    pub mill_gap: f64,
+    /// Fraction by which a mill's weir slows migration just upstream of
+    /// it, falling to 0 at `pond_length`.
+    pub weir_backwater: f64,
+    /// Length of the pond a weir holds back, in channel widths.
+    pub pond_length: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -323,6 +335,10 @@ impl Default for Params {
             splay_length: SPLAY_LENGTH,
             avulsion_ratio: AVULSION_RATIO,
             avulsion_flood: AVULSION_FLOOD,
+            mill_rate: MILL_RATE,
+            mill_gap: MILL_GAP,
+            weir_backwater: WEIR_BACKWATER,
+            pond_length: POND_LENGTH,
             physics: true,
             friction,
             aspect,
@@ -397,6 +413,10 @@ impl Params {
         "splay_length",
         "avulsion_ratio",
         "avulsion_flood",
+        "mill_rate",
+        "mill_gap",
+        "weir_backwater",
+        "pond_length",
         "physics",
         "friction",
         "aspect",
@@ -467,6 +487,10 @@ impl Params {
             "splay_length" => &mut self.splay_length,
             "avulsion_ratio" => &mut self.avulsion_ratio,
             "avulsion_flood" => &mut self.avulsion_flood,
+            "mill_rate" => &mut self.mill_rate,
+            "mill_gap" => &mut self.mill_gap,
+            "weir_backwater" => &mut self.weir_backwater,
+            "pond_length" => &mut self.pond_length,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -601,11 +625,15 @@ pub struct Sim {
     pub splays: Vec<SplayMark>,
     /// Counts changes to `splays`.
     pub splay_version: u64,
+    /// Mills, working and ruined.
+    pub mills: Vec<Mill>,
+    /// Counts changes to `mills`.
+    pub mill_version: u64,
     /// Counts slumps from the valley walls, so a renderer can redraw the
     /// walls after bluff erosion.
     pub wall_version: u64,
     rng: Rng,
-    /// Draws for the floodplain's events (falling wood), from a
+    /// Draws for the floodplain's events (falling wood, new mills), from a
     /// stream of their own so they leave the river's draws unchanged.
     events: Rng,
     /// Magnitude of the last step's flood, whose levee breach is still to
@@ -633,6 +661,12 @@ pub struct Sim {
     /// Bluff erosion found this step: the wall, x in channel widths, the
     /// retreat and its limit.
     cuts: Vec<(usize, f64, f64, f64)>,
+    /// Whether each point may migrate (1) or a weir holds it (0), the
+    /// width it relaxes to, and the factor on the silt a flood lays beside
+    /// it; set by [`Sim::migration_rate`].
+    held: Vec<f64>,
+    target: Vec<f64>,
+    boost: Vec<f64>,
     /// Valley floor's y range at each erodibility grid column, refreshed
     /// at the start of each survey of the land.
     valley: Vec<(f64, f64)>,
@@ -868,6 +902,36 @@ const AVULSION_SMOOTH: usize = 40;
 /// Distance either side of a pinch, as a fraction of `pinch_length`,
 /// which an avulsion's route keeps out of.
 const PINCH_CLEAR: f64 = 0.5;
+/// Default mills; see [`Params`]. The Domesday survey of 1086 counted
+/// about 5,600 mills in England, several to a river every few kilometres;
+/// with a channel 40 m wide, 50 widths is 2 km.
+const MILL_RATE: f64 = 0.05;
+const MILL_GAP: f64 = 50.0;
+const WEIR_BACKWATER: f64 = 0.5;
+const POND_LENGTH: f64 = 15.0;
+/// Distance along the channel either side of a weir over which its
+/// masonry holds the banks, in channel widths.
+const WEIR_HOLD: f64 = 2.0;
+/// Width a mill pond relaxes to just above its weir, in multiples of the
+/// reference width, and the factor on overbank silt there, each falling
+/// to 1 at `pond_length`.
+const POND_WIDEN: f64 = 0.4;
+const POND_SILT: f64 = 1.0;
+/// Distance within which the channel must pass a weir to keep working it,
+/// in channel widths.
+const MILL_SNAP: f64 = 0.75;
+/// Least ratio of chord to arc along the reach a mill's leat runs beside.
+const MILL_STRAIGHT: f64 = 0.95;
+/// Leat: it leaves the channel `LEAT_UP` widths above the weir and returns
+/// `LEAT_DOWN` below it, running `LEAT_OFFSET` widths beyond the bank.
+const LEAT_UP: f64 = 7.0;
+const LEAT_DOWN: f64 = 3.0;
+const LEAT_OFFSET: f64 = 1.5;
+/// Time an abandoned mill stands as a ruin before it is dropped.
+pub const MILL_RUIN: f64 = 200.0;
+/// Flood magnitude above which a flood can sweep a weir away, certainly
+/// at magnitude 1.
+const MILL_FLOOD: f64 = 0.9;
 
 /// Longest chute a flood can cut, in channel widths.
 pub const CHUTE_CHORD: f64 = 5.0;
@@ -958,6 +1022,8 @@ impl Sim {
             tributaries: Vec::new(),
             splays: Vec::new(),
             splay_version: 0,
+            mills: Vec::new(),
+            mill_version: 0,
             wall_version: 0,
             rng: Rng::new(seed),
             events: Rng::new(seed ^ EVENTS_SEED),
@@ -976,6 +1042,9 @@ impl Sim {
             shift: Vec::new(),
             weights: Vec::new(),
             cuts: Vec::new(),
+            held: Vec::new(),
+            target: Vec::new(),
+            boost: Vec::new(),
             valley: Vec::new(),
             line_version: 0,
             grid_for: None,
@@ -1030,6 +1099,8 @@ impl Sim {
         self.jams.clear();
         self.splays.clear();
         self.splay_version += 1;
+        self.mills.clear();
+        self.mill_version += 1;
         self.wall_version += 1;
         self.place_tributaries();
         self.land = Land::new(&self.erodibility, seed);
@@ -1102,6 +1173,7 @@ impl Sim {
         self.migrate();
         self.erode_bluffs();
         self.smooth();
+        self.pin_weirs();
         self.clamp_to_domain();
         self.line_version += 1;
         if self.cutoff() {
@@ -1123,6 +1195,7 @@ impl Sim {
             self.floods += 1;
             let magnitude = self.rng.uniform();
             self.flush_jams(magnitude);
+            self.flood_mills(magnitude);
             for _ in 0..MAX_FLOOD_CUTS {
                 if !self.flood_cutoff(magnitude) {
                     break;
@@ -1135,6 +1208,7 @@ impl Sim {
             // spreads from the bank is set by how fast it settles, which
             // clearance leaves alone.
             let supply = self.supply();
+            self.migration_rate();
             let p = &self.params;
             let flood = Flood {
                 half: 0.5 * p.width,
@@ -1143,6 +1217,7 @@ impl Sim {
                 stage: p.levee_height,
                 scour: magnitude * p.scour_reach * p.width,
                 young: p.vegetation_time,
+                boost: &self.boost,
             };
             self.erodibility.flood(&self.centerline, &self.widths, &flood);
             // The flood breaks its levees in the next step, three months
@@ -1166,6 +1241,7 @@ impl Sim {
         let s = self.land_settings();
         self.land.tick(&self.erodibility, &self.centerline, &self.widths, &self.valley, &s, phase);
         self.recruit_wood();
+        self.found_mill();
         self.age_splays();
         self.rework_oxbows();
         // Clearance fills lakes faster with the fine sediment it washes in.
@@ -1213,9 +1289,10 @@ impl Sim {
         1.0 + (p.clearance_supply - 1.0) * smoothstep(t)
     }
 
-    /// Bring the jams up to date with the centreline's points.
+    /// Bring the jams and mills up to date with the centreline's points.
     fn track(&mut self) {
         self.track_jams();
+        self.track_mills();
     }
 
     /// Index of the centreline point nearest `p` within `r`, at most the
@@ -1415,6 +1492,7 @@ impl Sim {
         }
         self.feed_bars();
         self.push_jams();
+        self.pond_weirs();
         &self.rate
     }
 
@@ -1464,7 +1542,8 @@ impl Sim {
             // noise wherever the banks differ, a net drift inwards.
             let sign = if self.rate[i] < 0.0 { -1.0 } else { 1.0 };
             let e = self.bank_erodibility(i, nrm, sign, &ground);
-            let d = (e * (scale * self.rate[i] + self.noise[i])).clamp(-limit, limit);
+            let held = self.held[i];
+            let d = held * (e * (scale * self.rate[i] + self.noise[i])).clamp(-limit, limit);
             self.tmp[i][0] += d * nrm[0];
             self.tmp[i][1] += d * nrm[1];
             self.shift[i] = d;
@@ -1472,10 +1551,10 @@ impl Sim {
             // jitter, and the inner bank follows at the bar push. The
             // centreline keeps the Howard–Knutson rate, so the two agree on
             // average.
-            let b = self.widths[i];
-            let demand = scale * self.rate[i].abs();
+            let (b, target) = (self.widths[i], self.target[i]);
+            let demand = held * scale * self.rate[i].abs();
             let (pull, push) = ((e * demand).min(limit), (p.bar_push * demand).min(limit));
-            self.wtmp[i] = if p.width_time > 0.0 { b + (pull - push) / p.width - (b - 1.0) * relax } else { 1.0 };
+            self.wtmp[i] = if p.width_time > 0.0 { b + (pull - push) / p.width - (b - target) * relax } else { 1.0 };
         }
         std::mem::swap(&mut self.centerline, &mut self.tmp);
         // Smooth the width along the river, with the ends held at 1.
@@ -1497,9 +1576,11 @@ impl Sim {
         self.tmp.clear();
         self.tmp.extend_from_slice(&self.centerline);
         let src = &self.tmp;
+        // A weir holds its points against smoothing as well as migration.
         for i in 1..n.saturating_sub(1) {
+            let free = self.held.get(i).copied().unwrap_or(1.0);
             for d in 0..2 {
-                self.centerline[i][d] += k * (src[i - 1][d] + src[i + 1][d] - 2.0 * src[i][d]);
+                self.centerline[i][d] += free * k * (src[i - 1][d] + src[i + 1][d] - 2.0 * src[i][d]);
             }
         }
     }
@@ -2164,13 +2245,14 @@ mod tests {
 
     /// Straight channel along x with a sine perturbation, cutoffs off.
     fn sine_sim(amp_w: f64, wavelength_w: f64) -> Sim {
-        // No wood, whose jams would bend the sine.
+        // No wood or mills, whose jams and weirs would bend the sine.
         let params = Params {
             cutoff_dist: 0.0,
             flood_rate: 0.0,
             jitter: 0.0,
             heterogeneity: 0.0,
             wood_rate: 0.0,
+            mill_rate: 0.0,
             ..Params::default()
         };
         let w = params.width;
@@ -2730,6 +2812,54 @@ mod tests {
         if let Some(k) = (0..first).rev().find(|&k| plain[k].abs() > 1e-6) {
             assert_eq!(fed[k], plain[k], "nothing above the confluences");
         }
+    }
+
+    #[test]
+    fn a_weir_holds_its_reach_and_ponds_the_one_above() {
+        let mut sim = sine_sim(2.0, 40.0);
+        let (w, n) = (sim.params.width, sim.centerline.len());
+        let i = n / 2;
+        let free = sim.migration_rate().to_vec();
+        let weir = sim.centerline[i];
+        sim.mills.push(Mill { weir, across: [0.0, 1.0], leat: Vec::new(), born: 0.0, ruined_at: f64::INFINITY, at: i });
+        let ponded = sim.migration_rate().to_vec();
+        assert_eq!(sim.held[i], 0.0);
+        let k = i - sim.reach_points(0.5 * sim.params.pond_length);
+        assert!(ponded[k].abs() < free[k].abs() && sim.target[k] > 1.0 && sim.boost[k] > 1.0, "the pond above");
+        assert_eq!(ponded[i + 20], free[i + 20], "nothing below");
+        sim.step_n(300);
+        assert!(sim.mills[0].working(), "the channel keeps to the weir");
+        let near = sim.centerline.iter().map(|&c| dist(c, weir)).fold(f64::INFINITY, f64::min);
+        assert!(near < 0.25 * w, "the weir holds its point: {near}");
+        sim.flood_mills(1.0);
+        assert!(!sim.mills[0].working(), "the greatest flood sweeps it away");
+    }
+
+    #[test]
+    fn holdings_found_mills_on_straight_reaches() {
+        let mut sim = sine_sim(0.0, 40.0);
+        sim.params.mill_rate = 1.0 / sim.params.dt;
+        sim.land.owner.fill(0);
+        sim.migration_rate();
+        for _ in 0..20 {
+            sim.found_mill();
+        }
+        let w = sim.params.width;
+        assert!(!sim.mills.is_empty());
+        for m in &sim.mills {
+            let off = m.leat.iter().map(|&c| (c[1] - m.weir[1]).abs()).fold(0.0, f64::max);
+            assert!((off - (0.5 + LEAT_OFFSET) * w).abs() < 0.1 * w, "the leat runs beside the bank: {off}");
+        }
+        for (a, b) in sim.mills.iter().zip(sim.mills.iter().skip(1)) {
+            assert!(dist(a.weir, b.weir) >= sim.params.mill_gap * w || sim.mills.len() < 2);
+        }
+        let mut bent = sine_sim(6.0, 12.0);
+        (bent.params.mill_rate, bent.params.edge_margin) = (1.0 / bent.params.dt, 8.0);
+        bent.land.owner.fill(0);
+        for _ in 0..20 {
+            bent.found_mill();
+        }
+        assert!(bent.mills.is_empty(), "no mill on a winding reach");
     }
 
     /// A channel along x with a bend 10 widths high between x = 110 and
