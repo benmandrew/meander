@@ -160,6 +160,45 @@ const PLUG_MARSH = 0.25;
 const RIDGE = [238, 230, 196];
 const OLD_RIDGE = [146, 158, 108];
 const SCROLL_BANDS = 6;
+// Coarse ground, the gravel of the tributary fans and the colluvium below
+// the bluffs: a tint where its share of coarse material passes the first
+// level, and a stipple of pebbles where it passes the second. It changes
+// slowly, so it is redrawn every `COARSE_REFRESH` of simulated time, 20
+// units or 50 years.
+const GRAVEL = [200, 194, 172];
+const PEBBLE = [126, 118, 100];
+const COARSE_LEVELS = [0.15, 0.45];
+const COARSE_REFRESH = 20;
+// Valley walls are redrawn after the bluffs slump, at most every
+// `WALL_REFRESH` of simulated time: 20 units, 50 years.
+const WALL_REFRESH = 20;
+// Tributary streams: their width at the largest tributary, in channel
+// widths, and how far their course wanders across the fan.
+const STREAM_WIDTH = 0.3;
+const STREAM_WANDER = 0.6;
+// Crevasse splays: fresh sand in a lobe that spreads 35° either side of
+// the breach, as in the core, fading as vegetation takes it back over the
+// 750 years the core keeps it. Distributary channels run out across it.
+const SPLAY_SAND = [234, 222, 180];
+const SPLAY_CHANNEL = [196, 182, 138];
+const SPLAY_SPREAD = 0.61;
+const SPLAY_OPACITY = 0.65;
+// Large wood: logs lodged at the bank, leaning downstream into the water,
+// from 0.5 to 0.9 channel widths long.
+const LOG = [84, 64, 44];
+const LOG_LENGTH = [0.5, 0.9];
+// Mills: the weir's stone and the white water below it, the leat run dry
+// once the mill is a ruin, and the mill house's roof and walls, `HOUSE`
+// channel widths long and deep. The pond above a working weir lies darker
+// over `pond_length`.
+const STONE = [182, 174, 152];
+const FOAM = [236, 242, 240];
+const DRY_LEAT = [150, 140, 108];
+const ROOF = [146, 88, 64];
+const WALLING = [92, 78, 66];
+const HOUSE = [1.1, 0.7];
+// Points of a leat below its weir: `LEAT_DOWN` (3 widths) in the core.
+const LEAT_TAIL = 6;
 // The channel's edge: a thin line of bank on both sides, `BANK_EDGE` times
 // the local width from the centreline, and the wet sand of the point bar
 // on the inside of a bend, up to `BAR_RIM` widths more at a bend of radius
@@ -1049,6 +1088,15 @@ class SvgRenderer {
     // keeping a centreline does not repaint the old ones.
     this.oldBars = el('g', line, bars);
     this.barLayer = el('g', line, ground);
+    // Coarse ground lies over the bars and under the vegetation that grows
+    // over it. Its pebbles are sized for the channel width at each reset.
+    this.pebbles = el('pattern', { id: 'pebbles', patternUnits: 'userSpaceOnUse' }, el('defs', {}, ground));
+    this.coarseLayer = el('g', { 'fill-rule': 'evenodd' }, ground);
+    this.coarse = [
+      el('path', { fill: `rgb(${GRAVEL})`, 'fill-opacity': 0.45 }, this.coarseLayer),
+      el('path', { fill: 'url(#pebbles)' }, this.coarseLayer),
+    ];
+    this.coarseAt = null;
     // Shrub and forest lie over the bars and under the scroll bars, so the
     // ridges show through the trees.
     const stepOpacity = 1 - (1 - FOREST_OPACITY) ** (1 / FOREST_STEPS);
@@ -1116,6 +1164,11 @@ class SvgRenderer {
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
     this.leveeAt = null;
+    // Crevasse splays lie over the vegetation they bury: a group for each,
+    // by its key, with its lobes of sand and its channels.
+    this.splayLayer = el('g', {}, ground);
+    this.splayShapes = new Map();
+    this.splayAt = null;
     // Every clay plug the channel has not swept away keeps a faint marsh,
     // so old meander belts stay legible after their scars fade.
     this.plugMarsh = el('path', { fill: MARSH, 'fill-opacity': PLUG_MARSH, 'fill-rule': 'evenodd' }, ground);
@@ -1130,12 +1183,25 @@ class SvgRenderer {
     // Both are filled outlines at the local width, which a stroke cannot vary.
     // Every lake's reed fringe lies under the water of all of them, so lakes
     // that meet join as one body of water.
+    // Tributary streams and mill leats lie under the bank, so the channel
+    // hides where they meet it.
+    this.streamLayer = el('g', { ...round, stroke: `rgb(${WATER})` }, svg);
+    this.streams = [];
+    this.leatLayer = el('g', round, svg);
     this.bank = el('g', { fill: `rgb(${WET_SAND})` }, svg);
     this.reedLayer = el('g', { fill: 'none', 'stroke-linejoin': 'round', stroke: REEDS }, svg);
     this.lakeLayer = el('g', {}, svg);
     this.water = el('g', { fill: `rgb(${WATER})` }, svg);
     // Pools, riffles and mid-channel bars, over the channel's water.
     this.depth = [...POOL_COLOURS, SHALLOW, BAR].map((c) => ({ g: el('g', { fill: `rgb(${c})` }, svg), paths: [] }));
+    // Over the water: the darker ponds above working weirs, the weirs and
+    // the white water below them, the logs of the jams, and the mill houses.
+    this.pondLayer = el('g', { ...line, stroke: `rgb(${CLEAR})`, 'stroke-opacity': 0.35, 'stroke-linecap': 'butt' }, svg);
+    this.weirLayer = el('g', { fill: 'none' }, svg);
+    this.logs = el('path', { ...round, stroke: `rgb(${LOG})`, 'stroke-opacity': 0.9 }, svg);
+    this.houseLayer = el('g', {}, svg);
+    this.millShapes = [];
+    this.millsAt = null;
     this.bankRuns = [];
     this.waterRuns = [];
     this.lakes = [];
@@ -1164,7 +1230,16 @@ class SvgRenderer {
     this.shadedFor = null;
     this.lastBar = null;
     this.window = [x, w];
+    this.size = [w, h];
+    this.seed = seed;
     this.leveeAt = null;
+    this.coarseAt = null;
+    this.splayAt = null;
+    for (const shape of this.splayShapes.values()) shape.g.remove();
+    this.splayShapes = new Map();
+    this.millsAt = null;
+    this.wallsAt = { version: river.wall_version(), t: river.time() };
+    this.drawPebbles(river.get_param('width'), seed);
     this.plugAt = null;
     this.forestAt = null;
     this.forestJob = null;
@@ -1538,6 +1613,8 @@ class SvgRenderer {
     }
     this.drawFloodplain(river, memory, local, this.fresh);
     this.fresh = false;
+    // The floodplain features come as copies, which can grow memory too.
+    const [jams, tribs, mills, leats] = [river.jams(), river.tributaries(), river.mills(), river.mill_leats()];
 
     river.sync();
     // Views must be rebuilt after every step: memory growth detaches them.
@@ -1644,6 +1721,233 @@ class SvgRenderer {
       resize(paths, runs.length, g);
       runs.forEach((d, k) => set(paths[k], 'd', d));
     });
+    this.drawStreams(tribs, w);
+    this.drawMills(river, mills, leats, line, widths, w);
+    this.drawJams(jams, w);
+  }
+
+  // Each tributary runs down its combe to the apex of its fan, then wanders
+  // across the fan to the channel. Its course is seeded by its combe, so it
+  // moves only when the confluence does, every 10 steps in the core.
+  drawStreams(tribs, w) {
+    const n = tribs.length / 8;
+    resize(this.streams, n, this.streamLayer);
+    for (let k = 0; k < n; k++) {
+      const [side, mx, my, jx, jy, , scale, depth] = tribs.subarray(8 * k, 8 * k + 8);
+      const path = this.streams[k];
+      const key = `${mx} ${my} ${jx} ${jy} ${w}`;
+      if (path.key === key) continue;
+      path.key = key;
+      const rand = random(Math.round(10 * mx) ^ 0x7c1b);
+      const phase = 2 * Math.PI * rand(), waves = 1 + rand();
+      // From the head of the combe, back in the wall, to the fan's apex.
+      const pts = [mx, my + (side ? 1 : -1) * 0.9 * depth, mx, my];
+      const [ex, ey] = [jx - mx, jy - my];
+      const length = Math.hypot(ex, ey), steps = Math.max(2, Math.ceil(length / (0.5 * w)));
+      const [nx, ny] = length > 0 ? [-ey / length, ex / length] : [0, 0];
+      for (let s = 1; s <= steps; s++) {
+        const u = s / steps;
+        const off = STREAM_WANDER * w * Math.sin(Math.PI * u) * Math.sin(phase + 2 * Math.PI * waves * u);
+        pts.push(mx + u * ex + off * nx, my + u * ey + off * ny);
+      }
+      set(path, 'd', pointsData(chaikin(pts, false)));
+      set(path, 'stroke-width', dp1(STREAM_WIDTH * w * (0.5 + 0.5 * scale)));
+    }
+  }
+
+  // Each jam is a few logs lodged at its bank and leaning downstream into
+  // the water, seeded by the jam, so its logs keep their places and the
+  // last ones go first as it breaks up.
+  drawJams(jams, w) {
+    let d = '';
+    for (let k = 0; k < jams.length; k += 8) {
+      const [x, y, dx, dy, ix, iy, strength, until] = jams.subarray(k, k + 8);
+      const rand = random(Math.round(1000 * until) ^ 0x10c5);
+      const logs = Math.round(1 + 3 * strength);
+      for (let m = 0; m < logs; m++) {
+        const along = (rand() - 0.5) * 1.2 * w, lean = 0.25 + 0.6 * rand();
+        const length = (LOG_LENGTH[0] + (LOG_LENGTH[1] - LOG_LENGTH[0]) * rand()) * w;
+        const [ux, uy] = [Math.cos(lean) * dx + Math.sin(lean) * ix, Math.cos(lean) * dy + Math.sin(lean) * iy];
+        const [sx, sy] = [x + along * dx - 0.2 * w * ix, y + along * dy - 0.2 * w * iy];
+        d += `M${dp1(sx)} ${dp1(sy)}L${dp1(sx + length * ux)} ${dp1(sy + length * uy)}`;
+      }
+    }
+    set(this.logs, 'd', d);
+    set(this.logs, 'stroke-width', dp1(0.12 * w));
+  }
+
+  // Each mill: its leat, the weir across the channel with white water below
+  // it, the house on the leat beside the weir, and the darker pond above a
+  // working weir. A ruin's weir is broken, its leat runs dry and its house
+  // stands roofless, all fading over the 500 years the core keeps it. The
+  // mills are rebuilt only when one is founded or ruined.
+  drawMills(river, mills, leats, line, widths, w) {
+    const version = river.mill_version(), n = mills.length / 11;
+    if (this.millsAt !== version || this.millShapes.length !== n) {
+      this.millsAt = version;
+      for (const shape of this.millShapes) for (const e of shape.parts) e.remove();
+      this.millShapes = Array.from({ length: n }, (_, k) => this.millShape(mills.subarray(11 * k, 11 * k + 11), leats, w));
+    }
+    const pond = Math.round(river.get_param('pond_length') / SPACING), last = line.length / 2 - 1;
+    for (let k = 0; k < n; k++) {
+      const [x, y, ax, ay, working, ruin, at, width] = mills.subarray(11 * k, 11 * k + 11);
+      const shape = this.millShapes[k];
+      const opacity = (1 - smoothstep(ruin)).toFixed(2);
+      for (const e of shape.parts) set(e, 'opacity', opacity);
+      const i = Math.round(at);
+      if (!working || i < 1 || i >= last) {
+        set(shape.pond, 'd', '');
+        set(shape.foam, 'd', '');
+        continue;
+      }
+      const i0 = Math.max(0, i - pond);
+      let mean = 0;
+      for (let j = i0; j <= i; j++) mean += widths[j];
+      set(shape.pond, 'd', pathData(line, i0, i + 1));
+      set(shape.pond, 'stroke-width', dp1(0.8 * mean / (i - i0 + 1)));
+      // The channel turns about the weir after it is built, so the weir is
+      // laid across the channel as it now runs, with white water a quarter
+      // of a width below it.
+      let [tx, ty] = [line[2 * i + 2] - line[2 * i - 2], line[2 * i + 3] - line[2 * i - 1]];
+      const t = Math.hypot(tx, ty) || 1;
+      [tx, ty] = [tx / t, ty / t];
+      const [nx, ny] = ty * ax - tx * ay >= 0 ? [ty, -tx] : [-ty, tx];
+      const across = (reach, along) => {
+        const [cx, cy] = [x + along * tx, y + along * ty];
+        return `M${dp1(cx - reach * nx)} ${dp1(cy - reach * ny)}L${dp1(cx + reach * nx)} ${dp1(cy + reach * ny)}`;
+      };
+      set(shape.weir, 'd', across(0.5 * width + 0.2 * w, 0));
+      set(shape.foam, 'd', across(0.5 * width, 0.25 * w));
+    }
+  }
+
+  // The parts of one mill, from its values in `River::mills` and the leats.
+  millShape(m, leats, w) {
+    const [x, y, ax, ay, working, , , width, , start, count] = m;
+    const leat = Array.from(leats.subarray(2 * start, 2 * (start + count)));
+    const dash = { 'stroke-dasharray': `${dp1(0.4 * w)} ${dp1(0.3 * w)}` };
+    const water = el('path', {
+      d: pointsData(chaikin(leat, false)), 'stroke-width': dp1(0.22 * w), stroke: `rgb(${working ? WATER : DRY_LEAT})`,
+      ...(working ? {} : dash),
+    }, this.leatLayer);
+    // A ruin's weir lies where it was built; a working one is laid each
+    // frame by `drawMills`.
+    const reach = 0.5 * width + 0.2 * w;
+    const weir = el('path', {
+      d: working ? '' : `M${dp1(x - reach * ax)} ${dp1(y - reach * ay)}L${dp1(x + reach * ax)} ${dp1(y + reach * ay)}`,
+      stroke: `rgb(${STONE})`, 'stroke-width': dp1(0.25 * w), ...(working ? {} : dash),
+    }, this.weirLayer);
+    const foam = el('path', { stroke: `rgb(${FOAM})`, 'stroke-width': dp1(0.12 * w), 'stroke-opacity': 0.8 }, this.weirLayer);
+    // The house stands on the leat beside the weir, along it.
+    const q = Math.max(0, count - 1 - LEAT_TAIL);
+    const [a, b] = [Math.max(0, q - 1), Math.min(count - 1, q + 1)];
+    let [tx, ty] = [leat[2 * b] - leat[2 * a], leat[2 * b + 1] - leat[2 * a + 1]];
+    const t = Math.hypot(tx, ty) || 1;
+    [tx, ty] = [tx / t, ty / t];
+    const [hl, hd] = [0.5 * HOUSE[0] * w, 0.5 * HOUSE[1] * w];
+    const [cx, cy] = [leat[2 * q], leat[2 * q + 1]];
+    const corner = (s, r) => `${dp1(cx + s * hl * tx + r * hd * ty)} ${dp1(cy + s * hl * ty - r * hd * tx)}`;
+    const house = el('path', {
+      d: `M${corner(-1, -1)}L${corner(1, -1)}L${corner(1, 1)}L${corner(-1, 1)}Z`
+        + (working ? `M${corner(-1, 0)}L${corner(1, 0)}` : ''),
+      fill: working ? `rgb(${ROOF})` : 'none', stroke: `rgb(${WALLING})`, 'stroke-width': dp1(0.08 * w),
+      'stroke-linejoin': 'round', ...(working ? {} : dash),
+    }, this.houseLayer);
+    const pond = el('path', {}, this.pondLayer);
+    return { parts: [water, weir, foam, house, pond], weir, pond, foam };
+  }
+
+  // A pebble pattern for the coarse ground, scaled to the channel width.
+  drawPebbles(w, seed) {
+    const rand = random(seed ^ 0x9eb1);
+    const size = 1.6 * w;
+    set(this.pebbles, 'width', dp1(size));
+    set(this.pebbles, 'height', dp1(size));
+    this.pebbles.replaceChildren();
+    for (let k = 0; k < 5; k++) {
+      el('ellipse', {
+        cx: dp1(rand() * size), cy: dp1(rand() * size), rx: dp1((0.06 + 0.06 * rand()) * w), ry: dp1((0.05 + 0.04 * rand()) * w),
+        fill: `rgb(${PEBBLE})`, 'fill-opacity': 0.6,
+      }, this.pebbles);
+    }
+  }
+
+  // Contour the coarse ground over the window every `COARSE_REFRESH` of
+  // simulated time. Returns whether it did.
+  drawCoarse(river, memory) {
+    const t = river.time(), last = this.coarseAt;
+    if (last && t - last.t < COARSE_REFRESH && t >= last.t) return false;
+    this.coarseAt = { t };
+    const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
+    const coarse = new Float32Array(memory.buffer, river.coarse_ptr(), cols * rows);
+    const [c0, c1] = this.windowColumns(cols, cell);
+    COARSE_LEVELS.forEach((level, k) => set(this.coarse[k], 'd', contourData(coarse, cols, rows, cell, c0, c1, level)));
+    return true;
+  }
+
+  // Draw the crevasse splays when one is laid or dropped, and fade them
+  // every `LEVEE_REFRESH` of simulated time as vegetation takes them back.
+  // Returns whether it did.
+  drawSplays(river, w) {
+    const t = river.time(), version = river.splay_version(), last = this.splayAt;
+    if (last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
+    this.splayAt = { version, t };
+    const data = river.splays();
+    const shapes = new Map();
+    for (let k = 0; k < data.length; k += 7) {
+      const [ax, ay, dx, dy, length, age, born] = data.subarray(k, k + 7);
+      const key = `${born} ${ax} ${ay}`;
+      const shape = this.splayShapes.get(key) ?? this.splayShape(ax, ay, dx, dy, length, born, w);
+      this.splayShapes.delete(key);
+      shapes.set(key, shape);
+      set(shape.g, 'opacity', (SPLAY_OPACITY * (1 - smoothstep(age))).toFixed(2));
+    }
+    for (const shape of this.splayShapes.values()) shape.g.remove();
+    this.splayShapes = shapes;
+    return true;
+  }
+
+  // A splay: a lobe of sand from its apex, longest along the breach, with
+  // thicker sand in a smaller lobe within it and the channels that spread
+  // the flow, seeded by the time it was laid.
+  splayShape(ax, ay, dx, dy, length, born, w) {
+    const rand = random(Math.round(1000 * born) ^ 0x5b1a);
+    const at = (r, a) => [
+      ax + r * (Math.cos(a) * dx - Math.sin(a) * dy), ay + r * (Math.cos(a) * dy + Math.sin(a) * dx),
+    ];
+    const rim = [ax, ay];
+    const steps = 12;
+    for (let s = 0; s <= steps; s++) {
+      const u = 2 * s / steps - 1;
+      rim.push(...at(length * (0.55 + 0.45 * (1 - u * u)) * (0.85 + 0.3 * rand()), u * SPLAY_SPREAD));
+    }
+    const lobe = (scale) => pointsData(chaikin(chaikin(
+      rim.map((v, i) => (i % 2 ? ay + scale * (v - ay) : ax + scale * (v - ax))), true), true)) + 'Z';
+    let channels = '';
+    for (let c = 0; c < 3; c++) {
+      const a = (c - 1 + 0.4 * (rand() - 0.5)) * 0.6 * SPLAY_SPREAD, reach = (0.5 + 0.3 * rand()) * length;
+      const pts = [ax, ay];
+      for (let s = 1; s <= 5; s++) pts.push(...at(reach * s / 5, a + 0.15 * (rand() - 0.5)));
+      channels += pointsData(chaikin(pts, false));
+    }
+    const g = el('g', {}, this.splayLayer);
+    el('path', { d: lobe(1), fill: `rgb(${SPLAY_SAND})`, 'fill-opacity': 0.55 }, g);
+    el('path', { d: lobe(0.55), fill: `rgb(${SPLAY_SAND})`, 'fill-opacity': 0.7 }, g);
+    el('path', {
+      d: channels, fill: 'none', stroke: `rgb(${SPLAY_CHANNEL})`, 'stroke-width': dp1(0.12 * w), 'stroke-linecap': 'round',
+    }, g);
+    return { g };
+  }
+
+  // Redraw the valley walls after their bluffs have slumped, at most every
+  // `WALL_REFRESH` of simulated time. Returns whether it did.
+  redrawWalls(river) {
+    const t = river.time(), version = river.wall_version(), last = this.wallsAt;
+    if (last && (last.version === version || t - last.t < WALL_REFRESH) && t >= last.t) return false;
+    this.wallsAt = { version, t };
+    const [x, vw] = this.window;
+    this.drawWalls(river, x, vw, this.size[1], this.seed);
+    return true;
   }
 
   // Refresh at most one floodplain layer a call. Their refreshes fall due
@@ -1663,6 +1967,9 @@ class SvgRenderer {
       // After the forest, whose redraw also redraws the crowns.
       () => this.redrawTrees(),
       () => local.showScrolls && this.drawScrolls(river, memory, w),
+      () => this.drawCoarse(river, memory),
+      () => this.drawSplays(river, w),
+      () => this.redrawWalls(river),
     ];
     for (let k = 0; k < layers.length; k++) {
       const m = all ? k : (this.floodplainTurn + k) % layers.length;

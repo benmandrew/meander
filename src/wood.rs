@@ -29,7 +29,7 @@ pub struct Jam {
     /// Time it breaks up.
     pub until: f64,
     /// Centreline point it lies beside, kept up to date by [`Sim::track`].
-    pub(crate) at: usize,
+    pub at: usize,
 }
 
 impl Jam {

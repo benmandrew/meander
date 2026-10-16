@@ -4,7 +4,7 @@ Branch `feat/floodplain-processes`. Seven processes, each a core change with its
 
 ## Status
 
-The core is done and uncommitted; the WASM syncs, the renderer and the `CLAUDE.md` frontend notes are still to do.
+The core is on `main` in one commit per process. The WASM syncs, the renderer and the `CLAUDE.md` frontend notes are done on `feat/floodplain-render`, uncommitted. The renderer added 0.1–0.2 ms to the mean frame and 0.4 ms to p95 (1.5 → 1.7 ms and 5.2 → 5.7 ms, 600 frames at speed 2, headless Chrome); p99 stayed at 6.3–7.1 ms.
 
 - [x] 1 clearance alluviation
 - [x] 2 chute cutoffs
@@ -14,9 +14,9 @@ The core is done and uncommitted; the WASM syncs, the renderer and the `CLAUDE.m
 - [x] 6 crevasse splays and avulsion
 - [x] 7 mills and weirs
 - [x] CLAUDE.md core notes
-- [ ] WASM syncs
-- [ ] renderer
-- [ ] CLAUDE.md frontend notes
+- [x] WASM syncs
+- [x] renderer
+- [x] CLAUDE.md frontend notes
 
 Core results. With every new process off (`CLEARANCE_SUPPLY=1 CHUTE_VEGETATION=0 WOOD_RATE=0 BLUFF_RATE=0 FAN_RADIUS=0 CREVASSE_DROP=0 MILL_RATE=0`) the snapshot matches the baseline exactly: 70 cutoffs, 13 in 64 floods, sinuosity 1.46. With all on, over seeds 1–6 and 24,000 steps: mean sinuosity after step 6,000 is 1.39 (1.34 with all off), 50 cutoffs (54), about 6 jams and 5 splays at a time, 1–2 working mills, 1 avulsion per 1,600 units, walls retreating up to 6 widths. Step time with all on: median 0.132 ms, 99.9% 0.62 ms, max 0.79 ms. 48 tests pass, and 32 runs of the self-intersection configurations (seeds 1–16, calm and stormy) stay clean.
 
@@ -61,6 +61,11 @@ All vector, no raster, in the existing layers:
 ### CLAUDE.md frontend notes
 
 Describe the new sync functions and drawings once they exist.
+
+### Left over from the renderer
+
+- A mill's leat is fixed where it was built, so the channel can migrate over its ends; the core could trim or rebuild it.
+- The weir pins one point, and the channel can turn up to 60° about it before the mill counts as outflanked, which draws as a visible corner. A lower limit would ruin mills sooner.
 
 ### Open questions for the user
 

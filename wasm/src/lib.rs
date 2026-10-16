@@ -8,7 +8,8 @@
 //! without copying. Call `sync` after stepping, then rebuild every typed
 //! array view: memory growth detaches old views.
 
-use meander_core::{Params, Sim};
+use meander_core::geom::right_normal;
+use meander_core::{FAN_MAX_DEPTH, MILL_RUIN, Params, SPLAY_LIFE, Sim};
 use wasm_bindgen::prelude::*;
 
 /// Hidden reach lengths, in channel widths.
@@ -321,6 +322,110 @@ impl River {
         self.forest.as_ptr()
     }
 
+    /// Share of coarse material on each erodibility cell, in [0, 1], the
+    /// same shape as `deposit_ptr`: gravel on the tributary fans and
+    /// colluvium slumped from the valley walls.
+    pub fn coarse_ptr(&self) -> *const f32 {
+        self.sim.erodibility.coarse.as_ptr()
+    }
+
+    // The floodplain features below are short lists, so each is returned as
+    // a copy. Each copy allocates, which can grow memory, so call them before
+    // building any typed-array view.
+
+    /// The jams of large wood, eight values each: the jam's x and y on the
+    /// bank, the unit vector downstream, the unit vector from its bank into
+    /// the channel, its strength in [0, 1], and the time it breaks up, which
+    /// tells one jam from another.
+    pub fn jams(&self) -> Vec<f32> {
+        let sim = &self.sim;
+        let (n, life) = (sim.centerline.len(), sim.params.jam_lifetime);
+        let mut out = Vec::with_capacity(7 * sim.jams.len());
+        for j in sim.jams.iter().filter(|j| j.at > 0 && j.at + 1 < n) {
+            let nrm = right_normal(&sim.centerline, j.at);
+            // The right normal turned back a right angle is downstream.
+            let (down, into) = ([-nrm[1], nrm[0]], [-j.side * nrm[0], -j.side * nrm[1]]);
+            let s = j.strength(sim.time, life);
+            out.extend([j.pos[0], j.pos[1], down[0], down[1], into[0], into[1], s, j.until].map(|v| v as f32));
+        }
+        out
+    }
+
+    /// The crevasse splays, seven values each: the apex's x and y, the unit
+    /// vector out through the breach, the lobe's length, its age over the
+    /// time it is drawn for, and the time it was laid.
+    pub fn splays(&self) -> Vec<f32> {
+        let sim = &self.sim;
+        let mut out = Vec::with_capacity(7 * sim.splays.len());
+        for s in &sim.splays {
+            let age = (sim.time - s.born) / SPLAY_LIFE;
+            out.extend([s.apex[0], s.apex[1], s.dir[0], s.dir[1], s.length, age, s.born].map(|v| v as f32));
+        }
+        out
+    }
+    /// Changes whenever the splays do.
+    pub fn splay_version(&self) -> f64 {
+        self.sim.splay_version as f64
+    }
+
+    /// The tributaries, eight values each: the wall they come down (0 the
+    /// low-y wall, 1 the high-y wall), the fan's apex at the combe mouth, the
+    /// centreline point they join, the fan's radius, the share of the
+    /// largest tributary's flow they carry, and their combe's depth into the
+    /// wall, in world units.
+    pub fn tributaries(&self) -> Vec<f32> {
+        let sim = &self.sim;
+        let w = sim.params.width;
+        let mut out = Vec::with_capacity(8 * sim.tributaries.len());
+        for t in &sim.tributaries {
+            let Some(j) = sim.centerline.get(t.at) else { continue };
+            out.extend(
+                [t.side as f64, t.mouth[0], t.mouth[1], j[0], j[1], t.radius, t.scale, t.scale * FAN_MAX_DEPTH * w]
+                    .map(|v| v as f32),
+            );
+        }
+        out
+    }
+
+    /// The mills, eleven values each: the weir's x and y, the unit vector
+    /// across the channel towards the mill, 1 while it works and 0 as a
+    /// ruin, a ruin's age over the time it stands, the centreline point at
+    /// the weir (−1 for a ruin), the channel's width there, the time it was
+    /// founded, and the start and number of its leat's points in
+    /// `mill_leats`.
+    pub fn mills(&self) -> Vec<f32> {
+        let sim = &self.sim;
+        let w = sim.params.width;
+        let (mut out, mut start) = (Vec::with_capacity(10 * sim.mills.len()), 0);
+        for m in &sim.mills {
+            let working = m.working();
+            let ruin = if working { 0.0 } else { (sim.time - m.ruined_at) / MILL_RUIN };
+            let at = if working && m.at < sim.centerline.len() { m.at as f64 } else { -1.0 };
+            let width = sim.widths.get(m.at).map_or(w, |&b| b * w);
+            let len = m.leat.len();
+            out.extend(
+                [m.weir[0], m.weir[1], m.across[0], m.across[1], working as u8 as f64, ruin, at, width, m.born, start as f64, len as f64]
+                    .map(|v| v as f32),
+            );
+            start += len;
+        }
+        out
+    }
+    /// Every mill's leat, back to back, as flat x, y pairs; see `mills`.
+    pub fn mill_leats(&self) -> Vec<f32> {
+        self.sim.mills.iter().flat_map(|m| m.leat.iter().flat_map(|p| [p[0] as f32, p[1] as f32])).collect()
+    }
+    /// Changes whenever a mill is founded or falls into ruin.
+    pub fn mill_version(&self) -> f64 {
+        self.sim.mill_version as f64
+    }
+
+    /// Changes whenever a valley wall slumps, so its drawing can follow the
+    /// bluff erosion.
+    pub fn wall_version(&self) -> f64 {
+        self.sim.wall_version as f64
+    }
+
     /// Landholding of each erodibility cell, the same shape as
     /// `deposit_ptr`: an index into the slots of `sync_holdings`, or
     /// 2^32 − 1 where no holding has the cell.
@@ -381,6 +486,15 @@ impl River {
     /// Cutoffs made by floods, included in `cutoffs`.
     pub fn flood_cutoffs(&self) -> u32 {
         self.sim.flood_cutoffs as u32
+    }
+    /// Avulsions through a crevasse, included in `cutoffs`.
+    pub fn avulsions(&self) -> u32 {
+        self.sim.avulsions as u32
+    }
+    /// Sediment supply from the upland, as a multiple of the wooded
+    /// upland's; it rises as the upland is cleared.
+    pub fn supply(&self) -> f64 {
+        self.sim.supply()
     }
     pub fn point_count(&self) -> usize {
         self.sim.centerline.len()

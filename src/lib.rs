@@ -861,7 +861,7 @@ const TRIBUTARY_BOOST: f64 = 0.3;
 /// Combe depth, in channel widths, below which a combe carries no
 /// tributary, and the depth of the deepest combe; see [`walls`].
 pub const FAN_MIN_DEPTH: f64 = 3.0;
-const FAN_MAX_DEPTH: f64 = 4.5;
+pub const FAN_MAX_DEPTH: f64 = 4.5;
 /// Height of a fan at its apex above fresh bar sand, in channel depths.
 const FAN_HEIGHT: f64 = 0.6;
 /// Distance downstream of a confluence over which the tributary's bedload

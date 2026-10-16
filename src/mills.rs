@@ -32,7 +32,7 @@ pub struct Mill {
     /// Time the mill fell into ruin, or infinity while it works.
     pub ruined_at: f64,
     /// Centreline point at the weir, kept up to date by [`Sim::track`].
-    pub(crate) at: usize,
+    pub at: usize,
 }
 
 impl Mill {
