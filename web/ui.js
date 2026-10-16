@@ -22,6 +22,11 @@ const SETTINGS = { warmup: 500, noise: 0.5 };
 // 5% or more, within the range measured on real meandering rivers.
 const YEARS_PER_UNIT = 2.5;
 
+// The panel shows the JS time of the last `FRAME_WINDOW` frames, about 10 s,
+// refreshed every `STATS_EVERY` ms.
+const FRAME_WINDOW = 600;
+const STATS_EVERY = 250;
+
 // `renderer` provides draw(river, memory, state), reset(river, bounds, seed),
 // capture(river, memory, state), which is called during warm-up in place of
 // drawing, and idle(river, memory, state), which is called on frames that
@@ -32,7 +37,10 @@ export async function startApp({ view, renderer, display }) {
   const state = { bounds: [1, 1], local };
   const river = new River();
   let running = true;
-  let frameMs = 0;
+  // JS time of recent frames, in ms, as a ring.
+  const frameTimes = new Float64Array(FRAME_WINDOW);
+  let frames = 0;
+  let statsAt = -Infinity;
   // Simulated time owed to the loop but not yet stepped.
   let owed = 0;
   // Warm-up time still to run, spread over frames so the page stays live.
@@ -78,6 +86,7 @@ export async function startApp({ view, renderer, display }) {
   }
 
   function frame(now) {
+    requestAnimationFrame(frame);
     // Real seconds since the last frame, capped so a background tab does
     // not return to a huge backlog.
     const elapsed = Math.min(0.1, (now - (lastFrame ?? now)) / 1000);
@@ -93,11 +102,20 @@ export async function startApp({ view, renderer, display }) {
       if (warming <= 0) epoch = river.time();
       $('overlay').hidden = warming <= 0;
       $('overlay').textContent = `Developing river… ${Math.round(100 * (1 - warming / local.warmup))}%`;
-      requestAnimationFrame(frame);
       return;
     }
+    const t0 = performance.now();
+    update(elapsed);
+    frameTimes[frames++ % FRAME_WINDOW] = performance.now() - t0;
+    if (now - statsAt >= STATS_EVERY) {
+      statsAt = now;
+      showStats();
+    }
+  }
+
+  // Step the river and draw it, after the warm-up.
+  function update(elapsed) {
     if (running) {
-      const t0 = performance.now();
       const dt = river.get_param('dt');
       owed += local.speed * elapsed;
       const n = Math.floor(owed / dt);
@@ -105,25 +123,26 @@ export async function startApp({ view, renderer, display }) {
         owed -= dt * river.advance(n * dt);
         dirty = true;
       }
-      frameMs = 0.9 * frameMs + 0.1 * (performance.now() - t0);
     }
     // Draw only when something has changed, so a paused or slow river costs
     // nothing between steps beyond drawing work spread over frames.
     if (!dirty) {
       renderer.idle(river, wasm.memory, state);
-      requestAnimationFrame(frame);
       return;
     }
     dirty = false;
     renderer.draw(river, wasm.memory, state);
     const year = `Year ${Math.round((river.time() - epoch) * YEARS_PER_UNIT).toLocaleString('en-GB')}`;
     if ($('year').textContent !== year) $('year').textContent = year;
-    $('stats').textContent =
-      `t ${river.time().toFixed(1)}   sinuosity ${river.sinuosity().toFixed(2)}\n` +
-      `points ${river.point_count()}   cutoffs ${river.cutoffs()}   oxbows and scars ${river.oxbow_count()}\n` +
-      `floods ${river.floods()}, which made ${river.flood_cutoffs()} cutoffs\n` +
-      `${frameMs.toFixed(1)} ms/frame (sim)`;
-    requestAnimationFrame(frame);
+  }
+
+  // The mean, 95th and 99th percentile of the recent frame times.
+  function showStats() {
+    const times = frameTimes.slice(0, Math.min(frames, FRAME_WINDOW)).sort();
+    if (!times.length) return;
+    const at = (p) => times[Math.min(times.length - 1, Math.floor(p * times.length))].toFixed(1);
+    const mean = times.reduce((a, b) => a + b, 0) / times.length;
+    $('stats').textContent = `ms/frame   mean ${mean.toFixed(1)}   p95 ${at(0.95)}   p99 ${at(0.99)}`;
   }
 
   function togglePlay() {
