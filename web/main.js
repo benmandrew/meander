@@ -10,6 +10,13 @@ import { startApp } from './ui.js';
 
 const NS = 'http://www.w3.org/2000/svg';
 const WATER = [61, 126, 166];
+// Water colour of a lake once cut off: the silt settles out of still
+// water, so it is clearer and darker than the river.
+const CLEAR = [34, 84, 116];
+// Fill over which a new lake turns from the river's colour to `CLEAR`. A
+// lake left to fill on its own takes 1200 units of simulated time, so this
+// is 12 units, two seconds on screen at the default speed.
+const CLEARING = 0.01;
 // Water colour of a lake near the end of its life, turbid and weedy.
 const MURKY = [80, 120, 116];
 const REEDS = 'rgb(104, 126, 84)';
@@ -630,12 +637,12 @@ class SvgRenderer {
     this.record(line, river.time(), w, local);
     this.drawBars(river.time(), w, local);
 
-    // Oxbows: a lake that plugs from the ends, narrows far more slowly from
-    // the banks and turns murky, fading only over the last fifth of its
-    // fill, then a marshy scar that fades out. Both plugs and banks advance
-    // steadily as it fills, and the water drains first from where the land
-    // is high or floods have laid the most silt, splitting the lake into
-    // pools. The reed fringe grows inwards, so it does not hide the
+    // Oxbows: a lake that clears and darkens once cut off, plugs from the
+    // ends, narrows far more slowly from the banks and turns murky, fading
+    // only over the last fifth of its fill, then a marshy scar that fades
+    // out. Both plugs and banks advance steadily as it fills, and the water
+    // drains first from where the land is high or floods have laid the most
+    // silt, splitting the lake into pools. The reed fringe grows inwards, so it does not hide the
     // narrowing.
     resize(this.scars, n, this.scarLayer);
     resize(this.lakes, n, this.lakeLayer);
@@ -690,7 +697,8 @@ class SvgRenderer {
         set(reed, 'd', d);
       }
       const opacity = clamp01(5 * (1 - age)).toFixed(2);
-      set(lake, 'fill', mix(WATER, MURKY, smoothstep(1.5 * age)));
+      const clear = mixRgb(WATER, CLEAR, smoothstep(age / CLEARING));
+      set(lake, 'fill', mix(clear, MURKY, smoothstep(1.5 * (age - CLEARING) / (1 - CLEARING))));
       set(lake, 'opacity', opacity);
       set(reed, 'opacity', opacity);
       set(reed, 'stroke-width', (2 * reeds).toFixed(2));
