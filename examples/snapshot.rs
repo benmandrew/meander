@@ -161,6 +161,22 @@ fn main() {
                 format!("{lo:.2}/{mid:.2}/{hi:.2} gentle {gentle:.2} sharp {sharp:.2}")
             }
         );
+        let retreat = |side| (0..(sim.bounds[0] / sim.params.width) as usize).map(|x| sim.walls.retreat(side, x as f64)).fold(0.0f64, f64::max);
+        println!(
+            "        supply {:4.2}  jams {:2}  splays {:2}  avulsions {:2}  captures {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {}",
+            sim.supply(),
+            sim.jams.len(),
+            sim.splays.len(),
+            sim.avulsions,
+            sim.captures,
+            sim.mills.iter().filter(|m| m.working()).count(),
+            sim.mills.len(),
+            sim.scrolls.len(),
+            retreat(0),
+            retreat(1),
+            sim.wall_version - 1,
+            sim.tributaries.len(),
+        );
         std::fs::write(format!("{out}/step{:06}.svg", sim.steps), svg(&sim, up, view_w)).unwrap();
         for o in sim.oxbows.iter().filter(|o| !o.is_lake()) {
             let key = (o.born.to_bits(), o.length.to_bits());
