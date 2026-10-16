@@ -2851,7 +2851,7 @@ mod tests {
         let i = n / 2;
         let free = sim.migration_rate().to_vec();
         let weir = sim.centerline[i];
-        sim.mills.push(Mill { weir, across: [0.0, 1.0], leat: Vec::new(), born: 0.0, ruined_at: f64::INFINITY, at: i });
+        sim.mills.push(Mill { weir, across: [0.0, 1.0], leat: Vec::new(), course: Vec::new(), born: 0.0, ruined_at: f64::INFINITY, at: i });
         let ponded = sim.migration_rate().to_vec();
         assert_eq!(sim.held[i], 0.0);
         let k = i - sim.reach_points(0.5 * sim.params.pond_length);
@@ -2863,6 +2863,42 @@ mod tests {
         assert!(near < 0.25 * w, "the weir holds its point: {near}");
         sim.flood_mills(1.0);
         assert!(!sim.mills[0].working(), "the greatest flood sweeps it away");
+    }
+
+    /// A working mill on a growing sine, with its leat on the side `side`
+    /// of the right normal. The bend above the weir migrates towards a
+    /// leat on side 1 and away from one on side −1.
+    fn mill_on_a_sine(side: f64) -> Sim {
+        let mut sim = sine_sim(2.0, 40.0);
+        let i = sim.centerline.len() / 2;
+        let (up, down) = (sim.reach_points(LEAT_UP), sim.reach_points(LEAT_DOWN));
+        let nrm = geom::right_normal(&sim.centerline, i);
+        let course = sim.course(i - up, i + down, side);
+        let (weir, across) = (sim.centerline[i], [side * nrm[0], side * nrm[1]]);
+        let mut m = Mill { weir, across, leat: Vec::new(), course, born: 0.0, ruined_at: f64::INFINITY, at: i };
+        sim.rejoin(&mut m);
+        sim.mills.push(m);
+        sim
+    }
+
+    #[test]
+    fn a_leat_follows_the_bank_and_is_lost_when_breached() {
+        let mut sim = mill_on_a_sine(-1.0);
+        let w = sim.params.width;
+        let (course, intake) = (sim.mills[0].course.clone(), sim.mills[0].leat[0]);
+        sim.step_n(300);
+        let m = &sim.mills[0];
+        assert!(m.working() && m.course == course, "the course stays where it was dug");
+        let up = sim.reach_points(LEAT_UP);
+        for (end, k) in [(m.leat[0], m.at - up), (m.leat[m.leat.len() - 1], m.at - up + m.leat.len() - 1)] {
+            let gap = dist(end, sim.centerline[k]) - 0.5 * sim.widths[k] * w;
+            assert!(gap.abs() < 0.05 * w, "the leat meets the bank: {gap}");
+        }
+        assert!(dist(m.leat[0], intake) > 0.5 * w, "the intake moves with the bank: {}", dist(m.leat[0], intake));
+
+        let mut breached = mill_on_a_sine(1.0);
+        breached.step_n(300);
+        assert!(!breached.mills[0].working(), "a bend that reaches the leat ruins the mill");
     }
 
     #[test]
@@ -2959,3 +2995,4 @@ mod tests {
         assert_eq!(sim.oxbows[0].points, beside);
     }
 }
+

@@ -3,8 +3,8 @@
 //! carries water to the wheel and back. The weir's masonry holds the banks
 //! beside it, and the pond it holds back slows the reach above it, widens
 //! it, and drops more silt on the banks in a flood. A mill is left as a
-//! ruin when the channel cuts away from its weir, or a great flood sweeps
-//! the weir away.
+//! ruin when the channel cuts away from its weir or breaks into its leat,
+//! or a great flood sweeps the weir away.
 
 use crate::geom::{self, P, right_normal};
 use crate::{
@@ -27,7 +27,12 @@ pub struct Mill {
     /// Unit vector across the channel at the weir, towards the mill.
     pub across: P,
     /// The leat, from where it leaves the channel to where it returns.
+    /// Its ends follow the bank while the mill works; see [`Sim::rejoin`].
     pub leat: Vec<P>,
+    /// The course the leat was dug along, [`LEAT_OFFSET`] widths beyond
+    /// the bank as it ran when the mill was founded. It stays where it was
+    /// dug while the channel migrates.
+    pub course: Vec<P>,
     pub born: f64,
     /// Time the mill fell into ruin, or infinity while it works.
     pub ruined_at: f64,
@@ -42,9 +47,9 @@ impl Mill {
 }
 
 impl Sim {
-    /// Find each working mill's weir on the channel, and leave as a ruin
-    /// each mill the channel has cut away from. Drop ruins past
-    /// [`MILL_RUIN`].
+    /// Find each working mill's weir on the channel and lay its leat to the
+    /// bank, and leave as a ruin each mill the channel has cut away from or
+    /// broken into the leat of. Drop ruins past [`MILL_RUIN`].
     pub(crate) fn track_mills(&mut self) {
         if self.mills.is_empty() {
             return;
@@ -56,12 +61,16 @@ impl Sim {
         let g = self.build_grid(MILL_SNAP * w);
         let mut mills = std::mem::take(&mut self.mills);
         for m in mills.iter_mut().filter(|m| m.working()) {
-            match self.nearest_point(m.weir, MILL_SNAP * w, g) {
-                Some(i) if !self.outflanked(i) => m.at = i,
-                _ => {
-                    m.ruined_at = time;
-                    changed = true;
+            let held = match self.nearest_point(m.weir, MILL_SNAP * w, g) {
+                Some(i) if !self.outflanked(i) => {
+                    m.at = i;
+                    !self.rejoin(m)
                 }
+                _ => false,
+            };
+            if !held {
+                m.ruined_at = time;
+                changed = true;
             }
         }
         self.mills = mills;
@@ -136,38 +145,70 @@ impl Sim {
         if self.mills.iter().any(|m| m.working() && geom::dist2(m.weir, q) < gap) {
             return;
         }
-        let leat = self.leat(i - up, i + down, side);
-        let field = &self.erodibility;
+        let nrm = right_normal(&self.centerline, i);
+        let mut mill = Mill {
+            weir: q,
+            across: [side * nrm[0], side * nrm[1]],
+            leat: Vec::new(),
+            course: self.course(i - up, i + down, side),
+            born: self.time,
+            ruined_at: f64::INFINITY,
+            at: i,
+        };
+        self.rejoin(&mut mill);
+        let (leat, field) = (&mill.leat, &self.erodibility);
         let owned = |c: P| self.land.owner.get(field.cell_index(c)).is_some_and(|&o| o != land::NONE);
         if (leat.iter().filter(|&&c| owned(c)).count() as f64) < LEAT_OWNED * leat.len() as f64 {
             return;
         }
-        let nrm = right_normal(&self.centerline, i);
-        self.mills.push(Mill {
-            weir: q,
-            across: [side * nrm[0], side * nrm[1]],
-            leat,
-            born: self.time,
-            ruined_at: f64::INFINITY,
-            at: i,
-        });
+        self.mills.push(mill);
         self.mill_version += 1;
     }
 
-    /// A leat beside points `a` to `b` on the side `side` of the right
-    /// normal: it leaves the bank at `a`, runs [`LEAT_OFFSET`] widths
-    /// beyond it, and returns at `b`.
-    fn leat(&self, a: usize, b: usize, side: f64) -> Vec<P> {
+    /// The course a leat is dug along beside points `a` to `b`, on the
+    /// side `side` of the right normal, [`LEAT_OFFSET`] widths beyond the
+    /// bank.
+    pub(crate) fn course(&self, a: usize, b: usize, side: f64) -> Vec<P> {
         let w = self.params.width;
-        let ramp = self.reach_points(LEAT_RAMP).max(1) as f64;
         (a..=b)
             .map(|k| {
                 let (q, nrm) = (self.centerline[k], right_normal(&self.centerline, k));
-                let t = smoothstep((k - a).min(b - k) as f64 / ramp);
-                let off = side * (0.5 * self.widths[k] + LEAT_OFFSET * t) * w;
+                let off = side * (0.5 * self.widths[k] + LEAT_OFFSET) * w;
                 [q[0] + off * nrm[0], q[1] + off * nrm[1]]
             })
             .collect()
+    }
+
+    /// Lay mill `m`'s leat along its course, its ends turning off it over
+    /// [`LEAT_RAMP`] widths to the bank as it now runs, from [`LEAT_UP`]
+    /// widths above the weir to [`LEAT_DOWN`] below. Over a mill's
+    /// centuries the reach above the weir migrates, and the miller digs the
+    /// intake on to meet it. The leat is left as it was when the weir is
+    /// too near either end of the channel to reach both banks. Returns
+    /// whether the bank has reached the course where it runs at full
+    /// offset, so the river has broken into the leat.
+    pub(crate) fn rejoin(&self, m: &mut Mill) -> bool {
+        let (w, n, len) = (self.params.width, self.centerline.len(), m.course.len());
+        let up = self.reach_points(LEAT_UP);
+        if len <= up || m.at < up || m.at - up + len > n {
+            return false;
+        }
+        let a = m.at - up;
+        let nrm = right_normal(&self.centerline, m.at);
+        let side = (m.across[0] * nrm[0] + m.across[1] * nrm[1]).signum();
+        let ramp = self.reach_points(LEAT_RAMP).max(1) as f64;
+        let mut breached = false;
+        m.leat.clear();
+        m.leat.extend(m.course.iter().enumerate().map(|(j, &c)| {
+            let k = a + j;
+            let (q, nrm) = (self.centerline[k], right_normal(&self.centerline, k));
+            let off = side * 0.5 * self.widths[k] * w;
+            let bank = [q[0] + off * nrm[0], q[1] + off * nrm[1]];
+            let t = smoothstep(j.min(len - 1 - j) as f64 / ramp);
+            breached |= t >= 1.0 && side * ((c[0] - bank[0]) * nrm[0] + (c[1] - bank[1]) * nrm[1]) < 0.0;
+            [bank[0] + t * (c[0] - bank[0]), bank[1] + t * (c[1] - bank[1])]
+        }));
+        breached
     }
 
     /// Put the point at each working weir back on it. Resampling cuts the

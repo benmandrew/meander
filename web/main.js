@@ -581,6 +581,12 @@ function pointsData(pts) {
   return d;
 }
 
+// Path data for the leat of `count` points from point `start` of `leats`,
+// rounded by a pass of corner cutting.
+function leatData(leats, start, count) {
+  return pointsData(chaikin(Array.from(leats.subarray(2 * start, 2 * (start + count))), false));
+}
+
 // Trace the boundaries of a map of labels, `W` × `H` cells row by row with
 // 0 for no label and outside the map, along the cell edges. Each boundary
 // between two junctions of three or more regions, or round a region that
@@ -1796,7 +1802,8 @@ class SvgRenderer {
   // it, the house on the leat beside the weir, and the darker pond above a
   // working weir. A ruin's weir is broken, its leat runs dry and its house
   // stands roofless, all fading over the 500 years the core keeps it. The
-  // mills are rebuilt only when one is founded or ruined.
+  // mills are rebuilt only when one is founded or ruined, but a working
+  // leat is laid each frame, since its ends follow the bank.
   drawMills(river, mills, leats, line, widths, w) {
     const version = river.mill_version(), n = mills.length / 11;
     if (this.millsAt !== version || this.millShapes.length !== n) {
@@ -1806,8 +1813,9 @@ class SvgRenderer {
     }
     const pond = Math.round(river.get_param('pond_length') / SPACING), last = line.length / 2 - 1;
     for (let k = 0; k < n; k++) {
-      const [x, y, ax, ay, working, ruin, at, width] = mills.subarray(11 * k, 11 * k + 11);
+      const [x, y, ax, ay, working, ruin, at, width, , start, count] = mills.subarray(11 * k, 11 * k + 11);
       const shape = this.millShapes[k];
+      if (working) set(shape.water, 'd', leatData(leats, start, count));
       const opacity = (1 - smoothstep(ruin)).toFixed(2);
       for (const e of shape.parts) set(e, 'opacity', opacity);
       const i = Math.round(at);
@@ -1840,10 +1848,10 @@ class SvgRenderer {
   // The parts of one mill, from its values in `River::mills` and the leats.
   millShape(m, leats, w) {
     const [x, y, ax, ay, working, , , width, , start, count] = m;
-    const leat = Array.from(leats.subarray(2 * start, 2 * (start + count)));
+    const leat = leats.subarray(2 * start, 2 * (start + count));
     const dash = { 'stroke-dasharray': `${dp1(0.4 * w)} ${dp1(0.3 * w)}` };
     const water = el('path', {
-      d: pointsData(chaikin(leat, false)), 'stroke-width': dp1(0.22 * w), stroke: `rgb(${working ? WATER : DRY_LEAT})`,
+      d: leatData(leats, start, count), 'stroke-width': dp1(0.22 * w), stroke: `rgb(${working ? WATER : DRY_LEAT})`,
       ...(working ? {} : dash),
     }, this.leatLayer);
     // A ruin's weir lies where it was built; a working one is laid each
@@ -1870,7 +1878,7 @@ class SvgRenderer {
       'stroke-linejoin': 'round', ...(working ? {} : dash),
     }, this.houseLayer);
     const pond = el('path', {}, this.pondLayer);
-    return { parts: [water, weir, foam, house, pond], weir, pond, foam };
+    return { parts: [water, weir, foam, house, pond], water, weir, pond, foam };
   }
 
   // A pebble pattern for the coarse ground, scaled to the channel width.
