@@ -40,7 +40,7 @@ Flat `f32` buffers as for the scrolls, each behind its version counter, and the 
 
 - `sync_jams`: per jam, x, y, side, strength (`Jam::strength(time, jam_lifetime)`), and the bank direction from the centreline point `at`.
 - `sync_splays`: per splay, apex, dir, length and age over `SPLAY_LIFE`; `splay_version`.
-- `sync_tributaries`: per tributary, mouth, radius, scale, and the junction point `centerline[at]`. Junctions move every 10 steps, so sync with the line.
+- `tributaries` and `tributary_courses`: per tributary, mouth, scale and the course the core keeps from the mouth to the water it meets, with a version that changes with the course.
 - `sync_mills`: per mill, weir, across, working flag, age of ruin over `MILL_RUIN`, then the leat polylines; `mill_version`.
 - `wall_version()` getter, and `supply()` for the panel or year label.
 - `sync_forest` and the deposit pointer already carry splay burial and fan deposits; add a `coarse_ptr` for the gravel and colluvium.
@@ -53,7 +53,7 @@ All vector, no raster, in the existing layers:
 
 - Log jams: a few short dark strokes across the bank at each jam, length and count from strength, in `#view` over the water.
 - Splays: a pale sand lobe (a fan path from apex along dir) in `#ground`, fading with age as the forest contours take it back.
-- Tributaries: a thin stream from the combe mouth across its fan to the junction, wiggled by seeded noise; the fan as a faint cone of stippled gravel from `coarse`, contoured like the levees.
+- Tributaries: a thin stream from the combe mouth along its course, winding in bends set by the distance from the mouth; the fan as a faint cone of stippled gravel from `coarse`, contoured like the levees.
 - Walls: redraw `drawWalls` when `wall_version` changes, at most every few seconds; colluvium lobes from `coarse` at the foot.
 - Mills: the weir as a short bar across the channel at the weir, the leat as a thin water line, the mill house as a small rectangle on the leat beside the weir, the pond as a slightly wider, darker water reach above; ruins drawn greyed for `MILL_RUIN`.
 - Clearance: no new drawing needed. Lakes fill and scroll bars vanish faster, which the existing layers show. Optionally tint the upland as it is cleared.

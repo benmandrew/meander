@@ -39,7 +39,7 @@ const LEVEE_REACH: f64 = 4.0;
 const BARE_GROWTH: f32 = 0.6;
 const HIGH_GROWTH: f32 = 1.6;
 
-fn lattice(seed: u64, x: i64, y: i64) -> f64 {
+pub(crate) fn lattice(seed: u64, x: i64, y: i64) -> f64 {
     let mut h = seed ^ (x as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (y as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
     h ^= h >> 33;
     h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
@@ -171,7 +171,7 @@ pub struct Erodibility {
     row_start: Vec<u32>,
     row_points: Vec<u32>,
     hull: Vec<(f64, f64, u32, f64)>,
-    seed: u64,
+    pub(crate) seed: u64,
     scale: f64,
 }
 
@@ -525,6 +525,30 @@ impl Erodibility {
                 let (h, k) = ((top * t) as f32, (coarse * t.sqrt()) as f32);
                 self.deposit[i] += frac * (h - self.deposit[i]).max(0.0);
                 self.coarse[i] += frac * (k - self.coarse[i]).max(0.0);
+            }
+        }
+    }
+
+    /// Build a tributary's delta out into a lake: raise the bed of the lake
+    /// cells within `radius` of `apex` by up to `amount`, in channel
+    /// depths, thinning to nothing at the rim, no higher than fresh bar
+    /// sand.
+    pub fn delta(&mut self, apex: P, radius: f64, amount: f64) {
+        if radius <= 0.0 || amount <= 0.0 {
+            return;
+        }
+        let c = self.cell;
+        let [x0, y0, x1, y1] = self.disc(apex, radius);
+        for y in y0..=y1 {
+            let dy = (y as f64 + 0.5) * c - apex[1];
+            for x in x0..=x1 {
+                let (dx, i) = ((x as f64 + 0.5) * c - apex[0], y * self.cols + x);
+                let d2 = dx * dx + dy * dy;
+                if d2 >= radius * radius || self.cut_at[i].is_infinite() || self.deposit[i] >= 0.0 {
+                    continue;
+                }
+                let t = 1.0 - d2.sqrt() / radius;
+                self.deposit[i] = (self.deposit[i] + (amount * t) as f32).min(0.0);
             }
         }
     }

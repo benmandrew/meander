@@ -369,22 +369,29 @@ impl River {
     }
 
     /// The tributaries, eight values each: the wall they come down (0 the
-    /// low-y wall, 1 the high-y wall), the fan's apex at the combe mouth, the
-    /// centreline point they join, the fan's radius, the share of the
-    /// largest tributary's flow they carry, and their combe's depth into the
-    /// wall, in world units.
+    /// low-y wall, 1 the high-y wall), the fan's apex at the combe mouth,
+    /// the start and number of their course's points in
+    /// `tributary_courses`, a count that changes with the course, the share
+    /// of the largest tributary's flow they carry, and their combe's depth
+    /// into the wall, in world units.
     pub fn tributaries(&self) -> Vec<f32> {
         let sim = &self.sim;
         let w = sim.params.width;
-        let mut out = Vec::with_capacity(8 * sim.tributaries.len());
+        let (mut out, mut start) = (Vec::with_capacity(8 * sim.tributaries.len()), 0);
         for t in &sim.tributaries {
-            let Some(j) = sim.centerline.get(t.at) else { continue };
+            let len = t.course.len();
             out.extend(
-                [t.side as f64, t.mouth[0], t.mouth[1], j[0], j[1], t.radius, t.scale, t.scale * FAN_MAX_DEPTH * w]
+                [t.side as f64, t.mouth[0], t.mouth[1], start as f64, len as f64, t.version as f64, t.scale, t.scale * FAN_MAX_DEPTH * w]
                     .map(|v| v as f32),
             );
+            start += len;
         }
         out
+    }
+    /// Every tributary's course from its mouth to the water it meets, back
+    /// to back, as flat x, y pairs; see `tributaries`.
+    pub fn tributary_courses(&self) -> Vec<f32> {
+        self.sim.tributaries.iter().flat_map(|t| t.course.iter().flat_map(|p| [p[0] as f32, p[1] as f32])).collect()
     }
 
     /// The mills, eleven values each: the weir's x and y, the unit vector

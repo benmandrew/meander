@@ -63,6 +63,16 @@ fn svg(sim: &Sim, x0: f64, w: f64) -> String {
             o.widths.iter().sum::<f64>() / o.widths.len() as f64 * sim.params.width * (1.0 - 0.7 * age)
         );
     }
+    // Tributary streams, red where they end in a lake.
+    for t in &sim.tributaries {
+        let colour = if t.lake { "#b0402a" } else { "#2f6f8f" };
+        let _ = write!(
+            s,
+            "<path d='{}' fill='none' stroke='{colour}' stroke-width='{:.2}' stroke-linejoin='round'/>",
+            path(&t.course),
+            0.3 * sim.params.width
+        );
+    }
     // The channel as round-capped segments at the local width.
     let pts = &sim.centerline;
     for (k, seg) in pts.windows(2).enumerate() {
@@ -163,7 +173,7 @@ fn main() {
         );
         let retreat = |side| (0..(sim.bounds[0] / sim.params.width) as usize).map(|x| sim.walls.retreat(side, x as f64)).fold(0.0f64, f64::max);
         println!(
-            "        supply {:4.2}  jams {:2}  splays {:2}  avulsions {:2}  captures {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {}",
+            "        supply {:4.2}  jams {:2}  splays {:2}  avulsions {:2}  captures {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {} ({} into lakes)",
             sim.supply(),
             sim.jams.len(),
             sim.splays.len(),
@@ -176,6 +186,7 @@ fn main() {
             retreat(1),
             sim.wall_version - 1,
             sim.tributaries.len(),
+            sim.tributaries.iter().filter(|t| t.lake).count(),
         );
         std::fs::write(format!("{out}/step{:06}.svg", sim.steps), svg(&sim, up, view_w)).unwrap();
         for o in sim.oxbows.iter().filter(|o| !o.is_lake()) {

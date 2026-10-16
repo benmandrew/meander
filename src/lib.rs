@@ -226,6 +226,15 @@ pub struct Params {
     /// the deepest combe, falling to nothing [`TRIBUTARY_REACH`] widths
     /// downstream: the tributary's bedload feeds the bars.
     pub tributary_boost: f64,
+    /// Depth of lake a tributary of the deepest combe fills per unit time
+    /// at the head of the delta it builds where it enters a lake, as a
+    /// fraction of a fresh lake's depth, at a sediment supply of 1. 0
+    /// disables.
+    pub delta_rate: f64,
+    /// Chance that a flood of magnitude 1 moves a tributary's course from
+    /// a point on its fan to a new route through low ground. A flood of
+    /// magnitude u moves it with u times that chance. 0 disables.
+    pub stream_avulsion: f64,
     /// Fall from the levee crest to the ground [`SPLAY_PROBE`] widths
     /// beyond it, in channel depths, at which a flood of magnitude 1
     /// breaches an outer bank and lays a crevasse splay. A flood of
@@ -331,6 +340,8 @@ impl Default for Params {
             fan_radius: FAN_RADIUS,
             fan_time: FAN_TIME,
             tributary_boost: TRIBUTARY_BOOST,
+            delta_rate: DELTA_RATE,
+            stream_avulsion: STREAM_AVULSION,
             crevasse_drop: CREVASSE_DROP,
             splay_length: SPLAY_LENGTH,
             avulsion_ratio: AVULSION_RATIO,
@@ -409,6 +420,8 @@ impl Params {
         "fan_radius",
         "fan_time",
         "tributary_boost",
+        "delta_rate",
+        "stream_avulsion",
         "crevasse_drop",
         "splay_length",
         "avulsion_ratio",
@@ -483,6 +496,8 @@ impl Params {
             "fan_radius" => &mut self.fan_radius,
             "fan_time" => &mut self.fan_time,
             "tributary_boost" => &mut self.tributary_boost,
+            "delta_rate" => &mut self.delta_rate,
+            "stream_avulsion" => &mut self.stream_avulsion,
             "crevasse_drop" => &mut self.crevasse_drop,
             "splay_length" => &mut self.splay_length,
             "avulsion_ratio" => &mut self.avulsion_ratio,
@@ -636,6 +651,8 @@ pub struct Sim {
     /// Draws for the floodplain's events (falling wood, new mills), from a
     /// stream of their own so they leave the river's draws unchanged.
     events: Rng,
+    /// Draws for the tributaries' courses, from a stream of their own.
+    streams: Rng,
     /// Magnitude of the last step's flood, whose levee breach is still to
     /// be found.
     breach: Option<f64>,
@@ -710,6 +727,8 @@ fn edge_taper(p: P, bounds: P, margin: f64, floor: (f64, f64)) -> f64 {
 
 /// Mixed into the seed for the stream of floodplain events.
 const EVENTS_SEED: u64 = 0x5eed_f10d;
+/// Mixed into the seed for the stream of tributary course draws.
+const STREAMS_SEED: u64 = 0x57e4_a3c1;
 
 /// Feature size of the erodibility noise, in channel widths at reset.
 const NOISE_SCALE: f64 = 25.0;
@@ -858,6 +877,11 @@ const SLUMP_COARSE: f64 = 0.8;
 const FAN_RADIUS: f64 = 7.0;
 const FAN_TIME: f64 = 400.0;
 const TRIBUTARY_BOOST: f64 = 0.3;
+/// The deepest combe's tributary fills the head of its delta in 100 units,
+/// 250 years, and a flood of mean magnitude moves its course on its fan
+/// about once in 8 floods, every 1,000 years.
+const DELTA_RATE: f64 = 0.01;
+const STREAM_AVULSION: f64 = 0.25;
 /// Combe depth, in channel widths, below which a combe carries no
 /// tributary, and the depth of the deepest combe; see [`walls`].
 pub const FAN_MIN_DEPTH: f64 = 3.0;
@@ -867,7 +891,8 @@ const FAN_HEIGHT: f64 = 0.6;
 /// Distance downstream of a confluence over which the tributary's bedload
 /// speeds migration, in channel widths.
 pub const TRIBUTARY_REACH: f64 = 30.0;
-/// Steps between searches for each tributary's confluence.
+/// Steps between the walks along each tributary's course for the water
+/// it meets first.
 const JUNCTION_EVERY: u64 = 10;
 /// Default crevasse splays and avulsion; see [`Params`].
 const CREVASSE_DROP: f64 = 0.15;
@@ -1027,6 +1052,7 @@ impl Sim {
             wall_version: 0,
             rng: Rng::new(seed),
             events: Rng::new(seed ^ EVENTS_SEED),
+            streams: Rng::new(seed ^ STREAMS_SEED),
             breach: None,
             recent_cuts: Vec::new(),
             curv: Vec::new(),
@@ -1058,6 +1084,7 @@ impl Sim {
     pub fn reset(&mut self, seed: u64, noise: f64) {
         self.rng = Rng::new(seed);
         self.events = Rng::new(seed ^ EVENTS_SEED);
+        self.streams = Rng::new(seed ^ STREAMS_SEED);
         self.breach = None;
         let [w, h] = self.bounds;
         let line = vec![[0.0, h / 2.0], [w, h / 2.0]];
@@ -1196,6 +1223,7 @@ impl Sim {
             let magnitude = self.rng.uniform();
             self.flush_jams(magnitude);
             self.flood_mills(magnitude);
+            self.shift_streams(magnitude);
             for _ in 0..MAX_FLOOD_CUTS {
                 if !self.flood_cutoff(magnitude) {
                     break;
@@ -2638,6 +2666,7 @@ mod tests {
         pts.extend((0..30).rev().map(|k| [(100.0 + 0.5 * k as f64) * w, mid + 2.0 * r]));
         sim.centerline = pts;
         sim.widths = vec![1.0; sim.centerline.len()];
+        sim.line_version += 1;
         assert!(!sim.cutoff(), "banks of the reference width are 0.3 widths apart");
         sim.widths.fill(1.5);
         sim.line_version += 1;

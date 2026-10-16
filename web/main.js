@@ -173,9 +173,12 @@ const COARSE_REFRESH = 20;
 // `WALL_REFRESH` of simulated time: 20 units, 50 years.
 const WALL_REFRESH = 20;
 // Tributary streams: their width at the largest tributary, in channel
-// widths, and how far their course wanders across the fan.
+// widths, and the size of the bends they wind in along their courses, in
+// channel widths: how far they swing either side, and their length, which
+// drifts by up to half either way along the stream.
 const STREAM_WIDTH = 0.3;
-const STREAM_WANDER = 0.6;
+const STREAM_SWING = 0.18;
+const STREAM_BEND = 3;
 // Crevasse splays: fresh sand in a lobe that spreads 35° either side of
 // the breach, as in the core, fading as vegetation takes it back over the
 // 750 years the core keeps it. Distributary channels run out across it.
@@ -1614,7 +1617,8 @@ class SvgRenderer {
     this.drawFloodplain(river, memory, local, this.fresh);
     this.fresh = false;
     // The floodplain features come as copies, which can grow memory too.
-    const [jams, tribs, mills, leats] = [river.jams(), river.tributaries(), river.mills(), river.mill_leats()];
+    const [jams, mills, leats] = [river.jams(), river.mills(), river.mill_leats()];
+    const [tribs, courses] = [river.tributaries(), river.tributary_courses()];
 
     river.sync();
     // Views must be rebuilt after every step: memory growth detaches them.
@@ -1721,36 +1725,48 @@ class SvgRenderer {
       resize(paths, runs.length, g);
       runs.forEach((d, k) => set(paths[k], 'd', d));
     });
-    this.drawStreams(tribs, w);
+    this.drawStreams(tribs, courses, w);
     this.drawMills(river, mills, leats, line, widths, w);
     this.drawJams(jams, w);
   }
 
-  // Each tributary runs down its combe to the apex of its fan, then wanders
-  // across the fan to the channel. Its course is seeded by its combe, so it
-  // moves only when the confluence does, every 10 steps in the core.
-  drawStreams(tribs, w) {
+  // Each tributary runs down its combe to the apex of its fan, then along
+  // the course the core keeps for it across the floodplain to the water it
+  // meets. The course changes only at its lower end, as water meets or
+  // leaves it, and when a flood moves it on its fan, so a stream is redrawn
+  // only then.
+  drawStreams(tribs, courses, w) {
     const n = tribs.length / 8;
     resize(this.streams, n, this.streamLayer);
     for (let k = 0; k < n; k++) {
-      const [side, mx, my, jx, jy, , scale, depth] = tribs.subarray(8 * k, 8 * k + 8);
+      const [side, mx, my, start, len, version, scale, depth] = tribs.subarray(8 * k, 8 * k + 8);
       const path = this.streams[k];
-      const key = `${mx} ${my} ${jx} ${jy} ${w}`;
+      const key = `${version} ${w}`;
       if (path.key === key) continue;
       path.key = key;
+      // From the head of the combe, back in the wall, down the course,
+      // winding in bends set by the distance from the mouth, so the bends
+      // above stay put as the lower end changes. They grow over the first
+      // bend from the mouth.
+      const pts = [mx, my + (side ? 1 : -1) * 0.9 * depth];
       const rand = random(Math.round(10 * mx) ^ 0x7c1b);
-      const phase = 2 * Math.PI * rand(), waves = 1 + rand();
-      // From the head of the combe, back in the wall, to the fan's apex.
-      const pts = [mx, my + (side ? 1 : -1) * 0.9 * depth, mx, my];
-      const [ex, ey] = [jx - mx, jy - my];
-      const length = Math.hypot(ex, ey), steps = Math.max(2, Math.ceil(length / (0.5 * w)));
-      const [nx, ny] = length > 0 ? [-ey / length, ex / length] : [0, 0];
-      for (let s = 1; s <= steps; s++) {
-        const u = s / steps;
-        const off = STREAM_WANDER * w * Math.sin(Math.PI * u) * Math.sin(phase + 2 * Math.PI * waves * u);
-        pts.push(mx + u * ex + off * nx, my + u * ey + off * ny);
+      const [phase, drift] = [2 * Math.PI * rand(), 2 * Math.PI * rand()];
+      let [along, angle] = [0, phase];
+      for (let i = start; i < start + len; i++) {
+        const [x, y] = [courses[2 * i], courses[2 * i + 1]];
+        const [a, b] = [Math.max(start, i - 1), Math.min(start + len - 1, i + 1)];
+        const [tx, ty] = [courses[2 * b] - courses[2 * a], courses[2 * b + 1] - courses[2 * a + 1]];
+        const t = Math.hypot(tx, ty) || 1;
+        if (i > start) {
+          const step = Math.hypot(x - courses[2 * i - 2], y - courses[2 * i - 1]);
+          along += step;
+          const bend = STREAM_BEND * w * (1 + 0.5 * Math.sin(drift + along / (5 * STREAM_BEND * w)));
+          angle += 2 * Math.PI * step / bend;
+        }
+        const off = STREAM_SWING * w * Math.min(1, along / (STREAM_BEND * w)) * Math.sin(angle);
+        pts.push(x - off * ty / t, y + off * tx / t);
       }
-      set(path, 'd', pointsData(chaikin(pts, false)));
+      set(path, 'd', pointsData(chaikin(chaikin(pts, false), false)));
       set(path, 'stroke-width', dp1(STREAM_WIDTH * w * (0.5 + 0.5 * scale)));
     }
   }
