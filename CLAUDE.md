@@ -10,6 +10,7 @@ Read `docs/architecture.md` before changing a process or a renderer layer: it de
 
 The Nix flake supplies every tool (`direnv allow` once, or `nix develop`). The shell's `wasm-bindgen-cli` version is read from `Cargo.lock`, so after bumping the `wasm-bindgen` crate, nixpkgs must carry the matching `wasm-bindgen-cli_0_2_N`.
 
+- The pre-commit hook in `.githooks/` runs `cargo fmt --check` and `cargo clippy -- -D warnings`. The dev shell sets `core.hooksPath` to enable it.
 - `nix build .#web-dist`: build the deployable site into `result/`, without `wasm-pack`.
 - `make build`: build the WASM package into `web/pkg`.
 - `make serve`: build, then serve `web/` at http://localhost:8000. `?warmup=T` overrides the warm-up in simulated time.

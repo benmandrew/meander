@@ -114,6 +114,9 @@
             pkgs.gnumake
             pkgs.python3
           ];
+          shellHook = ''
+            git config core.hooksPath .githooks
+          '';
         };
       });
     };
