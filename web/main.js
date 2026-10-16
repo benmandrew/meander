@@ -1125,11 +1125,8 @@ class SvgRenderer {
     for (const [layer, show] of layers) {
       if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
     }
-    if (local.showLevees) this.drawLevees(river, memory);
-    this.drawPlugs(river, memory);
-    this.drawForest(river, memory, this.fresh);
+    this.drawFloodplain(river, memory, local, this.fresh);
     this.fresh = false;
-    if (local.showScrolls) this.drawScrolls(river, memory, w);
 
     river.sync();
     // Views must be rebuilt after every step: memory growth detaches them.
@@ -1238,12 +1235,30 @@ class SvgRenderer {
     });
   }
 
+  // Refresh at most one floodplain layer a call. Their refreshes fall due
+  // together, on the `LEVEE_REFRESH` clock and after cutoffs, and stacked
+  // in one frame they overran it; a layer that is due now waits a frame.
+  // `all` refreshes every layer that is due, and draws the forest whole.
+  drawFloodplain(river, memory, local, all = false) {
+    const w = river.get_param('width');
+    const layers = [
+      () => local.showLevees && this.drawLevees(river, memory),
+      () => this.drawPlugs(river, memory),
+      () => this.drawForest(river, memory, all),
+      () => local.showScrolls && this.drawScrolls(river, memory, w),
+    ];
+    for (const refresh of layers) {
+      if (refresh() && !all) return;
+    }
+  }
+
   // Contour the overbank deposits over the window after each flood, and
   // every `LEVEE_REFRESH` of simulated time as the channel sweeps them away.
+  // Returns whether it did.
   drawLevees(river, memory) {
     const t = river.time(), floods = river.floods();
     const last = this.leveeAt;
-    if (last && last.floods === floods && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    if (last && last.floods === floods && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
     this.leveeAt = { floods, t };
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const deposit = new Float32Array(memory.buffer, river.deposit_ptr(), cols * rows);
@@ -1254,16 +1269,17 @@ class SvgRenderer {
     LEVEE_LEVELS.forEach((f, k) => {
       this.levees[k].setAttribute('d', top > 0 ? contourData(deposit, cols, rows, cell, c0, c1, f * top) : '');
     });
+    return true;
   }
 
   // Draw the clay plug marsh after each cutoff, and every `LEVEE_REFRESH`
   // of simulated time as the channel sweeps it away. The plug grid is
   // blurred over 3 × 3 cells first, so its outline follows the lake's
-  // curve instead of the cell edges.
+  // curve instead of the cell edges. Returns whether it did.
   drawPlugs(river, memory) {
     const t = river.time(), cutoffs = river.cutoffs();
     const last = this.plugAt;
-    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    if (last && last.cutoffs === cutoffs && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
     this.plugAt = { cutoffs, t };
     river.sync_plugs();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
@@ -1271,6 +1287,7 @@ class SvgRenderer {
     const [c0, c1] = this.windowColumns(cols, cell);
     const blur = this.blur(plugs, cols, rows, c0, c1);
     set(this.plugMarsh, 'd', contourData(blur, cols, rows, cell, c0, c1, 0.5));
+    return true;
   }
 
   // Redraw the shrub and forest every `LEVEE_REFRESH` of simulated time, and
@@ -1319,8 +1336,8 @@ class SvgRenderer {
   }
 
   // Carry on with work spread over frames, on a frame that draws nothing.
-  idle(river, memory) {
-    this.drawForest(river, memory);
+  idle(river, memory, { local }) {
+    this.drawFloodplain(river, memory, local);
   }
 
   // Scatter crowns over the window on a jittered grid, each with its own
@@ -1408,10 +1425,11 @@ class SvgRenderer {
   // Draw the scroll bars in age bands when they change, and every
   // `LEVEE_REFRESH` of simulated time as they age. A band's ridges darken
   // as vegetation takes them, and fade over the last quarter of their life.
+  // Returns whether it did.
   drawScrolls(river, memory, w) {
     const t = river.time(), version = river.scroll_version();
     const last = this.scrollAt;
-    if (last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return;
+    if (last && last.version === version && t - last.t < LEVEE_REFRESH && t >= last.t) return false;
     this.scrollAt = { version, t };
     river.sync_scrolls();
     // Views must be built after syncing: it can grow memory.
@@ -1441,6 +1459,7 @@ class SvgRenderer {
     for (const path of this.ridges.values()) path.remove();
     this.ridges = ridges;
     set(this.scrollLayer, 'stroke-width', (0.15 * w).toFixed(2));
+    return true;
   }
 
   // Record the centreline without drawing, during warm-up.
