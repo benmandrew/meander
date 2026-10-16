@@ -267,6 +267,29 @@ impl River {
         self.sim.erodibility.cell
     }
 
+    /// y of the foot of valley wall `side` (0 the low-y wall, 1 the high-y
+    /// wall) at `x`, without the pinches, which are not drawn. The wall
+    /// lies at the domain edge when `valley_width` is 0.
+    pub fn wall_foot(&self, side: u32, x: f64) -> f64 {
+        let (low, high) = self.sim.floor(x, false);
+        if side == 0 { low } else { high }
+    }
+
+    /// The combes cut into the valley walls, four values each: the wall's
+    /// side, then the combe's centre along x, its depth at the foot and its
+    /// half-width there, in world units. See `meander_core::walls::combe_cut`
+    /// for their profile.
+    pub fn wall_combes(&self) -> Vec<f64> {
+        let w = self.sim.params.width;
+        let mut out = Vec::new();
+        for (side, combes) in self.sim.walls.combes.iter().enumerate() {
+            for c in combes {
+                out.extend([side as f64, c.x * w, c.depth * w, c.span * w]);
+            }
+        }
+        out
+    }
+
     /// Copy the cells cut off as oxbows into a flat buffer, the same shape
     /// as `deposit_ptr`: 1 where the ground is lake or clay plug, 0
     /// elsewhere. Rebuild every view after calling this, since it can grow
