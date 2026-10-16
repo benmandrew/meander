@@ -1,6 +1,17 @@
 #!/bin/sh
-# Reject a commit whose Rust is unformatted or has clippy warnings.
+# Reject a commit whose staged Rust is unformatted or has clippy warnings.
+# The checks run on a copy of the index, so unstaged edits do not count.
 set -e
 
+git diff --cached --quiet -- '*.rs' '*Cargo.toml' Cargo.lock && exit 0
+
+root=$(git rev-parse --show-toplevel)
+# A fixed path, so cargo's artefacts for it carry over between commits.
+tree="$(git rev-parse --absolute-git-dir)/pre-commit-tree"
+rm -rf "$tree"
+git checkout-index --all --prefix="$tree/"
+
+cd "$tree"
+export CARGO_TARGET_DIR="$root/target"
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --quiet -- -D warnings
