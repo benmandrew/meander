@@ -11,12 +11,14 @@ pub mod ips;
 pub mod land;
 pub mod rng;
 pub mod walls;
+pub mod wood;
 
 use geom::{P, curvature, dist, resample, right_normal};
 use field::{Erodibility, Flood, Ground};
 use land::Land;
 use rng::Rng;
 use walls::Walls;
+pub use wood::Jam;
 
 /// Point spacing as a fraction of the channel width.
 pub const SPACING: f64 = 0.5;
@@ -191,6 +193,16 @@ pub struct Params {
     /// over `vegetation_time` along the chord, up to 2, plus its overbank
     /// deposit over `levee_height`. 0 lets a chute cross any bar.
     pub chute_vegetation: f64,
+    /// Jams of large wood recruited per channel width of mature forest
+    /// bank eroded. Farmland gives [`FARM_WOOD`] of that. 0 disables.
+    pub wood_rate: f64,
+    /// Time a jam of full size lasts before it rots or breaks up; smaller
+    /// jams last less.
+    pub jam_lifetime: f64,
+    /// Push a jam of full size gives the flow away from its bank, added to
+    /// the dimensionless migration rate at the jam and falling to 0
+    /// [`JAM_REACH`] widths along the channel either side.
+    pub jam_push: f64,
     /// Derive `omega`, `gamma` and `alpha` from the hydraulic inputs below
     /// with the Ikeda–Parker–Sawai model (see [`ips`]).
     pub physics: bool,
@@ -264,6 +276,9 @@ impl Default for Params {
             clearance_time: CLEARANCE_TIME,
             clearance_supply: CLEARANCE_SUPPLY,
             chute_vegetation: CHUTE_VEGETATION,
+            wood_rate: WOOD_RATE,
+            jam_lifetime: JAM_LIFETIME,
+            jam_push: JAM_PUSH,
             physics: true,
             friction,
             aspect,
@@ -326,6 +341,9 @@ impl Params {
         "clearance_time",
         "clearance_supply",
         "chute_vegetation",
+        "wood_rate",
+        "jam_lifetime",
+        "jam_push",
         "physics",
         "friction",
         "aspect",
@@ -384,6 +402,9 @@ impl Params {
             "clearance_time" => &mut self.clearance_time,
             "clearance_supply" => &mut self.clearance_supply,
             "chute_vegetation" => &mut self.chute_vegetation,
+            "wood_rate" => &mut self.wood_rate,
+            "jam_lifetime" => &mut self.jam_lifetime,
+            "jam_push" => &mut self.jam_push,
             "friction" => &mut self.friction,
             "aspect" => &mut self.aspect,
             "froude" => &mut self.froude,
@@ -508,7 +529,12 @@ pub struct Sim {
     pub flood_cutoffs: u64,
     /// Oxbow lakes the channel has taken up (included in `cutoffs`).
     pub captures: u64,
+    /// Jams of large wood against the banks.
+    pub jams: Vec<Jam>,
     rng: Rng,
+    /// Draws for the floodplain's events (falling wood), from a
+    /// stream of their own so they leave the river's draws unchanged.
+    events: Rng,
     /// Recent cut points and the step count until which they suppress new
     /// cutoffs nearby.
     recent_cuts: Vec<(P, u64)>,
@@ -523,6 +549,11 @@ pub struct Sim {
     grid_fill: Vec<u32>,
     cell_of: Vec<u32>,
     contacts: Vec<(Contact, Contact)>,
+    /// Bank displacement of each point in the last migration, in world
+    /// units along its right normal.
+    shift: Vec<f64>,
+    /// Cumulative weights for picking a point.
+    weights: Vec<f64>,
     /// Valley floor's y range at each erodibility grid column, refreshed
     /// at the start of each survey of the land.
     valley: Vec<(f64, f64)>,
@@ -563,6 +594,9 @@ fn edge_taper(p: P, bounds: P, margin: f64, floor: (f64, f64)) -> f64 {
     let y1 = floor.1.min(bounds[1]);
     ramp(p[0]) * ramp(bounds[0] - p[0]) * ramp(p[1] - y0) * ramp(y1 - p[1])
 }
+
+/// Mixed into the seed for the stream of floodplain events.
+const EVENTS_SEED: u64 = 0x5eed_f10d;
 
 /// Feature size of the erodibility noise, in channel widths at reset.
 const NOISE_SCALE: f64 = 25.0;
@@ -671,6 +705,22 @@ const CLEARANCE_SUPPLY: f64 = 3.0;
 const BURY: f64 = 0.95;
 /// Default chute resistance; see [`Params`].
 const CHUTE_VEGETATION: f64 = 1.0;
+/// Default large wood; see [`Params`]. A jam of full size lasts 12 units,
+/// 30 years, about the life of a jam in a temperate lowland river.
+const WOOD_RATE: f64 = 0.3;
+const JAM_LIFETIME: f64 = 12.0;
+const JAM_PUSH: f64 = 0.15;
+/// Wood a farmed bank gives, as a fraction of a forested one's: the
+/// alders and willows left along the bank and the hedgerow trees.
+pub const FARM_WOOD: f64 = 0.3;
+/// Distance along the channel either side of a jam over which it pushes
+/// the flow, in channel widths.
+pub const JAM_REACH: f64 = 3.0;
+/// Distance within which a new tree joins a jam already there, on either
+/// bank, in channel widths.
+const JAM_MERGE: f64 = 4.0;
+/// Most jams at once.
+const MAX_JAMS: usize = 40;
 
 /// Longest chute a flood can cut, in channel widths.
 pub const CHUTE_CHORD: f64 = 5.0;
@@ -756,7 +806,9 @@ impl Sim {
             floods: 0,
             flood_cutoffs: 0,
             captures: 0,
+            jams: Vec::new(),
             rng: Rng::new(seed),
+            events: Rng::new(seed ^ EVENTS_SEED),
             recent_cuts: Vec::new(),
             curv: Vec::new(),
             rate: Vec::new(),
@@ -768,6 +820,8 @@ impl Sim {
             grid_fill: Vec::new(),
             cell_of: Vec::new(),
             contacts: Vec::new(),
+            shift: Vec::new(),
+            weights: Vec::new(),
             valley: Vec::new(),
             line_version: 0,
             grid_for: None,
@@ -780,6 +834,7 @@ impl Sim {
     /// amplitude `noise` channel widths.
     pub fn reset(&mut self, seed: u64, noise: f64) {
         self.rng = Rng::new(seed);
+        self.events = Rng::new(seed ^ EVENTS_SEED);
         let [w, h] = self.bounds;
         let line = vec![[0.0, h / 2.0], [w, h / 2.0]];
         let mut pts = resample(&line, self.ds());
@@ -816,6 +871,7 @@ impl Sim {
         self.floods = 0;
         self.flood_cutoffs = 0;
         self.captures = 0;
+        self.jams.clear();
         self.land = Land::new(&self.erodibility, seed);
         self.read_valley();
         let s = self.land_settings();
@@ -882,25 +938,30 @@ impl Sim {
     pub fn step(&mut self) {
         let ds = self.ds();
         self.resample(ds);
+        self.track();
         self.migrate();
         self.smooth();
         self.clamp_to_domain();
         self.line_version += 1;
         if self.cutoff() {
             self.resample(ds);
+            self.track();
         }
         if self.capture() {
             self.resample(ds);
+            self.track();
         }
         // Floods arrive as a Poisson process, approximated per step.
         if self.params.flood_rate > 0.0 && self.rng.uniform() < self.params.flood_rate * self.params.dt {
             self.floods += 1;
             let magnitude = self.rng.uniform();
+            self.flush_jams(magnitude);
             for _ in 0..MAX_FLOOD_CUTS {
                 if !self.flood_cutoff(magnitude) {
                     break;
                 }
                 self.resample(ds);
+                self.track();
             }
             self.widen(magnitude);
             // Clearance raises the silt the flood carries. How far it
@@ -933,6 +994,7 @@ impl Sim {
         }
         let s = self.land_settings();
         self.land.tick(&self.erodibility, &self.centerline, &self.widths, &self.valley, &s, phase);
+        self.recruit_wood();
         self.rework_oxbows();
         // Clearance fills lakes faster with the fine sediment it washes in.
         let supply = self.supply();
@@ -977,6 +1039,29 @@ impl Sim {
             0.0
         };
         1.0 + (p.clearance_supply - 1.0) * smoothstep(t)
+    }
+
+    /// Bring the jams up to date with the centreline's points.
+    fn track(&mut self) {
+        self.track_jams();
+    }
+
+    /// Index of the centreline point nearest `p` within `r`, at most the
+    /// cell size of `g`.
+    fn nearest_point(&self, p: P, r: f64, g: Cells) -> Option<usize> {
+        let (cx, cy) = g.cell(p);
+        let mut best = (None, r * r);
+        for y in cy - 1..=cy + 1 {
+            for part in self.row(g, cx, y) {
+                for &j in part {
+                    let d = geom::dist2(p, self.centerline[j as usize]);
+                    if d < best.1 {
+                        best = (Some(j as usize), d);
+                    }
+                }
+            }
+        }
+        best.0
     }
 
     /// Resistance a point bar puts up against a chute along `a`–`b`: the
@@ -1106,6 +1191,7 @@ impl Sim {
                 *r *= if e == 0.5 { x.sqrt() } else { x.powf(e) };
             }
         }
+        self.push_jams();
         &self.rate
     }
 
@@ -1144,6 +1230,8 @@ impl Sim {
         self.tmp.extend_from_slice(pts);
         self.wtmp.clear();
         self.wtmp.resize(n, 1.0);
+        self.shift.clear();
+        self.shift.resize(n, 0.0);
         for i in 1..n.saturating_sub(1) {
             let nrm = right_normal(pts, i);
             // Positive rate moves toward the outside of a left bend, i.e. to
@@ -1156,6 +1244,7 @@ impl Sim {
             let d = (e * (scale * self.rate[i] + self.noise[i])).clamp(-limit, limit);
             self.tmp[i][0] += d * nrm[0];
             self.tmp[i][1] += d * nrm[1];
+            self.shift[i] = d;
             // The outer bank retreats as the centreline does, without the
             // jitter, and the inner bank follows at the bar push. The
             // centreline keeps the Howard–Knutson rate, so the two agree on
@@ -1852,8 +1941,15 @@ mod tests {
 
     /// Straight channel along x with a sine perturbation, cutoffs off.
     fn sine_sim(amp_w: f64, wavelength_w: f64) -> Sim {
-        let params =
-            Params { cutoff_dist: 0.0, flood_rate: 0.0, jitter: 0.0, heterogeneity: 0.0, ..Params::default() };
+        // No wood, whose jams would bend the sine.
+        let params = Params {
+            cutoff_dist: 0.0,
+            flood_rate: 0.0,
+            jitter: 0.0,
+            heterogeneity: 0.0,
+            wood_rate: 0.0,
+            ..Params::default()
+        };
         let w = params.width;
         let mut sim = Sim::new(params, [400.0 * w, 100.0 * w], 1, 0.0);
         let k = std::f64::consts::TAU / (wavelength_w * w);
@@ -1981,11 +2077,12 @@ mod tests {
 
     #[test]
     fn floods_cut_off_earlier_and_never_self_intersect() {
-        // Loose point bars and overbank deposits change the planform, and
-        // deposits come only with floods, so both are off here to isolate
-        // the cutoffs. Sinuosity is reported but not compared: with bank
-        // reads by the rate's sign, floods no longer lower it on every seed.
-        let isolated = Params { bar_factor: 1.0, overbank: 0.0, ..Params::default() };
+        // Loose point bars, overbank deposits and jams of wood change the
+        // planform, and deposits come only with floods, so all three are off
+        // here to isolate the cutoffs. Sinuosity is reported but not
+        // compared: with bank reads by the rate's sign, floods no longer
+        // lower it on every seed.
+        let isolated = Params { bar_factor: 1.0, overbank: 0.0, wood_rate: 0.0, ..Params::default() };
         let calm = Params { flood_rate: 0.0, ..isolated.clone() };
         let stormy = Params { flood_rate: 0.1, chute_ratio: 3.0, ..isolated };
         // The four runs are independent, so each gets its own thread.
@@ -2334,6 +2431,24 @@ mod tests {
         assert!(!wooded.flood_cutoff(0.99), "the forest holds the bar");
         wooded.params.chute_vegetation = 0.0;
         assert!(wooded.flood_cutoff(0.99), "unless vegetation is ignored");
+    }
+
+    #[test]
+    fn a_jam_pushes_the_channel_off_its_bank_until_a_flood_flushes_it() {
+        let mut sim = sine_sim(0.0, 40.0);
+        let (w, i) = (sim.params.width, sim.centerline.len() / 2);
+        let (q, nrm) = (sim.centerline[i], right_normal(&sim.centerline, i));
+        let pos = [q[0] + 0.5 * w * nrm[0], q[1] + 0.5 * w * nrm[1]];
+        sim.jams.push(Jam { pos, side: 1.0, size: 1.0, until: 1e9, at: i });
+        sim.step_n(100);
+        assert_eq!(sim.jams.len(), 1, "the jam keeps to the bank");
+        let p = sim.centerline.iter().min_by(|a, b| (a[0] - q[0]).abs().total_cmp(&(b[0] - q[0]).abs())).unwrap();
+        let moved = (p[0] - q[0]) * nrm[0] + (p[1] - q[1]) * nrm[1];
+        assert!(moved < -0.05 * w, "the channel moves off the jam's bank: {moved}");
+        let far = sim.centerline.iter().find(|c| (c[0] - 50.0 * w).abs() < 0.3 * w).unwrap();
+        assert!((far[1] - q[1]).abs() < 1e-6, "and stays put away from it");
+        sim.flush_jams(1.0);
+        assert!(sim.jams.is_empty(), "the largest flood flushes every jam");
     }
 
     /// A channel along x with a bend 10 widths high between x = 110 and

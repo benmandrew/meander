@@ -225,6 +225,11 @@ impl Erodibility {
         self.growth[self.index(p)] as f64
     }
 
+    /// Index of the cell under `p`, clamped to the grid.
+    pub fn cell_index(&self, p: P) -> usize {
+        self.index(p)
+    }
+
     /// Overbank deposit at `p`, in channel depths.
     pub fn deposit_at(&self, p: P) -> f64 {
         self.deposit[self.index(p)] as f64
