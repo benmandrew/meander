@@ -62,8 +62,9 @@
               fileset = pkgs.lib.fileset.unions [
                 ./Cargo.toml
                 ./Cargo.lock
-                ./meander-core
-                ./meander-wasm
+                ./src
+                ./examples
+                ./wasm
                 ./web
               ];
             };

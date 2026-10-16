@@ -1,9 +1,0 @@
-[package]
-name = "meander-core"
-edition.workspace = true
-version.workspace = true
-description = "Simulation of a meandering river channel and its floodplain"
-repository.workspace = true
-license.workspace = true
-
-[dependencies]

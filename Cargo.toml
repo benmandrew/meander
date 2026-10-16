@@ -1,5 +1,16 @@
+[package]
+name = "meander-core"
+edition.workspace = true
+version.workspace = true
+description = "Simulation of a meandering river channel and its floodplain"
+repository.workspace = true
+license.workspace = true
+include = ["src/**", "examples/**", "LICENCE"]
+
+[dependencies]
+
 [workspace]
-members = ["meander-core", "meander-wasm"]
+members = ["wasm"]
 resolver = "3"
 
 [workspace.package]

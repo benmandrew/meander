@@ -32,5 +32,5 @@ With the `physics` flag on, every `Params::set` call re-derives `omega`, `gamma`
 ## Constraints
 
 - The hot path avoids `hypot`, `ln` and `cos`. They are software routines in WASM and made a step 3.6× slower than native. `Sim` keeps scratch buffers to avoid per-step allocation.
-- The validation tests in `meander-core/src/lib.rs` pin the model's behaviour. A sine perturbation must grow and drift downstream (this checks the sign convention). A local-only kernel must not drift. Noise runs must cut off, never self-intersect, and keep sinuosity bounded. Run `make test` after any change to the dynamics.
+- The validation tests in `src/lib.rs` pin the model's behaviour. A sine perturbation must grow and drift downstream (this checks the sign convention). A local-only kernel must not drift. Noise runs must cut off, never self-intersect, and keep sinuosity bounded. Run `make test` after any change to the dynamics.
 - Commits use conventional prefixes, e.g. `feat: stochastic flood-driven cutoffs`.
