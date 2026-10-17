@@ -7,8 +7,8 @@
 
 use crate::geom::{self, P, right_normal};
 use crate::{
-    LEAT_DOWN, LEAT_OFFSET, LEAT_UP, MILL_RUIN, MILL_SNAP, MILL_STRAIGHT, POND_SILT, POND_WIDEN,
-    Sim, WEIR_HOLD, land, smoothstep,
+    LEAT_DOWN, LEAT_OFFSET, LEAT_UP, MILL_RUIN, MILL_SNAP, MILL_STRAIGHT, OUTFLANK_COS, POND_SILT,
+    POND_WIDEN, Sim, WEIR_HOLD, land, smoothstep,
 };
 
 /// Distance over which a leat leaves the bank at either end, in channel
@@ -80,8 +80,10 @@ impl Sim {
 
     /// Whether the channel bends round the weir at point `i` so sharply
     /// that it has outflanked it: anywhere within twice [`WEIR_HOLD`]
-    /// widths, it turns through more than 60° over a channel width. The
-    /// river would otherwise fold against the reach the weir holds.
+    /// widths, it turns through more than the angle whose cosine is
+    /// [`OUTFLANK_COS`] over a channel
+    /// width. The river would otherwise fold against the reach the weir
+    /// holds, and draw a corner at it.
     fn outflanked(&self, i: usize) -> bool {
         let pts = &self.centerline;
         let n = pts.len();
@@ -93,7 +95,7 @@ impl Sim {
         };
         (i.saturating_sub(r)..(i + r).min(n.saturating_sub(3))).any(|k| {
             let (a, b) = (unit(k), unit(k + 2));
-            a[0] * b[0] + a[1] * b[1] < 0.5
+            a[0] * b[0] + a[1] * b[1] < OUTFLANK_COS
         })
     }
 

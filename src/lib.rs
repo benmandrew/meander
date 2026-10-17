@@ -871,7 +871,10 @@ const JUNCTION_EVERY: u64 = 10;
 /// with a channel 40 m wide, 50 widths is 2 km.
 const MILL_RATE: f64 = 0.05;
 const MILL_GAP: f64 = 50.0;
-const WEIR_BACKWATER: f64 = 0.5;
+/// A weir's pond lowers the slope of the reach above it; at 0.5 the mills
+/// held reaches straight enough to lower the river's mean sinuosity by
+/// 0.12, and at 0.25 by 0.06.
+const WEIR_BACKWATER: f64 = 0.25;
 const POND_LENGTH: f64 = 15.0;
 /// Distance along the channel either side of a weir over which its
 /// masonry holds the banks, in channel widths.
@@ -884,6 +887,9 @@ const POND_SILT: f64 = 1.0;
 /// Distance within which the channel must pass a weir to keep working it,
 /// in channel widths.
 const MILL_SNAP: f64 = 0.75;
+/// Cosine of the turn over a channel width near a weir past which the
+/// channel has outflanked it: 45°.
+const OUTFLANK_COS: f64 = std::f64::consts::FRAC_1_SQRT_2;
 /// Least ratio of chord to arc along the reach a mill's leat runs beside.
 const MILL_STRAIGHT: f64 = 0.95;
 /// Leat: it leaves the channel `LEAT_UP` widths above the weir and returns

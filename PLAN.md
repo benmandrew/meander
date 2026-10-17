@@ -1,3 +1,14 @@
+# Plan: floodplain features
+
+Six changes, in this order, one commit each. Measure each against seeds 1–12 at 24,000 steps (`UP=60 DOWN=20`), with `make test` after any change to the dynamics.
+
+- [x] Rebalance the mills. Over seeds 1–12, mills lowered mean sinuosity after step 6,000 from 1.555 to 1.439, the largest effect of any process. Half came from the backwater: with `weir_backwater` at 0 it was 1.480. `weir_backwater` is now 0.25, and a weir is outflanked at a turn of 45° (`OUTFLANK_COS`), not 60°, which also removes the corner the weir drew. Sinuosity with mills is now 1.498, with 1.9 mills working on average against 2.3. Step time is unchanged.
+- [ ] An old boundary on a past course. The centreline at `BOUNDARY_TIME` is kept as a parish boundary, drawn as a dash-dot line, and holdings do not cross it.
+- [ ] Tracks between farmsteads, with temporary fords where they cross the channel. No bridges: the channel moves too far.
+- [ ] Chute cutoffs, as a steady process across point bars.
+- [ ] Wet ground: low ground away from the channel drawn as wet meadow and reed.
+- [ ] Valley sides that read as slopes.
+
 # Plan: drawing performance
 
 Make the page run smoothly on older phones. The simulation is cheap: a native step takes a median of 0.14 ms (99.9% 0.66 ms, max 1.37 ms; snapshot, `UP=60 DOWN=20`, 24,000 steps, seed 1). The cost is in drawing.
@@ -201,5 +212,4 @@ Results on seed 1 over 24,000 steps: 178–194 buildings standing on 44–47 hol
 
 ## Left over
 
-- The weir pins one point, and the channel can turn up to 60° about it before the mill counts as outflanked, which draws as a visible corner. A lower limit would ruin mills sooner.
 - Mill founding is constant in time. A medieval peak and a later decline could follow the clearance clock.
