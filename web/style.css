@@ -139,7 +139,7 @@ button:hover { border-color: var(--accent); }
   border: 1px solid var(--border);
 }
 
-.buttons, .seed {
+.buttons, .seed, .tick {
   display: flex;
   gap: 6px;
   margin-top: 10px;
@@ -148,7 +148,7 @@ button:hover { border-color: var(--accent); }
 
 .buttons button { flex: 1; padding-inline: 4px; }
 
-.seed input {
+.seed input, .tick input {
   width: 0;
   flex: 1;
   font: inherit;
@@ -180,14 +180,7 @@ button:hover { border-color: var(--accent); }
   accent-color: var(--accent);
 }
 
-.tick {
-  margin: 10px 0 0;
-  font: 11px/1.5 var(--mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--muted);
-}
-
-#tick { user-select: all; }
+#tick { font-variant-numeric: tabular-nums; }
 
 #stats {
   margin: 14px 0 0;

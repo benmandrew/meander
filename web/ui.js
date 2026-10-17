@@ -4,8 +4,14 @@
 import init, { River } from './pkg/meander_wasm.js';
 
 // The visible window's height is fixed in world units; its width follows
-// the view's aspect ratio at each reset.
+// the view's aspect ratio at each reset, unless a replay link fixes it.
 const WORLD_H = 480;
+
+// The warm-up and a replay record the centreline every `CAPTURE_STEPS`
+// steps from the reset, 5 units (12.5 years), so the point bars at a tick
+// do not depend on frame timing and a replay draws the same picture each
+// time.
+const CAPTURE_STEPS = 50;
 
 // The panel's sliders, all page settings. The simulation runs on its own
 // defaults, which come from measured river hydraulics.
@@ -60,10 +66,12 @@ export async function startApp({ view, renderer, display }) {
   let statsAt = -Infinity;
   // Simulated time owed to the loop but not yet stepped.
   let owed = 0;
-  // Warm-up time still to run, spread over frames so the page stays live.
+  // Steps of the warm-up or replay still to run, spread over frames so the
+  // page stays live, and its total.
   let warming = 0;
-  // Simulated time at the end of the warm-up, shown as year 0.
-  let epoch = 0;
+  let warmTotal = 0;
+  // Whether the run under way is a replay, which pauses at its tick.
+  let replaying = false;
   // Whether the view needs redrawing although the river has not moved.
   let dirty = true;
   // Whether the river has stopped, on a pause or a single step, and the
@@ -76,21 +84,28 @@ export async function startApp({ view, renderer, display }) {
   const $ = (id) => document.getElementById(id);
 
   function wake() {
+    delete document.documentElement.dataset.idle;
     if (scheduled) return;
     scheduled = true;
     requestAnimationFrame(frame);
   }
 
-  function reset() {
+  // Steps from the reset to the end of the warm-up, shown as year 0.
+  const epoch = () => Math.round(local.warmup / river.get_param('dt'));
+
+  // Restart the river, and run the warm-up, or replay to step `target` and
+  // pause there.
+  function reset(target) {
     const r = view.getBoundingClientRect();
-    state.bounds = [WORLD_H * r.width / r.height, WORLD_H];
+    state.bounds = [local.view ?? WORLD_H * r.width / r.height, WORLD_H];
     const seed = Number($('seed').value) >>> 0;
     river.reset(...state.bounds, seed, local.noise, 0);
     owed = 0;
-    warming = local.warmup;
-    epoch = river.time();
+    replaying = target !== undefined;
+    warming = warmTotal = replaying ? target : epoch();
     dirty = true;
     $('overlay').hidden = warming <= 0;
+    if (replaying && warming <= 0) pause();
     renderer.reset(river, state.bounds, seed);
     wake();
   }
@@ -125,9 +140,13 @@ export async function startApp({ view, renderer, display }) {
     try {
       busy = tick(now);
     } finally {
-      // A sleeping loop wakes with no time owed for the pause.
+      // A sleeping loop wakes with no time owed for the pause. The page is
+      // marked idle while it sleeps, for screenshots to wait on.
       if (busy) wake();
-      else lastFrame = undefined;
+      else {
+        lastFrame = undefined;
+        document.documentElement.dataset.idle = '';
+      }
     }
   }
 
@@ -139,15 +158,17 @@ export async function startApp({ view, renderer, display }) {
     lastFrame = now;
     if (warming > 0) {
       const t0 = performance.now();
+      const dt = river.get_param('dt');
       while (warming > 0 && performance.now() - t0 < 12) {
-        const chunk = Math.min(warming, 5);
-        river.advance(chunk);
-        warming -= chunk;
+        const n = Math.min(warming, CAPTURE_STEPS);
+        river.advance(n * dt);
+        warming -= n;
         renderer.capture(river, wasm.memory, state);
       }
-      if (warming <= 0) epoch = river.time();
+      if (warming <= 0 && replaying) pause();
       $('overlay').hidden = warming <= 0;
-      $('overlay').textContent = `Developing river… ${Math.round(100 * (1 - warming / local.warmup))}%`;
+      const done = Math.round(100 * (1 - warming / warmTotal));
+      $('overlay').textContent = replaying ? `Replaying to tick ${warmTotal}… ${done}%` : `Developing river… ${done}%`;
       return true;
     }
     const t0 = performance.now();
@@ -185,12 +206,13 @@ export async function startApp({ view, renderer, display }) {
     if (!dirty) return renderer.idle(river, wasm.memory, state) || running;
     dirty = false;
     renderer.draw(river, wasm.memory, state);
-    const year = `Year ${Math.round((river.time() - epoch) * YEARS_PER_UNIT).toLocaleString('en-GB')}`;
+    const years = (river.steps() - epoch()) * river.get_param('dt') * YEARS_PER_UNIT;
+    const year = `Year ${Math.round(years).toLocaleString('en-GB')}`;
     if ($('year').textContent !== year) $('year').textContent = year;
-    // The step count from the reset, which with the seed and the window's
-    // aspect ratio fixes the river's state.
+    // The step count from the reset, which with the seed and the view's
+    // width fixes the river's state. Not while it is being edited.
     const tick = String(river.steps());
-    if ($('tick').textContent !== tick) $('tick').textContent = tick;
+    if ($('tick').value !== tick && document.activeElement !== $('tick')) $('tick').value = tick;
     return true;
   }
 
@@ -202,6 +224,12 @@ export async function startApp({ view, renderer, display }) {
     const mean = times.reduce((a, b) => a + b, 0) / times.length;
     const text = `ms/frame   mean ${mean.toFixed(1)}   p95 ${at(0.95)}   p99 ${at(0.99)}`;
     if ($('stats').textContent !== text) $('stats').textContent = text;
+  }
+
+  function pause() {
+    running = false;
+    settle = true;
+    $('play').textContent = 'Play';
   }
 
   function togglePlay() {
@@ -220,12 +248,30 @@ export async function startApp({ view, renderer, display }) {
     wake();
   };
   $('step').addEventListener('click', step);
-  $('reset').addEventListener('click', reset);
+  $('reset').addEventListener('click', () => reset());
   $('reseed').addEventListener('click', () => {
     $('seed').value = Math.floor(Math.random() * 1e6);
     reset();
   });
-  $('seed').addEventListener('change', reset);
+  $('seed').addEventListener('change', () => reset());
+  $('tick').addEventListener('change', () => {
+    const target = Math.round(Number($('tick').value));
+    if (Number.isFinite(target) && target >= 0) reset(target);
+  });
+  // Put a link that replays to the current tick in the address bar and on
+  // the clipboard. The view's width is written in full, since a river in a
+  // window of a slightly different width soon diverges.
+  $('link').addEventListener('click', () => {
+    const url = new URL(location.href);
+    url.searchParams.set('seed', String(Number($('seed').value) >>> 0));
+    url.searchParams.set('tick', String(river.steps()));
+    url.searchParams.set('view', String(state.bounds[0]));
+    history.replaceState(null, '', url);
+    navigator.clipboard?.writeText(url.href).then(() => {
+      $('link').textContent = 'Copied';
+      setTimeout(() => { $('link').textContent = 'Link'; }, 1500);
+    }, () => {});
+  });
   $('collapse').addEventListener('click', () => {
     $('panel').hidden = true;
     $('expand').hidden = false;
@@ -242,8 +288,13 @@ export async function startApp({ view, renderer, display }) {
   });
 
   buildControls();
-  // ?warmup=T overrides the warm-up for the first reset.
-  const warmup = new URLSearchParams(location.search).get('warmup');
-  if (warmup !== null) local.warmup = Number(warmup);
-  reset();
+  // ?warmup=T overrides the warm-up. ?seed=S&tick=N&view=W, from the Link
+  // button, replays seed S to tick N in a view W world units wide, which
+  // later resets keep.
+  const params = new URLSearchParams(location.search);
+  if (params.has('warmup')) local.warmup = Number(params.get('warmup'));
+  if (params.has('seed')) $('seed').value = Number(params.get('seed')) >>> 0;
+  if (params.has('view')) local.view = Number(params.get('view'));
+  const target = Math.round(Number(params.get('tick') ?? NaN));
+  reset(Number.isFinite(target) && target >= 0 ? target : undefined);
 }

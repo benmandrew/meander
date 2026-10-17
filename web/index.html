@@ -37,7 +37,11 @@
     <button id="reseed" title="New random seed">Random</button>
   </div>
   <div id="sliders"></div>
-  <div class="tick" title="Steps since the reset, the warm-up's among them">Tick <output id="tick"></output></div>
+  <div class="tick">
+    <label for="tick">Tick</label>
+    <input id="tick" type="number" min="0" step="1" title="Steps since the reset, the warm-up's among them. Enter a tick to replay to it.">
+    <button id="link" title="Copy a link that replays to this tick">Link</button>
+  </div>
   <pre id="stats"></pre>
 </aside>
 <button id="expand" title="Show controls">☰</button>
