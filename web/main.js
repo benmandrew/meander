@@ -181,6 +181,13 @@ const HEDGE_WIDTH = 0.18;
 const PLUG_MARSH = 0.22;
 const PLUG_RESIDUAL = 0.3;
 const PLUG_LEVELS = [0.2, 0.45, 0.7];
+// Wet ground: the backswamps the core finds in clay hollows of the low
+// floodplain far from the water (see `land.rs`), drawn as wet meadow. The
+// blurred wetness is contoured at `WET_LEVELS` in marsh, `WET_MARSH`
+// opaque where all of them overlap, with tufts of reed over the wettest.
+// It changes as slowly as the coarse ground and is redrawn as often.
+const WET_MARSH = 0.3;
+const WET_LEVELS = [0.2, 0.5, 0.8];
 // Scroll bars: ridges of fresh sand that vegetation colonises first, so
 // they darken against the bar as they age. They are kept in this many age
 // bands, each one path element.
@@ -1428,6 +1435,14 @@ class SvgRenderer {
     this.plugAt = null;
     this.plugJob = null;
     this.plugBlur = null;
+    // Wet ground lies with the plug marsh, and its reed tufts are sized for
+    // the channel width at each reset.
+    this.reedTufts = el('pattern', { id: 'reed-tufts', patternUnits: 'userSpaceOnUse' }, el('defs', {}, ground));
+    const wetOpacity = 1 - (1 - WET_MARSH) ** (1 / WET_LEVELS.length);
+    const wetLayer = el('g', { 'fill-rule': 'evenodd' }, ground);
+    this.wetMarsh = WET_LEVELS.map(() => el('path', { fill: MARSH, 'fill-opacity': wetOpacity.toFixed(4) }, wetLayer));
+    this.wetReeds = el('path', { fill: 'url(#reed-tufts)' }, wetLayer);
+    this.wetAt = null;
     // The farmsteads lie over the fields, scroll bars, swept ground, levees
     // and marsh, and under the trees, so crowns overhang the buildings:
     // yards, then mounds, the platforms of ruins, and the roofs with their
@@ -1535,6 +1550,8 @@ class SvgRenderer {
     this.wallsAt = { key: river.wall_version(), t: river.time() };
     this.wallJob = null;
     this.drawPebbles(river.get_param('width'), seed);
+    this.drawTufts(river.get_param('width'), seed);
+    this.wetAt = null;
     this.plugAt = null;
     this.plugJob = null;
     this.forestAt = null;
@@ -2357,6 +2374,44 @@ class SvgRenderer {
     }
   }
 
+  // A pattern of reed tufts for the wet ground, scaled to the channel
+  // width, as the marsh sign of survey maps: a short line of water with
+  // blades rising from it. The tufts sit on a staggered lattice, jittered,
+  // so the wet ground reads as an even stipple.
+  drawTufts(w, seed) {
+    const rand = random(seed ^ 0x2eed);
+    const size = 2 * w;
+    set(this.reedTufts, 'width', dp1(size));
+    set(this.reedTufts, 'height', dp1(size));
+    this.reedTufts.replaceChildren();
+    let d = '';
+    for (const [u, v] of [[0.25, 0.25], [0.75, 0.75]]) {
+      const x = (u + 0.15 * (rand() - 0.5)) * size, y = (v + 0.15 * (rand() - 0.5)) * size;
+      const half = 0.22 * w;
+      d += `M${dp1(x - half)} ${dp1(y)}h${dp1(2 * half)}`;
+      for (const [at, lean] of [[-0.5, -0.25], [0, 0], [0.5, 0.25]]) {
+        const h = (at === 0 ? 0.3 : 0.2) * w * (0.85 + 0.3 * rand());
+        d += `M${dp1(x + at * half)} ${dp1(y)}l${dp1(lean * h)} ${dp1(-h)}`;
+      }
+    }
+    el('path', {
+      d, fill: 'none', stroke: REEDS, 'stroke-width': dp1(0.05 * w), 'stroke-linecap': 'round', 'stroke-opacity': 0.7,
+    }, this.reedTufts);
+  }
+
+  // Contour the wet ground over the window, blurred twice over 3 × 3 cells so its
+  // edge follows the hollows instead of the cell edges. `drawFloodplain`
+  // calls it every `COARSE_REFRESH` of simulated time.
+  drawWet(river, memory) {
+    this.wetAt = { key: null, t: river.time() };
+    const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
+    const wet = new Float32Array(memory.buffer, river.land_wet_ptr(), cols * rows);
+    const [c0, c1] = this.windowColumns(cols, cell);
+    const blur = this.blur(this.blur(wet, cols, rows, c0, c1, 'wetBlur'), cols, rows, c0, c1, 'wetBlur2');
+    WET_LEVELS.forEach((level, k) => set(this.wetMarsh[k], 'd', contourData(blur, cols, rows, cell, c0, c1, level)));
+    set(this.wetReeds, 'd', this.wetMarsh.at(-1).getAttribute('d'));
+  }
+
   // Contour the coarse ground over the window. `drawFloodplain` calls it
   // every `COARSE_REFRESH` of simulated time.
   drawCoarse(river, memory) {
@@ -2421,6 +2476,11 @@ class SvgRenderer {
         shown: this.coarseAt?.t,
         due: () => isDue(this.coarseAt, null, t, COARSE_REFRESH),
         run: () => this.drawCoarse(river, memory),
+      },
+      {
+        shown: this.wetAt?.t,
+        due: () => isDue(this.wetAt, null, t, COARSE_REFRESH),
+        run: () => this.drawWet(river, memory),
       },
       {
         shown: this.buildingsAt?.t,

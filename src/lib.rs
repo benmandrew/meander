@@ -671,7 +671,7 @@ pub struct Sim {
     grid_for: Option<(Cells, u64)>,
 }
 
-fn smoothstep(t: f64) -> f64 {
+pub(crate) fn smoothstep(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }

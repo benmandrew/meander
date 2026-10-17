@@ -30,6 +30,7 @@ use crate::farm::{Building, HAMLET_GAP, Reach};
 use crate::field::Erodibility;
 use crate::geom::P;
 use crate::rng::Rng;
+use crate::smoothstep;
 
 /// Owner of a cell that no holding has.
 pub const NONE: u32 = u32::MAX;
@@ -59,6 +60,23 @@ const RIDGE_CLEAR: f64 = 1.5;
 /// Distance beyond the valley wall, in channel widths, over which flood
 /// risk falls to 0 on the upland.
 const WALL_FADE: f64 = 2.0;
+/// Wet ground: the low backswamps of the floodplain, which the levees'
+/// silt has not reached, where water stands after a flood and drains
+/// slowly. Ground the channel has reworked is wet as it has lain low for
+/// long: its overbank deposit under `WET_DEPTH` of the flood level, fully so
+/// `WET_RAMP` under it, after
+/// `WET_AGE` of growth, fully so at twice that. Ground the channel has
+/// never reached stands as old floodplain and stays dry. It keeps
+/// `WET_NEAR` widths from the water, fully wet only `WET_FAR` from it, and
+/// off the oxbow scars, which have marsh of their own. Its flood risk is at
+/// least `WET_RISK` times its wetness, so farmsteads keep off it and its
+/// fields are meadow.
+const WET_DEPTH: f64 = 0.7;
+const WET_RAMP: f64 = 0.2;
+const WET_AGE: f64 = 100.0;
+const WET_NEAR: f64 = 2.0;
+const WET_FAR: f64 = 4.0;
+const WET_RISK: f64 = 0.6;
 /// Extra cost of crossing ground at flood risk 1, as a multiple of its
 /// length: a holding reaches round wet ground before it reaches across it.
 const RISK_COST: f32 = 2.0;
@@ -178,6 +196,10 @@ pub struct Land {
     /// with distance from the channel and oxbow ground and with the height
     /// of the overbank deposit, and 0 on the upland.
     pub risk: Vec<f32>,
+    /// Wetness of each cell in [0, 1]: 1 on old low floodplain ground away
+    /// from the water, 0 near it, on high ground, fresh bars, oxbow scars
+    /// and the upland. See [`WET_DEPTH`].
+    pub wet: Vec<f32>,
     /// Holdings by index; a dissolved holding leaves its slot empty for the
     /// next to be founded.
     pub holdings: Vec<Option<Holding>>,
@@ -239,6 +261,7 @@ impl Land {
             owner: vec![NONE; n],
             cost: vec![0.0; n],
             risk: vec![0.0; n],
+            wet: vec![0.0; n],
             holdings: Vec::new(),
             version: 0,
             reorganisations: 0,
@@ -487,6 +510,7 @@ impl Land {
             std::f32::consts::SQRT_2,
         );
         let (clear, stage) = (c / (RIDGE_CLEAR * s.width), s.levee_height);
+        let (near, far) = (WET_NEAR * s.width / c, (WET_FAR - WET_NEAR) * s.width / c);
         for y in (y0..y1).rev() {
             let wy = (y as f64 + 0.5) * c;
             for x in (0..cols).rev() {
@@ -515,7 +539,19 @@ impl Land {
                     0.0
                 };
                 let relief = RIDGE_RELIEF * high * (v as f64 * clear).min(1.0);
-                self.risk[i] = (inside * (1.0 - relief) / (1.0 + u * u)) as f32;
+                // On the floor itself, fading in over a width from the wall.
+                let floor = (((wy - lo).min(hi - wy)) / s.width).clamp(0.0, 1.0);
+                let low = smoothstep((WET_DEPTH - high) / WET_RAMP);
+                let growth = field.growth[i] as f64;
+                let old = smoothstep(growth / WET_AGE - 1.0);
+                let wet = if field.cut_at[i].is_finite() || growth.is_infinite() {
+                    0.0
+                } else {
+                    floor * low * old * smoothstep((v as f64 - near) / far)
+                };
+                self.wet[i] = wet as f32;
+                let risk = (inside * (1.0 - relief) / (1.0 + u * u)).max(WET_RISK * wet);
+                self.risk[i] = risk as f32;
                 let o = self.owner[i];
                 if o != NONE && !self.open[i] {
                     self.owner[i] = NONE;
@@ -1187,6 +1223,34 @@ mod tests {
             (bank.0 - bank.1).abs() < 0.25 * bank.0,
             "the bank keeps its risk: {bank:?}"
         );
+    }
+
+    #[test]
+    fn low_ground_far_from_the_water_is_wet() {
+        // Silt to the flood level on the far side of the channel only.
+        let (mut field, line, widths, walls) = valley(30.0);
+        let cols = field.cols;
+        for y in 0..field.rows {
+            if (y as f64 + 0.5) * field.cell > 30.0 {
+                field.deposit[y * cols..(y + 1) * cols].fill(0.25);
+            }
+        }
+        // Ground the channel left long ago, bar a fresh strip.
+        field.growth.fill(1e3);
+        let mut land = Land::new(&field, 1);
+        let fresh = land.index([80.0, 16.0]);
+        field.growth[fresh] = 0.0;
+        land.update(&field, &line, &widths, &walls, &settings(0.0));
+        assert_eq!(land.wet[fresh], 0.0, "on fresh bar");
+        let at = |y: f64| {
+            let i = land.index([60.0, y]);
+            (land.wet[i], land.risk[i])
+        };
+        assert_eq!(at(29.0).0, 0.0, "near the water");
+        assert_eq!(at(16.0).0, 1.0, "far from it, on old low ground");
+        assert!(at(16.0).1 >= WET_RISK as f32, "kept to meadow");
+        assert_eq!(at(44.0).0, 0.0, "on silt to the flood level");
+        assert_eq!(at(2.0).0, 0.0, "on the upland");
     }
 
     #[test]

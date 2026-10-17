@@ -575,6 +575,11 @@ impl River {
     pub fn land_risk_ptr(&self) -> *const f32 {
         self.sim.land.risk.as_ptr()
     }
+    /// Wetness of each erodibility cell in [0, 1]: low floodplain ground
+    /// far from the water.
+    pub fn land_wet_ptr(&self) -> *const f32 {
+        self.sim.land.wet.as_ptr()
+    }
     /// Changes whenever a reorganisation of the holdings finishes, and after
     /// each survey of the ground the channel took and left.
     pub fn land_version(&self) -> f64 {
