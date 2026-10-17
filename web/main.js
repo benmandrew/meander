@@ -221,11 +221,11 @@ const LOG_LENGTH = [0.5, 0.9];
 // once the mill is a ruin, and the mill house's roof and walls, `HOUSE`
 // channel widths long and deep. The pond above a working weir lies darker
 // over `pond_length`.
-const STONE = [182, 174, 152];
-const FOAM = [236, 242, 240];
+const STONE = [166, 158, 134];
+const FOAM = [206, 222, 222];
 const DRY_LEAT = [150, 140, 108];
-const ROOF = [146, 88, 64];
-const WALLING = [92, 78, 66];
+const ROOF = [164, 128, 100];
+const WALLING = [118, 106, 88];
 const HOUSE = [1.1, 0.7];
 // Points of a leat below its weir: `LEAT_DOWN` (3 widths) in the core.
 const LEAT_TAIL = 6;
@@ -1349,7 +1349,7 @@ class SvgRenderer {
     this.depth = [...POOL_COLOURS, SHALLOW, BAR].map((c) => ({ g: el('g', { fill: `rgb(${c})` }, svg), paths: [] }));
     // Over the water: the darker ponds above working weirs, the weirs and
     // the white water below them, the logs of the jams, and the mill houses.
-    this.pondLayer = el('g', { ...line, stroke: `rgb(${CLEAR})`, 'stroke-opacity': 0.35, 'stroke-linecap': 'butt' }, svg);
+    this.pondLayer = el('g', { ...line, stroke: `rgb(${CLEAR})`, 'stroke-opacity': 0.2, 'stroke-linecap': 'butt' }, svg);
     this.weirLayer = el('g', { fill: 'none' }, svg);
     this.logs = el('path', { ...round, stroke: `rgb(${LOG})`, 'stroke-opacity': 0.9 }, svg);
     this.houseLayer = el('g', {}, svg);
@@ -2031,7 +2031,7 @@ class SvgRenderer {
       d: working ? '' : `M${dp1(x - reach * ax)} ${dp1(y - reach * ay)}L${dp1(x + reach * ax)} ${dp1(y + reach * ay)}`,
       stroke: `rgb(${STONE})`, 'stroke-width': dp1(0.25 * w), ...(working ? {} : dash),
     }, this.weirLayer);
-    const foam = el('path', { stroke: `rgb(${FOAM})`, 'stroke-width': dp1(0.12 * w), 'stroke-opacity': 0.8 }, this.weirLayer);
+    const foam = el('path', { stroke: `rgb(${FOAM})`, 'stroke-width': dp1(0.1 * w), 'stroke-opacity': 0.6 }, this.weirLayer);
     // The house stands on the leat beside the weir, along it.
     const q = Math.max(0, count - 1 - LEAT_TAIL);
     const [a, b] = [Math.max(0, q - 1), Math.min(count - 1, q + 1)];
@@ -2044,7 +2044,7 @@ class SvgRenderer {
     const house = el('path', {
       d: `M${corner(-1, -1)}L${corner(1, -1)}L${corner(1, 1)}L${corner(-1, 1)}Z`
         + (working ? `M${corner(-1, 0)}L${corner(1, 0)}` : ''),
-      fill: working ? `rgb(${ROOF})` : 'none', stroke: `rgb(${WALLING})`, 'stroke-width': dp1(0.08 * w),
+      fill: working ? `rgb(${ROOF})` : 'none', stroke: `rgb(${WALLING})`, 'stroke-width': dp1(0.06 * w),
       'stroke-linejoin': 'round', ...(working ? {} : dash),
     }, this.houseLayer);
     const pond = el('path', {}, this.pondLayer);
