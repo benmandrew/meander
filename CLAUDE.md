@@ -1,42 +1,30 @@
 # CLAUDE.md
 
-A live browser simulation of a meandering river: a Rust core compiled to WASM, drawn as SVG. The panel shows only a speed slider; the simulation runs on its `Params` defaults.
+A live browser simulation of a meandering river: a Rust core (`src/`, no dependencies) compiled to WASM (`wasm/`) and drawn as SVG by plain ES modules in `web/`. The panel shows only a speed slider; the simulation runs on its `Params` defaults.
 
-The simulation runs over years, not weeks. One unit of simulated time is 2.5 years (`YEARS_PER_UNIT` in `ui.js`), the warm-up is about 1,250 years, and forest takes about 3,400 years to mature. Describe every change, in code comments and in prose, on that timescale.
+Describe every change, in comments and prose, in years. One unit of simulated time is 2.5 years (`YEARS_PER_UNIT` in `ui.js`), the warm-up is about 1,250 years, and forest takes about 3,400 years to mature.
 
-Read `docs/architecture.md` before changing a process or a renderer layer: it describes each model process, its parameters, and how `main.js` draws it. Keep it current when behaviour changes.
+Read `docs/architecture.md` before changing a process or a renderer layer, and keep it current. Read `docs/development.md` for the hooks, CI, URL parameters and the smoke test.
 
 ## Commands
 
-The Nix flake supplies every tool (`direnv allow` once, or `nix develop`). The shell's `wasm-bindgen-cli` version is read from `Cargo.lock`, so after bumping the `wasm-bindgen` crate, nixpkgs must carry the matching `wasm-bindgen-cli_0_2_N`.
+Tools come from the Nix flake (`direnv allow` or `nix develop`).
 
-- The pre-commit hook in `.githooks/` runs on a copy of the index, so only staged changes count. Staged Rust gets `cargo fmt --check` and `cargo clippy -- -D warnings`; staged Rust or `web/` also gets `make build` and the smoke test. The dev shell sets `core.hooksPath` to enable it. CI (`.github/workflows/ci.yml`) runs fmt, clippy and `make test`'s tests in the same dev shell on every push to `main` and every PR, caching the Nix store and Cargo's build output; it skips the build and the smoke test.
-- `nix build .#web-dist`: build the deployable site into `result/`, without `wasm-pack`.
-- `make build`: build the WASM package into `web/pkg`.
-- `make serve`: build, then serve `web/` at http://localhost:8000 through `serve.py`, which turns caching off (`Cache-Control: no-store`). This is for development only; a deployment must set its own caching headers. `?warmup=T` overrides the warm-up in simulated time. `?seed=S&tick=N&view=W` (the panel's Link button) replays to step N and pauses; `<html data-idle>` marks when drawing has finished, for screenshots.
-- `make smoke`: build, then load the page in headless Chrome (`test/smoke.py`, through Playwright) for 20 units of warm-up and 8 s of running. It fails on any page or console error, or if the channel in `#view` stops being redrawn. It drives the installed Google Chrome; set `PLAYWRIGHT_BROWSERS_PATH` to use Playwright's own Chromium instead.
-- `make test`: `cargo test --release -p meander-core`. Tests run long simulations, so always use `--release`. One test: `cargo test --release -p meander-core <test_name>`.
-- Snapshots for tuning: `cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]`. Override any parameter with its upper-case name as an env var (`ALPHA=0.8`); `UP` and `DOWN` set hidden reach lengths in widths. It also prints step-time percentiles.
-
-## Architecture
-
-Three layers, with data flowing one way:
-
-- `meander-core` (`src/`): pure Rust, no dependencies. `Sim::step` migrates the centreline with the Howard–Knutson kernel, then runs cutoffs. There are no discrete floods: overbank silt is laid at a steady rate, and scroll bars and tributary shifts come as Poisson processes. Flow runs from index 0 (upstream) to the last index. Floodplain state lives on a grid at half a width per cell. Modules: `field.rs` (erodibility, vegetation), `walls.rs` (valley walls), `land.rs` (landholdings), `farm.rs` (farmsteads), `wood.rs` (log jams), `tributary.rs`, `mills.rs`, `ips.rs` (hydraulics to Ω, Γ, α), `rng.rs`.
-- `meander-wasm` (`wasm/`): wraps `Sim` as `River`, with hidden reaches upstream and downstream of the visible window. `sync*()` copies geometry into flat `f32` buffers exposed as raw pointers. JS must call `sync()` after stepping and rebuild every typed-array view, because WASM memory growth detaches old views.
-- `web/`: plain ES modules, no bundler. `ui.js` owns the panel, the frame loop and the warm-up; `main.js` draws three stacked SVGs (`#bars`, `#ground`, `#view`).
+- `make build`, `make serve` (http://localhost:8000), `make smoke`, `make test`.
+- One test: `cargo test --release -p meander-core <test_name>`. Always use `--release`.
+- Tuning: `cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]`, with env overrides such as `ALPHA=0.8`. It prints step-time percentiles.
+- The pre-commit hook checks only staged changes.
 
 ## Parameters
 
-Adding a simulation parameter touches three places: the `Params` field and its `Default`, `Params::NAMES`, and the `Params::field` match (or a special case in `get`/`set` for non-`f64` values such as `cutoff_min_sep` and `physics`). The snapshot example picks up env overrides from `NAMES`. Most length parameters are in channel widths.
-
-With the `physics` flag on (the default), every `Params::set` re-derives `omega`, `gamma` and `alpha` from `friction`, `aspect`, `froude` and `scour`, so setting those three directly has no effect.
+A new parameter touches the `Params` field and its `Default`, `Params::NAMES`, and the `Params::field` match (or `get`/`set` for non-`f64` values). Most lengths are in channel widths. With `physics` on (the default), `Params::set` derives `omega`, `gamma` and `alpha` from `friction`, `aspect`, `froude` and `scour`, so setting those three directly has no effect.
 
 ## Constraints
 
-- Step time must stay even. Spread periodic grid work across steps in bands of rows, and carry searches across steps within a per-step `BUDGET`. Check with the snapshot example's step-time percentiles.
-- The hot path avoids `hypot`, `ln` and `cos`: they are software routines in WASM and made a step 3.6× slower than native. `Sim` keeps scratch buffers to avoid per-step allocation.
-- Use the local PRNG in `rng.rs`; do not add `rand` or `getrandom`. New stochastic processes draw from the `events` stream so the river's own draws stay unchanged.
-- The validation tests in `src/lib.rs` pin the model's behaviour (sign convention, drift, cutoffs, no self-intersection, bounded sinuosity). Run `make test` after any change to the dynamics.
-- The frontend is SVG only. A WebGL view (commit e6cd034) and a raster floodplain map were both rejected; do not reintroduce either without asking. Keep floodplain detail as vector shapes.
+- Keep step time even: spread periodic grid work across steps in bands of rows, and carry searches across steps within a per-step `BUDGET`. Check with the snapshot percentiles.
+- No `hypot`, `ln` or `cos` on the hot path. They are software routines in WASM and made a step 3.6× slower than native. Reuse `Sim`'s scratch buffers; do not allocate per step.
+- Use the PRNG in `rng.rs`; do not add `rand` or `getrandom`. New stochastic processes draw from the `events` stream.
+- JS must call `sync()` after stepping and rebuild every typed-array view, because WASM memory growth detaches old views.
+- Run `make test` after any change to the dynamics. The validation tests in `src/lib.rs` pin the model's behaviour.
+- SVG only. A WebGL view (commit e6cd034) and a raster floodplain map were both rejected; ask before reintroducing either. Keep floodplain detail as vector shapes.
 - Commits use conventional prefixes, e.g. `feat: stochastic flood-driven cutoffs`.
