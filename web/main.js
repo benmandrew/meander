@@ -308,6 +308,10 @@ const SHALLOW = [96, 154, 182];
 const MID_BAR_FROM = 1.5;
 const MID_BAR_FULL = 1.8;
 const MID_BAR = 0.4;
+// Riffles and mid-channel bars follow the smoothed bends and widths, which
+// change slowly, so each redraws once every `DEPTH_EVERY` draws, the two in
+// different draws.
+const DEPTH_EVERY = 3;
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -406,6 +410,29 @@ function set(e, name, value) {
   e.setAttribute(name, value);
 }
 
+// A detached twin of the path `e` with path data `d`, or `e` itself if its
+// data is already `d`. Chrome parses path data when it is set, which took
+// up to 8 ms for the forest's 370 KB at 4× throttling, so a staged redraw
+// parses its twins stage by stage and `swap` puts them on the page together.
+function twin(e, d) {
+  if (e.attrs?.d === d) return e;
+  const t = document.createElementNS(NS, 'path');
+  for (const a of e.attributes) if (a.name !== 'd') t.setAttribute(a.name, a.value);
+  t.attrs = { ...e.attrs, d };
+  t.setAttribute('d', d);
+  return t;
+}
+
+// Put each of `twins` on the page in place of the path at its index in
+// `paths`, and in `paths`.
+function swap(paths, twins) {
+  twins.forEach((t, k) => {
+    if (t === paths[k]) return;
+    paths[k].replaceWith(t);
+    paths[k] = t;
+  });
+}
+
 // `v` to one decimal place, without the trailing zero `toFixed` keeps,
 // and several times faster. The whole part and the tenths are written as
 // integers with the point between them, since V8 writes an integer faster
@@ -469,6 +496,15 @@ function edgeData(edge, frame, start, back) {
   return d;
 }
 
+// Float64Arrays kept from draw to draw by name, so the channel's per-run
+// and per-pass arrays are not allocated each draw. `scratch` returns a view
+// of the first `n` entries, whose contents are left from the last use.
+const scratchArrays = {};
+function scratch(name, n) {
+  if (!(scratchArrays[name]?.length >= n)) scratchArrays[name] = new Float64Array(Math.ceil(1.25 * n));
+  return scratchArrays[name].subarray(0, n);
+}
+
 // Closed path data for the channel over points [start, end), out to
 // `scale` times the local width either side, plus `bar[i]` on the side of
 // the left normal its sign gives, if `bar` is given: one bank forwards, the
@@ -478,7 +514,7 @@ function edgeData(edge, frame, start, back) {
 function channelData(pts, widths, frame, scale, bar, start, end) {
   if (end - start < 2) return '';
   const { nx, ny, curv } = frame;
-  const [left, right] = [new Float64Array(2 * (end - start)), new Float64Array(2 * (end - start))];
+  const [left, right] = [scratch('left', 2 * (end - start)), scratch('right', 2 * (end - start))];
   for (let i = start; i < end; i++) {
     const h = scale * widths[i], k = curv[i], b = bar ? bar[i] : 0;
     const [bl, br] = [h + Math.max(0, b), h + Math.max(0, -b)];
@@ -561,23 +597,24 @@ function barRim(bend, w) {
   return bend.map((c) => Math.sign(c) * BAR_RIM * w * smoothstep(Math.abs(c) * w * BAR_RADIUS));
 }
 
-// `values` smoothed along the river by four [1, 2, 1] passes.
-function smoothed(values) {
+// `values` smoothed along the river by four [1, 2, 1] passes, in the
+// scratch array `name`, which the next call with that name overwrites.
+function smoothed(values, name) {
   const n = values.length;
-  let v = Float64Array.from(values);
-  for (let pass = 0; pass < 4; pass++) {
-    const prev = v;
-    v = new Float64Array(n);
+  const [out, between] = [scratch(name, n), scratch('smoothed', n)];
+  let prev = values;
+  for (const v of [between, out, between, out]) {
     for (let i = 0; i < n; i++) v[i] = 0.25 * prev[Math.max(0, i - 1)] + 0.5 * prev[i] + 0.25 * prev[Math.min(n - 1, i + 1)];
+    prev = v;
   }
-  return v;
+  return out;
 }
 
 // Closed path data for a band along the river over points [start, end),
 // between signed offsets `a[i]` and `b[i]` along the left normal.
 function bandData(pts, frame, a, b, start, end) {
   const { nx, ny } = frame;
-  const [left, right] = [new Float64Array(2 * (end - start)), new Float64Array(2 * (end - start))];
+  const [left, right] = [scratch('left', 2 * (end - start)), scratch('right', 2 * (end - start))];
   for (let i = start; i < end; i++) {
     const [x, y, j] = [pts[2 * i], pts[2 * i + 1], 2 * (i - start)];
     [left[j], left[j + 1]] = [x + a[i] * nx[i], y + a[i] * ny[i]];
@@ -604,11 +641,11 @@ function bandRuns(pts, frame, a, b, [from, to]) {
 }
 
 // Pools, riffles and mid-channel bars, as lists of path data: one list per
-// pool level, then riffles, then bars. `bend` is the smoothed signed
-// curvature, `widths` the local width in world units, `w` the reference
-// width. Only the points `shown` are drawn, though the bends and widths
-// are read along the whole river.
-function channelDepth(pts, widths, frame, bend, w, shown) {
+// pool level, then riffles, then bars, or null for riffles or bars not
+// asked for. `bend` is the smoothed signed curvature, `widths` the local
+// width in world units, `w` the reference width. Only the points `shown`
+// are drawn, though the bends and widths are read along the whole river.
+function channelDepth(pts, widths, frame, bend, w, shown, riffles, bars) {
   const n = bend.length;
   const lag = Math.round(POOL_LAG / SPACING);
   const pools = POOL_LEVELS.map((level) => {
@@ -624,6 +661,13 @@ function channelDepth(pts, widths, frame, bend, w, shown) {
     }
     return bandRuns(pts, frame, a, b, shown);
   });
+  return [...pools, riffles ? riffleRuns(pts, widths, frame, bend, w, shown) : null,
+    bars ? midBarRuns(pts, widths, frame, w, shown) : null];
+}
+
+// Riffles over the points `shown`, as `channelDepth` draws them.
+function riffleRuns(pts, widths, frame, bend, w, shown) {
+  const n = bend.length;
   // Strength of the riffle at each point: the weaker of the strongest
   // bends of opposite sign upstream and downstream, ramped about
   // `RIFFLE_RADIUS`, where the curvature here is small beside it.
@@ -639,21 +683,26 @@ function channelDepth(pts, widths, frame, bend, w, shown) {
     strength[i] = grow * (1 - smoothstep(Math.abs(bend[i]) / (RIFFLE_CROSSING * bends)));
   }
   // Smoothed along the river, so each riffle tapers to round ends.
-  const riffle = smoothed(strength);
+  const riffle = smoothed(strength, 'riffle');
   const ra = new Float64Array(n), rb = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const h = 0.5 * RIFFLE_WIDTH * widths[i] * riffle[i];
     [ra[i], rb[i]] = [h, -h];
   }
-  // Mid-channel bars, on the width smoothed so they grow and shrink
-  // slowly.
-  const wide = smoothed(widths);
+  return bandRuns(pts, frame, ra, rb, shown);
+}
+
+// Mid-channel bars over the points `shown`, on the width smoothed so they
+// grow and shrink slowly.
+function midBarRuns(pts, widths, frame, w, shown) {
+  const n = widths.length;
+  const wide = smoothed(widths, 'wide');
   const ba = new Float64Array(n), bb = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const h = 0.5 * MID_BAR * wide[i] * smoothstep((wide[i] / w - MID_BAR_FROM) / (MID_BAR_FULL - MID_BAR_FROM));
     [ba[i], bb[i]] = [h, -h];
   }
-  return [...pools, bandRuns(pts, frame, ra, rb, shown), bandRuns(pts, frame, ba, bb, shown)];
+  return bandRuns(pts, frame, ba, bb, shown);
 }
 
 // Path data for points [start, end) of a flat x, y array.
@@ -1299,23 +1348,37 @@ function alongside(pts, oxWidths, start, end, line, widths, channel, w) {
 // point in a row are one run of the table.
 class Grid {
   constructor(pts, size) {
+    this.stride = 4099;
+    this.fill(pts, size);
+  }
+
+  // Hash `pts` afresh, in the arrays of the last fill while they are large
+  // enough. Returns the grid.
+  fill(pts, size) {
     const n = pts.length / 2;
     let buckets = 1;
     while (buckets < 4 * n) buckets *= 2;
     this.pts = pts;
     this.size = size;
     this.mask = buckets - 1;
-    this.stride = 4099;
-    this.start = new Int32Array(buckets + 1);
-    const cell = new Int32Array(n);
+    if (!(this.start?.length >= buckets + 1)) {
+      this.start = new Int32Array(buckets + 1);
+      this.next = new Int32Array(buckets);
+    }
+    if (!(this.items?.length >= n)) {
+      this.items = new Int32Array(n);
+      this.cell = new Int32Array(n);
+    }
+    const { start, next, items, cell } = this;
+    start.fill(0, 0, buckets + 1);
     for (let i = 0; i < n; i++) {
       cell[i] = this.bucket(Math.floor(pts[2 * i] / size), Math.floor(pts[2 * i + 1] / size));
-      this.start[cell[i] + 1]++;
+      start[cell[i] + 1]++;
     }
-    for (let b = 0; b < buckets; b++) this.start[b + 1] += this.start[b];
-    const fill = this.start.slice(0, buckets);
-    this.items = new Int32Array(n);
-    for (let i = 0; i < n; i++) this.items[fill[cell[i]]++] = 2 * i;
+    for (let b = 0; b < buckets; b++) start[b + 1] += start[b];
+    next.set(start.subarray(0, buckets));
+    for (let i = 0; i < n; i++) items[next[cell[i]]++] = 2 * i;
+    return this;
   }
 
   bucket(cx, cy) {
@@ -1611,8 +1674,10 @@ class SvgRenderer {
     // each floodplain layer fell due, if it waits.
     [this.plugShown, this.fieldsShown, this.forestShown] = [null, null, null];
     this.dueSince = [];
-    // The first draw after a reset draws the floodplain whole.
+    // The first draw after a reset draws the floodplain and the channel
+    // whole.
     this.fresh = true;
+    this.draws = 0;
     this.scrollAt = null;
     this.fieldsAt = null;
     this.fieldJob = null;
@@ -1642,8 +1707,9 @@ class SvgRenderer {
   }
 
   // The stages of a field redraw, which yield whenever the call's
-  // `until` has passed. The page is written only in the last stage, so
-  // no frame shows half a redraw.
+  // `until` has passed. The outlines are set on twins of the field paths
+  // as they are chained, and the page is written only in the last stage,
+  // so no frame shows half a redraw.
   *fieldStages(river, memory) {
     const due = () => performance.now() > this.until;
     river.sync_holdings();
@@ -1787,21 +1853,28 @@ class SvgRenderer {
         }
         if (ring.length >= 6) d += pointsData(ring) + 'Z';
       }
-      drawn.push([fields[f - 1], d]);
+      const field = fields[f - 1];
+      drawn.push([field, twin(this.fieldPaths.get(field.key) ?? el('path', {}), d)]);
     }
+    const hedges = twin(this.hedges, hedgeData);
+    // The writes alone in the last stage, which a call's chaining would
+    // otherwise run into.
+    yield;
     const kept = new Map();
-    for (const [field, d] of drawn) {
-      const path = this.fieldPaths.get(field.key) ?? el('path', {}, this.parcels);
+    for (const [field, path] of drawn) {
+      const old = this.fieldPaths.get(field.key);
       this.fieldPaths.delete(field.key);
+      if (!old) this.parcels.append(path);
+      else if (old !== path) old.replaceWith(path);
       kept.set(field.key, path);
-      set(path, 'd', d);
       set(path, 'fill', `rgb(${field.colour})`);
       set(path, 'fill-opacity', field.opacity);
     }
     for (const path of this.fieldPaths.values()) path.remove();
     this.meadow = meadowNow;
     this.fieldPaths = kept;
-    set(this.hedges, 'd', hedgeData);
+    if (hedges !== this.hedges) this.hedges.replaceWith(hedges);
+    this.hedges = hedges;
     set(this.hedges, 'stroke-width', dp1(HEDGE_WIDTH * w));
     this.cropMask = { mask, c0, W };
     this.treesStale = true;
@@ -2048,7 +2121,7 @@ class SvgRenderer {
     }
     // Channel points, to find lake points beside it.
     const reach = (MAX_WIDTH + ALONGSIDE_GAP) * w;
-    const channel = new Grid(line, reach);
+    const channel = this.channelGrid = this.channelGrid?.fill(line, reach) ?? new Grid(line, reach);
 
     this.record(line, river.time(), w, local);
     this.drawBars(river.time(), w, local);
@@ -2164,13 +2237,18 @@ class SvgRenderer {
     const [x0, vw] = this.window;
     const shown = span(line, x0 - CHANNEL_MARGIN * w, x0 + vw + CHANNEL_MARGIN * w);
     const waterRuns = channelRuns(line, widths, frame, shown, 0.5);
-    const bend = smoothed(frame.curv);
+    const bend = smoothed(frame.curv, 'bend');
     const bankRuns = channelRuns(line, widths, frame, shown, BANK_EDGE, barRim(bend, w));
     resize(this.bankRuns, bankRuns.length, this.bank);
     resize(this.waterRuns, waterRuns.length, this.water);
     bankRuns.forEach((d, k) => set(this.bankRuns[k], 'd', d));
     waterRuns.forEach((d, k) => set(this.waterRuns[k], 'd', d));
-    channelDepth(line, widths, frame, bend, w, shown).forEach((runs, m) => {
+    // Both riffles and bars on the first draw after a reset, and on a
+    // paused river, which draws once as it stands.
+    const due = this.draws++ % DEPTH_EVERY, whole = this.draws === 1 || at === Infinity;
+    const depth = channelDepth(line, widths, frame, bend, w, shown, whole || due === 0, whole || due === 1);
+    depth.forEach((runs, m) => {
+      if (!runs) return;
       const { g, paths } = this.depth[m];
       resize(paths, runs.length, g);
       runs.forEach((d, k) => set(paths[k], 'd', d));
@@ -2714,46 +2792,52 @@ class SvgRenderer {
     return river.cutoffs();
   }
 
-  // The stages of a forest redraw: copy and blur the age grid like the plug
-  // grid, contour each forest level, then the farmland clip, then size the
-  // tree crowns. The first stage reads WASM memory, so it runs in the call
-  // that starts the redraw. The contours are kept until the last stage,
-  // which puts them on the page with the crowns, so the vegetation changes
-  // in one frame, not in a cascade of partial redraws, and drops the swept
-  // ground the new contours have caught up with.
+  // The stages of a forest redraw: copy the age grid, blur it like the plug
+  // grid, contour each of the forest's nested regions, then each region of
+  // the farmland clip, a stage for each, then size the tree crowns. A
+  // stage that contoured every region of a level at once overran the
+  // floodplain's budget. The first stage reads WASM memory, so it runs in
+  // the call that starts the redraw. The contours are kept on twins until
+  // the last stage, which swaps them onto the page with the crowns, so the
+  // vegetation changes in one frame, not in a cascade of partial redraws,
+  // and drops the swept ground the new contours have caught up with.
   *forestStages(river, memory) {
     river.sync_forest();
     const synced = river.time();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const age = new Float32Array(memory.buffer, river.forest_ptr(), cols * rows);
     const [c0, c1] = this.windowColumns(cols, cell);
+    if (this.forestAge?.length !== age.length) this.forestAge = new Float32Array(age.length);
+    this.forestAge.set(age);
+    yield;
     // A buffer of its own, since the plug marsh blurs between stages.
-    const blur = this.blur(age, cols, rows, c0, c1, 'forestBlur');
+    const blur = this.blur(this.forestAge, cols, rows, c0, c1, 'forestBlur');
     const [shrub, forest] = [river.get_param('vegetation_time'), river.get_param('forest_time')];
     const w = river.get_param('width');
     const forestData = [];
     for (const [k, { at }] of FOREST.entries()) {
-      yield;
       const age = shrub + at * forest;
       const start = 0.5 * (age + (k ? shrub + FOREST[k - 1].at * forest : 0));
       for (let s = 0; s < FOREST_STEPS; s++) {
+        yield;
         const level = start + (age - start) * (s + 1) / FOREST_STEPS;
-        forestData.push(contourData(blur, cols, rows, cell, c0, c1, level));
+        forestData.push(twin(this.forest[forestData.length], contourData(blur, cols, rows, cell, c0, c1, level)));
       }
     }
     const graze = river.get_param('grazing_time');
-    yield;
-    const farmData = this.farmland.map((_, k) => {
+    const farmData = [];
+    for (let k = 0; k < FIELD_FADE; k++) {
+      yield;
       const level = graze + (shrub - graze) * k / FIELD_FADE;
-      return contourData(blur, cols, rows, cell, c0, c1, level);
-    });
+      farmData.push(twin(this.farmland[k], contourData(blur, cols, rows, cell, c0, c1, level)));
+    }
     yield;
     const treeArgs = [cols, rows, cell, shrub, forest, w, graze];
     const crop = this.cropMask;
     const trees = yield* this.treeStages(blur, ...treeArgs);
     yield;
-    forestData.forEach((d, k) => set(this.forest[k], 'd', d));
-    farmData.forEach((d, k) => set(this.farmland[k], 'd', d));
+    swap(this.forest, forestData);
+    swap(this.farmland, farmData);
     this.setTrees(trees);
     // A crown redraw under way reads `treeBlur`, which changes here.
     this.treeJob = null;
@@ -2832,14 +2916,14 @@ class SvgRenderer {
     }
   }
 
-  // Put path data from `treeStages` on the page.
+  // Put the paths from `treeStages` on the page.
   setTrees(data) {
-    this.treeStrips.forEach(({ paths }, s) => paths.forEach((p, k) => set(p, 'd', data[s][k])));
+    this.treeStrips.forEach(({ paths }, s) => swap(paths, data[s]));
   }
 
   // Size each crown by the blurred growth of the cell under it, a stage
-  // for each strip, and return the path data of the crowns of each strip,
-  // one string for each of its paths, without touching the page.
+  // for each strip, and return twins of each strip's paths with its crowns,
+  // without touching the page.
   *treeStages(blur, cols, rows, cell, shrub, forest, w, farm) {
     const [from, to] = [shrub + FOREST[1].at * forest, shrub + FOREST[2].at * forest];
     const grow = Math.max(1e-6, TREE_GROW * forest);
@@ -2861,7 +2945,7 @@ class SvgRenderer {
         for (const [dx, dy, lr] of c.lobes) d[1 + c.tone].push(circleData(c.x + dx * r, c.y + dy * r, lr * r));
         d[light].push(circleData(c.x - 0.3 * r, c.y - 0.3 * r, 0.45 * r));
       }
-      data.push(d.map((parts) => parts.join('')));
+      data.push(d.map((parts, k) => twin(paths[k], parts.join(''))));
     }
     return data;
   }
