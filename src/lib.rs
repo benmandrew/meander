@@ -599,6 +599,8 @@ pub struct Sim {
     pub mill_version: u64,
     /// The `mill_version` the holdings last read the working mills at.
     land_mills: u64,
+    /// The tributaries' course versions when last handed to `land`.
+    land_streams: u64,
     /// Counts slumps from the valley walls, so a renderer can redraw the
     /// walls after bluff erosion.
     pub wall_version: u64,
@@ -976,6 +978,7 @@ impl Sim {
             mills: Vec::new(),
             mill_version: 0,
             land_mills: u64::MAX,
+            land_streams: u64::MAX,
             wall_version: 0,
             rng: Rng::new(seed),
             events: Rng::new(seed ^ EVENTS_SEED),
@@ -1051,6 +1054,7 @@ impl Sim {
         self.wall_version += 1;
         self.place_tributaries();
         self.land = Land::new(&self.erodibility, seed);
+        self.land_streams = u64::MAX;
         self.read_valley();
         let s = self.land_settings();
         self.land.update(
@@ -1184,6 +1188,12 @@ impl Sim {
         let phase = self.steps % land::SURVEY_STEPS;
         if phase == 0 {
             self.read_valley();
+        }
+        let streams = self.tributaries.iter().map(|t| t.version + 1).sum();
+        if self.land_streams != streams {
+            self.land_streams = streams;
+            let courses = self.tributaries.iter().map(|t| (&t.course[..], t.scale));
+            self.land.set_streams(courses, self.params.width);
         }
         if self.land_mills != self.mill_version {
             self.land_mills = self.mill_version;
@@ -2414,6 +2424,60 @@ mod tests {
                 assert!(sim.cutoffs >= 3, "only {} cutoffs", sim.cutoffs);
             }
         });
+    }
+
+    #[test]
+    fn no_building_stands_across_a_stream() {
+        for seed in [2, 7, 11] {
+            let (checked, segments, houseless) = streams_and_buildings(seed);
+            eprintln!(
+                "seed {seed}: {checked} buildings checked, {segments} stream segments, {houseless} holdings without a house"
+            );
+            assert!(segments > 0 && checked > 0);
+            // A house moves off a stream beside its seat, so streams leave
+            // few holdings without one.
+            assert!(houseless <= 10, "{houseless} holdings without a house");
+        }
+    }
+
+    /// Run seed `seed`, checking right after each survey's weathering that
+    /// no building stands across a stream. Returns the buildings checked,
+    /// the stream segments at the end, and the holdings found without a
+    /// house, summed over the checks.
+    fn streams_and_buildings(seed: u64) -> (usize, usize, usize) {
+        let mut sim = Sim::new(Params::default(), [900.0, 480.0], seed, 0.5);
+        let w = sim.params.width;
+        let (mut checked, mut houseless) = (0, 0);
+        for _ in 0..8000 {
+            sim.step();
+            // Right after a survey's weathering, with the streams as it saw them.
+            if (sim.steps - 1) % land::SURVEY_STEPS != 2 * land::BANDS as u64 {
+                continue;
+            }
+            let across = sim
+                .land
+                .buildings
+                .iter()
+                .filter(|b| sim.land.across_stream(b, w))
+                .count();
+            assert_eq!(
+                across, 0,
+                "{across} buildings across a stream at step {}",
+                sim.steps
+            );
+            checked += sim.land.buildings.len();
+            houseless += (0..sim.land.holdings.len())
+                .filter(|&h| sim.land.holdings[h].is_some())
+                .filter(|&h| {
+                    !sim.land
+                        .buildings
+                        .iter()
+                        .any(|b| b.holding == h as u32 && b.kind == farm::Kind::House)
+                })
+                .count();
+        }
+        let segments = sim.land.streams.iter().map(|r| r.segments.len()).sum();
+        (checked, segments, houseless)
     }
 
     #[test]
