@@ -44,6 +44,17 @@ pub const BUDGET: usize = 128;
 /// Distance from the water, in channel widths, at which flood risk falls
 /// to a half.
 const RISK_LENGTH: f64 = 6.0;
+/// Most that high ground lowers flood risk, as a fraction of the risk
+/// from distance: on ground whose overbank deposit has reached the flood
+/// level, as on a levee crest or an old scroll ridge. Fresh bar sand and
+/// silting lakes lie low and keep the full risk, so farmsteads keep to the
+/// ridges beside the river, as on the stream ridges of the Rhine–Meuse
+/// delta, and leave the low ground to meadow.
+const RIDGE_RELIEF: f64 = 0.6;
+/// Distance from the water, in channel widths, over which the relief of
+/// high ground comes in: the bank itself stays at full risk, since the
+/// channel undercuts it however high it stands.
+const RIDGE_CLEAR: f64 = 1.5;
 /// Distance beyond the valley wall, in channel widths, over which flood
 /// risk falls to 0 on the upland.
 const WALL_FADE: f64 = 2.0;
@@ -92,6 +103,9 @@ pub struct Settings {
     /// Growth at which grass takes a point bar, after which a holding can
     /// take the ground.
     pub grazing_time: f64,
+    /// Flood level above fresh bar sand, in channel depths: the overbank
+    /// deposit at which ground stands clear of all but the highest water.
+    pub levee_height: f64,
 }
 
 pub struct Holding {
@@ -146,7 +160,8 @@ pub struct Land {
     /// holding's farmstead, as of the cell's last search by that holding.
     pub cost: Vec<f32>,
     /// Flood risk of each cell in [0, 1]: 1 at the water's edge, falling
-    /// with distance from the channel and oxbow ground, and 0 on the upland.
+    /// with distance from the channel and oxbow ground and with the height
+    /// of the overbank deposit, and 0 on the upland.
     pub risk: Vec<f32>,
     /// Holdings by index; a dissolved holding leaves its slot empty for the
     /// next to be founded.
@@ -291,7 +306,7 @@ impl Land {
             self.forward(field, s, y0, y1);
         } else if p < 2 * BANDS {
             let (y0, y1) = band(2 * BANDS - 1 - p);
-            self.backward(valley, s, y0, y1);
+            self.backward(field, valley, s, y0, y1);
         } else if p == 2 * BANDS {
             if self.founded {
                 self.tasks.push_back(Task::Accrete);
@@ -366,13 +381,21 @@ impl Land {
         }
     }
 
-    fn backward(&mut self, valley: &[(f64, f64)], s: &Settings, y0: usize, y1: usize) {
+    fn backward(
+        &mut self,
+        field: &Erodibility,
+        valley: &[(f64, f64)],
+        s: &Settings,
+        y0: usize,
+        y1: usize,
+    ) {
         let (cols, rows, c) = (self.cols, self.rows, self.cell);
         let (per_cell, fade, diag) = (
             c / (RISK_LENGTH * s.width),
             WALL_FADE * s.width,
             std::f32::consts::SQRT_2,
         );
+        let (clear, stage) = (c / (RIDGE_CLEAR * s.width), s.levee_height);
         for y in (y0..y1).rev() {
             let wy = (y as f64 + 0.5) * c;
             for x in (0..cols).rev() {
@@ -395,7 +418,13 @@ impl Land {
                 let (lo, hi) = valley[x];
                 let inside = (((wy - lo).min(hi - wy)) / fade + 1.0).clamp(0.0, 1.0);
                 let u = v as f64 * per_cell;
-                self.risk[i] = (inside / (1.0 + u * u)) as f32;
+                let high = if stage > 0.0 {
+                    (field.deposit[i] as f64 / stage).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let relief = RIDGE_RELIEF * high * (v as f64 * clear).min(1.0);
+                self.risk[i] = (inside * (1.0 - relief) / (1.0 + u * u)) as f32;
                 let o = self.owner[i];
                 if o != NONE && !self.open[i] {
                     self.owner[i] = NONE;
@@ -924,6 +953,7 @@ mod tests {
             holding_area: 200.0,
             reorganise_time: 60.0,
             grazing_time: 100.0,
+            levee_height: 0.25,
         }
     }
 
@@ -952,6 +982,33 @@ mod tests {
         for h in land.holdings.iter().flatten() {
             assert!(land.risk[land.index(h.seat)] <= SEAT_RISK);
         }
+    }
+
+    #[test]
+    fn high_ground_lowers_flood_risk_away_from_the_bank() {
+        // Silt to the flood level on the far side of the channel only.
+        let (mut field, line, widths, walls) = valley(30.0);
+        let cols = field.cols;
+        for y in 0..field.rows {
+            if (y as f64 + 0.5) * field.cell > 30.0 {
+                field.deposit[y * cols..(y + 1) * cols].fill(0.25);
+            }
+        }
+        let mut land = Land::new(&field, 1);
+        land.update(&field, &line, &widths, &walls, &settings(0.0));
+        let risk = |y: f64| land.risk[land.index([60.0, y])];
+        for d in [3.0, 6.0, 10.0] {
+            let (low, high) = (risk(30.0 - d), risk(30.0 + d));
+            assert!(
+                high < (1.0 - 0.9 * RIDGE_RELIEF as f32) * low,
+                "{d} widths out: risk {high:.2} on high ground, {low:.2} on low"
+            );
+        }
+        let bank = (risk(29.25), risk(30.75));
+        assert!(
+            (bank.0 - bank.1).abs() < 0.25 * bank.0,
+            "the bank keeps its risk: {bank:?}"
+        );
     }
 
     #[test]

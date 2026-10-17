@@ -1085,6 +1085,7 @@ impl Sim {
             holding_area: p.holding_area,
             reorganise_time: p.reorganise_time,
             grazing_time: p.grazing_time,
+            levee_height: p.levee_height,
         }
     }
 
