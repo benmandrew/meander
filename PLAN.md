@@ -2,7 +2,18 @@
 
 Two pieces of work, in this order. The first removes floods, which change the map in a single step, and puts steady processes in place of the slow work they do. The second gives each holding a farmstead of small buildings that changes with its fields and with the river. The buildings read the ground the floods leave, so the flood work comes first. Every length is in channel widths and every time in units of 2.5 years.
 
-Baseline to measure against (snapshot, `UP=60 DOWN=20`, 24,000 steps, seeds 1–6, all processes on): mean sinuosity after step 6,000 of 1.39, 50 cutoffs, 1 avulsion per 1,600 units. Step time: median 0.132 ms, 99.9% 0.62 ms, max 0.79 ms. Re-run the baseline before starting, since the renderer and loading-screen work has landed since.
+Baseline to measure against, taken on 3ecd506 (snapshot, `UP=60 DOWN=20`, 24,000 steps, seeds 1–6, all processes on):
+
+| Seed | Mean sinuosity after step 6,000 | Cutoffs (by floods) | Floods | Avulsions | Lakes filled, median time | Step time median / 99.9% / max (ms) |
+|---|---|---|---|---|---|---|
+| 1 | 1.323 | 48 (3) | 43 | 2 | 24, 234 | 0.139 / 0.643 / 1.128 |
+| 2 | 1.392 | 39 (6) | 40 | 2 | 27, 325 | 0.138 / 0.628 / 0.827 |
+| 3 | 1.251 | 46 (8) | 33 | 1 | 25, 399 | 0.133 / 0.531 / 0.981 |
+| 4 | 1.493 | 52 (8) | 54 | 2 | 37, 283 | 0.152 / 0.775 / 1.047 |
+| 5 | 1.273 | 41 (5) | 46 | 3 | 25, 279 | 0.136 / 0.683 / 1.440 |
+| 6 | 1.414 | 52 (11) | 58 | 0 | 36, 295 | 0.147 / 0.766 / 1.397 |
+
+Across the six seeds: mean sinuosity 1.358, 278 cutoffs of which floods made 41 (15%), 10 avulsions in 14,400 units. Each row comes from `UP=60 DOWN=20 cargo run --release -p meander-core --example snapshot -- <out_dir> 24000 2000 <seed>`: the sinuosity column of the `step` lines past 6,000, and the counts on the last one.
 
 ## 1 Remove floods
 
@@ -33,7 +44,7 @@ Parameters: `flood_rate` splits into `scroll_time`, the deposit rate (given per 
 
 Retuning:
 
-- Floods made 13 of 70 cutoffs in the old baseline, so sinuosity will rise. If it leaves the range the bounded-sinuosity test allows, lower `cutoff_dist`, and do not loosen the test.
+- Floods made 41 of 278 cutoffs in the baseline, so sinuosity will rise. If it leaves the range the bounded-sinuosity test allows, lower `cutoff_dist`, and do not loosen the test.
 - `vegetation_time` was tuned with scour stripping young shrub. Check that a median bar still binds in about `vegetation_time` (250 years).
 - Check that lakes still fill over about `oxbow_lifetime` without the flood silt.
 
@@ -41,7 +52,7 @@ Tests: delete the tests that pin flood behaviour (`floods_cut_off_earlier_and_ne
 
 Docs: remove floods, splays and avulsion from `docs/architecture.md` (the erodibility, lakes, scroll bar and floodplain process sections) and from the `CLAUDE.md` module list. `crevasse.rs` goes.
 
-- [ ] re-run the baseline
+- [x] re-run the baseline
 - [ ] steady deposit, timed
 - [ ] scroll bars and stream shifts as Poisson processes
 - [ ] remove the sudden effects and their parameters
