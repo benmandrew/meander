@@ -13,7 +13,7 @@ The Nix flake supplies every tool (`direnv allow` once, or `nix develop`). The s
 - The pre-commit hook in `.githooks/` runs `cargo fmt --check` and `cargo clippy -- -D warnings` on a copy of the index, so only staged changes count. The dev shell sets `core.hooksPath` to enable it.
 - `nix build .#web-dist`: build the deployable site into `result/`, without `wasm-pack`.
 - `make build`: build the WASM package into `web/pkg`.
-- `make serve`: build, then serve `web/` at http://localhost:8000. `?warmup=T` overrides the warm-up in simulated time.
+- `make serve`: build, then serve `web/` at http://localhost:8000 through `serve.py`, which turns caching off (`Cache-Control: no-store`). This is for development only; a deployment must set its own caching headers. `?warmup=T` overrides the warm-up in simulated time.
 - `make test`: `cargo test --release -p meander-core`. Tests run long simulations, so always use `--release`. One test: `cargo test --release -p meander-core <test_name>`.
 - Snapshots for tuning: `cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]`. Override any parameter with its upper-case name as an env var (`ALPHA=0.8`); `UP` and `DOWN` set hidden reach lengths in widths. It also prints step-time percentiles.
 
