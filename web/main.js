@@ -1387,9 +1387,17 @@ class SvgRenderer {
     // Path element of each ridge drawn, by band and path data.
     this.ridges = new Map();
     this.scrollAt = null;
-    // The farmsteads lie over the fields and scroll bars and under the
-    // trees, so crowns overhang the buildings: yards, then mounds, the
-    // platforms of ruins, and the roofs with their ridges.
+    // Ground the channel has swept since the shrub, forest and fields were
+    // last contoured, as its centrelines in the newest band's sand, over
+    // them and the scroll bars. Without it, ground the channel crosses and
+    // leaves within one redraw shows the vegetation that stood there before
+    // until the next redraw. It lies under the farmsteads, which are
+    // redrawn whenever the water takes a building, and under the crowns, so
+    // a crown on newly swept ground stands until the next forest redraw.
+    this.sweptLayer = el('g', line, ground);
+    // The farmsteads lie over the fields, scroll bars and swept ground and
+    // under the trees, so crowns overhang the buildings: yards, then
+    // mounds, the platforms of ruins, and the roofs with their ridges.
     const farms = el('g', { 'stroke-linejoin': 'round' }, ground);
     this.yards = el('path', { fill: `rgb(${YARD_EARTH})`, 'fill-opacity': 0.55 }, farms);
     this.mounds = el('path', { fill: `rgb(${MOUND})`, 'fill-opacity': 0.5 }, farms);
@@ -1408,12 +1416,6 @@ class SvgRenderer {
       el('g', { fill: `rgb(${TREE_LIGHT})`, 'fill-opacity': 0.4 }, this.treeLayer),
     ];
     this.treeStrips = [];
-    // Ground the channel has swept since the shrub, forest, fields and
-    // crowns were last contoured, as its centrelines in the newest band's
-    // sand, over all of them. Without it, ground the channel crosses and
-    // leaves within one redraw shows the vegetation that stood there before
-    // until the next redraw.
-    this.sweptLayer = el('g', line, ground);
     // Natural levees: nested translucent silt regions, higher ground inside.
     this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
     this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));

@@ -92,7 +92,7 @@ Seeded soil patches are drawn as vector blobs typed by the erodibility noise. Fi
 
 Coarse ground is contoured as a gravel tint and a pebble pattern every 50 years.
 
-The farmsteads lie over the fields, oxbow scars and scroll bars and under the tree crowns, which overhang them, and under the translucent levee silt and plug marsh. Each standing building is a tiled or thatched roof at its core footprint with a ridge line (an outshut has none), on an elliptical mound where the core raised one, and each farmstead's yard is the rounded hull of its buildings but its field barn, in trodden earth. A ruin is a dashed house platform fading over its 150 years. They are redrawn when `building_version` changes, and at least every 50 years.
+The farmsteads lie over the fields, oxbow scars, scroll bars and the swept sand of the newest bar band, and under the tree crowns, which overhang them, and under the translucent levee silt and plug marsh. Each standing building is a tiled or thatched roof at its core footprint with a ridge line (an outshut has none), on an elliptical mound where the core raised one, and each farmstead's yard is the rounded hull of its buildings but its field barn, in trodden earth. A ruin is a dashed house platform fading over its 150 years. They are redrawn when `building_version` changes, and at least every 50 years.
 
 ### Valley walls
 
