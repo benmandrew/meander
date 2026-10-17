@@ -140,6 +140,13 @@ pub struct Params {
     /// avulsion takes up an abandoned channel. A lake filled past
     /// [`CAPTURE_FILL`] resists. 0 disables.
     pub capture_ratio: f64,
+    /// Chance per unit time that flood water cuts a *chute* across the
+    /// bare point bar of a long bend, as a channel through a swale, and
+    /// abandons the bend as an oxbow, at a sediment supply of 1. Clearance
+    /// raises it with the supply, as sediment-laden floods build bars and
+    /// cut chutes. Bars that vegetation has bound do not cut; see
+    /// [`Sim::chute`]. 0 disables.
+    pub chute_rate: f64,
     /// Overbank deposit laid at the bank per unit time, in channel depths,
     /// before it thins towards the flood level: the mean of what the
     /// river's floods lay, spread evenly over time. 0 disables.
@@ -289,6 +296,7 @@ impl Default for Params {
             shrub_factor: SHRUB_FACTOR,
             forest_time: FOREST_TIME,
             capture_ratio: CAPTURE_RATIO,
+            chute_rate: CHUTE_RATE,
             overbank_rate: OVERBANK_RATE,
             levee_length: LEVEE_LENGTH,
             levee_height: LEVEE_HEIGHT,
@@ -362,6 +370,7 @@ impl Params {
         "shrub_factor",
         "forest_time",
         "capture_ratio",
+        "chute_rate",
         "overbank_rate",
         "levee_length",
         "levee_height",
@@ -431,6 +440,7 @@ impl Params {
             "shrub_factor" => &mut self.shrub_factor,
             "forest_time" => &mut self.forest_time,
             "capture_ratio" => &mut self.capture_ratio,
+            "chute_rate" => &mut self.chute_rate,
             "overbank_rate" => &mut self.overbank_rate,
             "levee_length" => &mut self.levee_length,
             "levee_height" => &mut self.levee_height,
@@ -591,6 +601,10 @@ pub struct Sim {
     pub cutoffs: u64,
     /// Oxbow lakes the channel has taken up (included in `cutoffs`).
     pub captures: u64,
+    /// Chute cutoffs (included in `cutoffs`).
+    pub chutes: u64,
+    /// The next point the chute scan starts from.
+    chute_at: usize,
     /// Jams of large wood against the banks.
     pub jams: Vec<Jam>,
     /// Tributaries entering from the deeper combes, with their fans.
@@ -771,6 +785,17 @@ const GRAZING_TIME: f64 = 20.0;
 /// Under partible inheritance an heir often built beside the parent's
 /// farmstead, so about half of all divisions make a hamlet.
 const HAMLET_CHANCE: f64 = 0.5;
+
+/// Default chute cutoffs; see [`Params::chute_rate`]. A chute runs
+/// between two points of the channel from `CHUTE_CHORD.0` to
+/// `CHUTE_CHORD.1` widths apart, across a bend at least `CHUTE_RATIO` times
+/// as long as the chute and at most `CHUTE_ARC` widths long. The scan
+/// covers `CHUTE_SCAN` points a step.
+const CHUTE_RATE: f64 = 0.005;
+const CHUTE_CHORD: (f64, f64) = (1.5, 5.0);
+const CHUTE_RATIO: f64 = 3.0;
+const CHUTE_ARC: f64 = 40.0;
+const CHUTE_SCAN: usize = 8;
 
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
@@ -992,6 +1017,8 @@ impl Sim {
             steps: 0,
             cutoffs: 0,
             captures: 0,
+            chutes: 0,
+            chute_at: 0,
             jams: Vec::new(),
             tributaries: Vec::new(),
             mills: Vec::new(),
@@ -1069,6 +1096,7 @@ impl Sim {
         self.steps = 0;
         self.cutoffs = 0;
         self.captures = 0;
+        (self.chutes, self.chute_at) = (0, 0);
         self.jams.clear();
         self.mills.clear();
         self.boundary.clear();
@@ -1176,6 +1204,10 @@ impl Sim {
             self.track();
         }
         if self.capture() {
+            self.resample(ds);
+            self.track();
+        }
+        if self.chute() {
             self.resample(ds);
             self.track();
         }
@@ -1866,6 +1898,93 @@ impl Sim {
             return true;
         }
         false
+    }
+
+    /// Scan the next [`CHUTE_SCAN`] points for a chute. From each point
+    /// `i`, the bend to take is the point `j` downstream whose chord from
+    /// `i` is between the [`CHUTE_CHORD`] lengths, with the bend between
+    /// them at least [`CHUTE_RATIO`] times as long, and the longest bend
+    /// for its chord. The flood cuts it with chance `chute_rate` times the
+    /// share of the chord's ground that is bare bar and the sediment supply,
+    /// over the time since
+    /// the scan last passed: bare at growth 0, bound at `vegetation_time`.
+    /// The chute must not cross the channel elsewhere or turn sharply at
+    /// its ends, and the bend becomes an oxbow, as at a capture. Returns
+    /// whether a chute was cut.
+    fn chute(&mut self) -> bool {
+        let p = &self.params;
+        let n = self.centerline.len();
+        let k_sep = p.cutoff_min_sep;
+        if p.chute_rate <= 0.0 || n < k_sep + 2 {
+            return false;
+        }
+        let (w, ds) = (p.width, self.ds());
+        let (lo, hi) = (CHUTE_CHORD.0 * w, CHUTE_CHORD.1 * w);
+        let reach = (CHUTE_ARC * w / ds) as usize;
+        let span = p.dt * n.div_ceil(CHUTE_SCAN) as f64;
+        let (rate, bound) = (
+            p.chute_rate * self.supply(),
+            p.vegetation_time.max(1e-9) as f32,
+        );
+        let from = self.chute_at.min(n);
+        self.chute_at = if from + CHUTE_SCAN >= n {
+            0
+        } else {
+            from + CHUTE_SCAN
+        };
+        let pts = &self.centerline;
+        for i in (from..(from + CHUTE_SCAN).min(n)).filter(|&i| i > 0) {
+            let mut best: Option<(f64, usize)> = None;
+            for j in i + k_sep..(i + reach).min(n - 1) {
+                let d = dist(pts[i], pts[j]);
+                let r = (j - i) as f64 * ds / d.max(1e-9);
+                if (lo..=hi).contains(&d) && r >= CHUTE_RATIO && best.is_none_or(|b| r > b.0) {
+                    best = Some((r, j));
+                }
+            }
+            let Some((_, j)) = best else { continue };
+            let route = self.chute_route(i, j);
+            let field = &self.erodibility;
+            let bare = route
+                .iter()
+                .map(|&q| 1.0 - (field.growth[field.cell_index(q)] / bound).clamp(0.0, 1.0))
+                .sum::<f32>() as f64
+                / route.len() as f64;
+            if bare <= 0.0
+                || self.near_recent(pts[i])
+                || self.near_recent(pts[j])
+                || self.route_turns_sharply(i, j, &route)
+                || self.route_crosses(i, j, &route)
+                || self.events.uniform() >= 1.0 - (-rate * bare * span).exp()
+            {
+                continue;
+            }
+            let (wi, wj) = (self.widths[i], self.widths[j]);
+            let m = route.len() - 1;
+            let widths: Vec<f64> = (0..=m)
+                .map(|k| wi + (wj - wi) * k as f64 / m as f64)
+                .collect();
+            let old = self.centerline[i..=j].to_vec();
+            let old_widths = self.widths[i..=j].to_vec();
+            self.centerline
+                .splice(i + 1..j, route[1..m].iter().copied());
+            self.widths.splice(i + 1..j, widths[1..m].iter().copied());
+            self.line_version += 1;
+            self.abandon(old, old_widths, route[1.min(m)]);
+            self.chutes += 1;
+            return true;
+        }
+        false
+    }
+
+    /// The straight chute from point `i` to point `j`, at the point
+    /// spacing.
+    fn chute_route(&self, i: usize, j: usize) -> Vec<P> {
+        let (a, b) = (self.centerline[i], self.centerline[j]);
+        let m = ((dist(a, b) / self.ds()).ceil() as usize).max(1);
+        (0..=m)
+            .map(|k| geom::lerp(a, b, k as f64 / m as f64))
+            .collect()
     }
 
     /// The new channel from A to B through oxbow `oi`: A, the lake points
@@ -3288,6 +3407,42 @@ mod tests {
         let lake: Vec<P> = (0..=30).map(|k| at(105.5 + 0.5 * k as f64, -0.5)).collect();
         sim.oxbows.push(Oxbow::lake(lake, vec![1.0; 31], 0.0, 0.0));
         sim
+    }
+
+    #[test]
+    fn floods_cut_chutes_across_bare_bars_only() {
+        // A bend 12 widths high and 4 across at its mouth, on bare sand or
+        // on forest.
+        let bend = |bare: bool| {
+            let mut sim = sine_sim(0.0, 40.0);
+            sim.params.chute_rate = 1e3;
+            let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
+            let at = |x: f64, y: f64| [x * w, mid + y * w];
+            let mut pts: Vec<P> = (0..=200).map(|k| at(0.5 * k as f64, 0.0)).collect();
+            pts.extend((1..=24).map(|k| at(100.0, 0.5 * k as f64)));
+            pts.extend((1..=8).map(|k| at(100.0 + 0.5 * k as f64, 12.0)));
+            pts.extend((1..=24).map(|k| at(104.0, 12.0 - 0.5 * k as f64)));
+            pts.extend((1..=200).map(|k| at(104.0 + 0.5 * k as f64, 0.0)));
+            sim.centerline = pts;
+            sim.widths = vec![1.0; sim.centerline.len()];
+            sim.line_version += 1;
+            sim.erodibility
+                .growth
+                .fill(if bare { 0.0 } else { f32::INFINITY });
+            let cut = (0..sim.centerline.len()).any(|_| sim.chute());
+            (sim, cut)
+        };
+        let (sim, cut) = bend(true);
+        assert!(cut && sim.chutes == 1 && sim.cutoffs == 1);
+        let w = sim.params.width;
+        let top = sim.bounds[1] / 2.0 + 6.0 * w;
+        assert!(
+            sim.centerline.iter().all(|q| q[1] < top),
+            "the bend is cut off"
+        );
+        assert!(sim.oxbows[0].points.iter().any(|q| q[1] > top));
+        assert!(!geom::self_intersects(&sim.centerline));
+        assert!(!bend(false).1, "no chute across forest");
     }
 
     #[test]

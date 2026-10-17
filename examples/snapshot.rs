@@ -217,10 +217,11 @@ fn main() {
                 .fold(0.0f64, f64::max)
         };
         println!(
-            "        supply {:4.2}  jams {:2}  captures {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {} ({} into lakes)  tracks {} fords {} (versions {} {})",
+            "        supply {:4.2}  jams {:2}  captures {:3}  chutes {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {} ({} into lakes)  tracks {} fords {} (versions {} {})",
             sim.supply(),
             sim.jams.len(),
             sim.captures,
+            sim.chutes,
             sim.mills.iter().filter(|m| m.working()).count(),
             sim.mills.len(),
             sim.scrolls.len(),
