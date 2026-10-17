@@ -1665,8 +1665,9 @@ class SvgRenderer {
   }
 
   // The stages of a field redraw, which yield whenever the call's
-  // `until` has passed. The page is written only in the last stage, so
-  // no frame shows half a redraw.
+  // `until` has passed. The outlines are set on twins of the field paths
+  // as they are chained, and the page is written only in the last stage,
+  // so no frame shows half a redraw.
   *fieldStages(river, memory) {
     const due = () => performance.now() > this.until;
     river.sync_holdings();
@@ -1810,21 +1811,28 @@ class SvgRenderer {
         }
         if (ring.length >= 6) d += pointsData(ring) + 'Z';
       }
-      drawn.push([fields[f - 1], d]);
+      const field = fields[f - 1];
+      drawn.push([field, twin(this.fieldPaths.get(field.key) ?? el('path', {}), d)]);
     }
+    const hedges = twin(this.hedges, hedgeData);
+    // The writes alone in the last stage, which a call's chaining would
+    // otherwise run into.
+    yield;
     const kept = new Map();
-    for (const [field, d] of drawn) {
-      const path = this.fieldPaths.get(field.key) ?? el('path', {}, this.parcels);
+    for (const [field, path] of drawn) {
+      const old = this.fieldPaths.get(field.key);
       this.fieldPaths.delete(field.key);
+      if (!old) this.parcels.append(path);
+      else if (old !== path) old.replaceWith(path);
       kept.set(field.key, path);
-      set(path, 'd', d);
       set(path, 'fill', `rgb(${field.colour})`);
       set(path, 'fill-opacity', field.opacity);
     }
     for (const path of this.fieldPaths.values()) path.remove();
     this.meadow = meadowNow;
     this.fieldPaths = kept;
-    set(this.hedges, 'd', hedgeData);
+    if (hedges !== this.hedges) this.hedges.replaceWith(hedges);
+    this.hedges = hedges;
     set(this.hedges, 'stroke-width', dp1(HEDGE_WIDTH * w));
     this.cropMask = { mask, c0, W };
     this.treesStale = true;
