@@ -2514,8 +2514,9 @@ class SvgRenderer {
   }
 
   // Carry on with work spread over frames, on a frame that draws nothing.
+  // Returns whether there was any.
   idle(river, memory, { local }) {
-    this.drawFloodplain(river, memory, local, FLOODPLAIN_IDLE_BUDGET);
+    return this.drawFloodplain(river, memory, local, FLOODPLAIN_IDLE_BUDGET);
   }
 
   // Bring the floodplain up to date in one call, when the river stops. A
