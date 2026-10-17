@@ -16,7 +16,7 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy and `make test`'s tests in the 
 
 ## Make targets
 
-- `make build`: build the WASM package into `web/pkg`.
+- `make build`: build the WASM package into `web/pkg`, and `web/favicon.ico` from `web/favicon.svg`.
 - `make serve`: build, then serve `web/` at http://localhost:8000 through `serve.py`, which turns caching off (`Cache-Control: no-store`). This is for development only; a deployment must set its own caching headers.
 - `make smoke`: build, then load the page in headless Chrome (`test/smoke.py`, through Playwright) for 20 units of warm-up and 8 s of running. It fails on any page or console error, or if the channel in `#view` stops being redrawn. It drives the installed Google Chrome; set `PLAYWRIGHT_BROWSERS_PATH` to use Playwright's own Chromium instead.
 - `make test`: `cargo test --release -p meander-core`. Tests run long simulations, hence `--release`.

@@ -62,6 +62,7 @@
               fileset = pkgs.lib.fileset.unions [
                 ./Cargo.toml
                 ./Cargo.lock
+                ./Makefile
                 ./src
                 ./examples
                 ./wasm
@@ -72,9 +73,12 @@
             nativeBuildInputs = [
               (wasmBindgenCli pkgs)
               pkgs.binaryen
+              pkgs.librsvg
+              pkgs.imagemagick
             ];
             buildPhase = ''
               runHook preBuild
+              make web/favicon.ico
               cargo build --release --frozen -p meander-wasm \
                 --target wasm32-unknown-unknown --target-dir target
               wasm-bindgen --target web --out-dir pkg \
@@ -86,7 +90,7 @@
             installPhase = ''
               runHook preInstall
               mkdir -p $out
-              cp web/index.html web/style.css web/favicon.svg web/*.js $out/
+              cp web/index.html web/style.css web/favicon.svg web/favicon.ico web/*.js $out/
               cp -r web/fonts $out/fonts
               cp -r pkg $out/pkg
               runHook postInstall
@@ -112,6 +116,9 @@
             pkgs.wasm-pack
             pkgs.binaryen
             pkgs.gnumake
+            # Rasterise and pack web/favicon.ico.
+            pkgs.librsvg
+            pkgs.imagemagick
             # Playwright drives the installed Chrome for `make smoke`.
             (pkgs.python3.withPackages (ps: [ ps.playwright ]))
           ];
