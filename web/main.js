@@ -308,6 +308,10 @@ const SHALLOW = [96, 154, 182];
 const MID_BAR_FROM = 1.5;
 const MID_BAR_FULL = 1.8;
 const MID_BAR = 0.4;
+// Riffles and mid-channel bars follow the smoothed bends and widths, which
+// change slowly, so each redraws once every `DEPTH_EVERY` draws, the two in
+// different draws.
+const DEPTH_EVERY = 3;
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -627,11 +631,11 @@ function bandRuns(pts, frame, a, b, [from, to]) {
 }
 
 // Pools, riffles and mid-channel bars, as lists of path data: one list per
-// pool level, then riffles, then bars. `bend` is the smoothed signed
-// curvature, `widths` the local width in world units, `w` the reference
-// width. Only the points `shown` are drawn, though the bends and widths
-// are read along the whole river.
-function channelDepth(pts, widths, frame, bend, w, shown) {
+// pool level, then riffles, then bars, or null for riffles or bars not
+// asked for. `bend` is the smoothed signed curvature, `widths` the local
+// width in world units, `w` the reference width. Only the points `shown`
+// are drawn, though the bends and widths are read along the whole river.
+function channelDepth(pts, widths, frame, bend, w, shown, riffles, bars) {
   const n = bend.length;
   const lag = Math.round(POOL_LAG / SPACING);
   const pools = POOL_LEVELS.map((level) => {
@@ -647,6 +651,13 @@ function channelDepth(pts, widths, frame, bend, w, shown) {
     }
     return bandRuns(pts, frame, a, b, shown);
   });
+  return [...pools, riffles ? riffleRuns(pts, widths, frame, bend, w, shown) : null,
+    bars ? midBarRuns(pts, widths, frame, w, shown) : null];
+}
+
+// Riffles over the points `shown`, as `channelDepth` draws them.
+function riffleRuns(pts, widths, frame, bend, w, shown) {
+  const n = bend.length;
   // Strength of the riffle at each point: the weaker of the strongest
   // bends of opposite sign upstream and downstream, ramped about
   // `RIFFLE_RADIUS`, where the curvature here is small beside it.
@@ -668,15 +679,20 @@ function channelDepth(pts, widths, frame, bend, w, shown) {
     const h = 0.5 * RIFFLE_WIDTH * widths[i] * riffle[i];
     [ra[i], rb[i]] = [h, -h];
   }
-  // Mid-channel bars, on the width smoothed so they grow and shrink
-  // slowly.
+  return bandRuns(pts, frame, ra, rb, shown);
+}
+
+// Mid-channel bars over the points `shown`, on the width smoothed so they
+// grow and shrink slowly.
+function midBarRuns(pts, widths, frame, w, shown) {
+  const n = widths.length;
   const wide = smoothed(widths);
   const ba = new Float64Array(n), bb = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const h = 0.5 * MID_BAR * wide[i] * smoothstep((wide[i] / w - MID_BAR_FROM) / (MID_BAR_FULL - MID_BAR_FROM));
     [ba[i], bb[i]] = [h, -h];
   }
-  return [...pools, bandRuns(pts, frame, ra, rb, shown), bandRuns(pts, frame, ba, bb, shown)];
+  return bandRuns(pts, frame, ba, bb, shown);
 }
 
 // Path data for points [start, end) of a flat x, y array.
@@ -1634,8 +1650,10 @@ class SvgRenderer {
     // each floodplain layer fell due, if it waits.
     [this.plugShown, this.fieldsShown, this.forestShown] = [null, null, null];
     this.dueSince = [];
-    // The first draw after a reset draws the floodplain whole.
+    // The first draw after a reset draws the floodplain and the channel
+    // whole.
     this.fresh = true;
+    this.draws = 0;
     this.scrollAt = null;
     this.fieldsAt = null;
     this.fieldJob = null;
@@ -2201,7 +2219,12 @@ class SvgRenderer {
     resize(this.waterRuns, waterRuns.length, this.water);
     bankRuns.forEach((d, k) => set(this.bankRuns[k], 'd', d));
     waterRuns.forEach((d, k) => set(this.waterRuns[k], 'd', d));
-    channelDepth(line, widths, frame, bend, w, shown).forEach((runs, m) => {
+    // Both riffles and bars on the first draw after a reset, and on a
+    // paused river, which draws once as it stands.
+    const due = this.draws++ % DEPTH_EVERY, whole = this.draws === 1 || at === Infinity;
+    const depth = channelDepth(line, widths, frame, bend, w, shown, whole || due === 0, whole || due === 1);
+    depth.forEach((runs, m) => {
+      if (!runs) return;
       const { g, paths } = this.depth[m];
       resize(paths, runs.length, g);
       runs.forEach((d, k) => set(paths[k], 'd', d));
