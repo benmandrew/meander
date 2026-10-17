@@ -1458,11 +1458,13 @@ class SvgRenderer {
     this.splayShapes = new Map();
     this.millsAt = null;
     this.wallsAt = { key: river.wall_version(), t: river.time() };
+    this.wallJob = null;
     this.drawPebbles(river.get_param('width'), seed);
     this.plugAt = null;
     this.plugJob = null;
     this.forestAt = null;
     this.forestJob = null;
+    this.treeJob = null;
     // The simulated time each staged layer's picture shows, and the time
     // each floodplain layer fell due, if it waits.
     [this.plugShown, this.fieldsShown, this.forestShown] = [null, null, null];
@@ -1576,7 +1578,8 @@ class SvgRenderer {
     }
     // Land use by mean flood risk, and whether crowns stand in the field.
     const meadowNow = new Map();
-    for (const f of fields) {
+    for (const [k, f] of fields.entries()) {
+      if (k % 64 === 0 && due()) yield;
       f.risk /= Math.max(1, f.cells);
       const u = hash01(f.key, 7);
       f.woods = u < WOODLAND;
@@ -1589,6 +1592,7 @@ class SvgRenderer {
     }
     const mask = new Uint8Array(W * rows);
     for (let n = 0; n < lab.length; n++) {
+      if (n % W === 0 && due()) yield;
       mask[n] = lab[n] > 0 && !fields[lab[n] - 1].woods
         && this.scarpAt((c0 + n % W + 0.5) * cell, (Math.floor(n / W) + 0.5) * cell) !== 2;
     }
@@ -1667,12 +1671,24 @@ class SvgRenderer {
   // valley at the window edges to keep bends off them; the walls are drawn
   // at its full width, so that device does not show.
   drawWalls(river, x0, vw, h, seed) {
-    this.uplandLayer.replaceChildren();
-    this.scarpLayer.replaceChildren();
-    this.wallLines = null;
-    set(this.scarpMask, 'd', '');
+    const job = this.wallStages(river, x0, vw, h, seed);
+    while (!job.next().done);
+  }
+
+  // The stages of a wall redraw (see `drawWalls`): each side's lines, then
+  // its hachures a row at a time. The page and `wallLines`, which the
+  // fields read, change only in the last stage.
+  *wallStages(river, x0, vw, h, seed) {
     const w = river.get_param('width'), valley = river.get_param('valley_width') * w;
-    if (!(valley > 0 && valley < h)) return;
+    if (!(valley > 0 && valley < h)) {
+      this.uplandLayer.replaceChildren();
+      this.scarpLayer.replaceChildren();
+      this.wallLines = null;
+      set(this.scarpMask, 'd', '');
+      return;
+    }
+    // Each path as its layer and attributes, put on the page at the end.
+    const paths = [];
     const rand = random(seed ^ 0xba1e);
     const step = 0.5 * w, n = Math.ceil(vw / step) + 1;
     const between = ([a, b], u) => a + (b - a) * u;
@@ -1714,7 +1730,7 @@ class SvgRenderer {
       const point = (k, d) => `${dp1(x0 + Math.min(k * step, vw))} ${y(d)}`;
       const trace = (line, offset = 0) => Array.from(line, (d, k) => point(k, d + offset)).join(' ');
       const rim = side < 0 ? 0 : h;
-      el('path', { d: `M${dp1(x0)} ${rim} L${trace(foot)} L${dp1(x0 + vw)} ${rim}Z` }, this.uplandLayer);
+      paths.push([this.uplandLayer, { d: `M${dp1(x0)} ${rim} L${trace(foot)} L${dp1(x0 + vw)} ${rim}Z` }]);
       // Hanger woods, each tapering to a point at its ends, tinted like the
       // woods among the fields, which they hide.
       let woods = '';
@@ -1732,7 +1748,7 @@ class SvgRenderer {
         woods += d + 'Z';
       }
       maskData += woods;
-      el('path', { d: woods, fill: `rgb(${FOREST.at(-1).colour})`, 'fill-opacity': WOODS_OPACITY }, this.scarpLayer);
+      paths.push([this.scarpLayer, { d: woods, fill: `rgb(${FOREST.at(-1).colour})`, 'fill-opacity': WOODS_OPACITY }]);
       const lit = side > 0;
       // Hachures, sorted into three weights by steepness.
       const strokes = [[], [], []];
@@ -1743,6 +1759,7 @@ class SvgRenderer {
       const frac = (x, d) => (d - at(brow, x)) / (at(foot, x) - at(brow, x));
       const gap = HACHURE_GAP * w, e = 0.25 * w;
       for (const row of [0, 1]) {
+        yield;
         for (let x = x0 + (0.5 * row + rand() * 0.3) * gap; x < x0 + vw; x += gap * (0.85 + 0.3 * rand())) {
           const s0 = 0.5 * row + 0.03 + 0.06 * rand(), s1 = 0.5 * row + 0.41 + 0.06 * rand();
           let px = x, pd = at(brow, x) + s0 * (at(foot, x) - at(brow, x));
@@ -1762,13 +1779,16 @@ class SvgRenderer {
           strokes[weight].push(d);
         }
       }
-      strokes.forEach((list, k) => el('path', {
+      strokes.forEach((list, k) => paths.push([this.scarpLayer, {
         d: list.join(''), fill: 'none', 'stroke-linecap': 'round',
         stroke: `rgb(${SCARP_SHADE})`,
         'stroke-width': dp1(HACHURE_WIDTH * w * (0.6 + 0.4 * k)),
         'stroke-opacity': lit ? 0.38 : 0.5,
-      }, this.scarpLayer));
+      }]));
     }
+    this.uplandLayer.replaceChildren();
+    this.scarpLayer.replaceChildren();
+    for (const [layer, attrs] of paths) el('path', attrs, layer);
     set(this.scarpMask, 'd', maskData);
     this.wallLines = { x0, step, n, h, w, sides };
   }
@@ -2194,9 +2214,14 @@ class SvgRenderer {
   // Redraw the valley walls after their bluffs have slumped, at most every
   // `WALL_REFRESH` of simulated time.
   redrawWalls(river) {
-    this.wallsAt = { key: river.wall_version(), t: river.time() };
-    const [x, vw] = this.window;
-    this.drawWalls(river, x, vw, this.size[1], this.seed);
+    if (!this.wallJob) {
+      this.wallsAt = { key: river.wall_version(), t: river.time() };
+      const [x, vw] = this.window;
+      this.wallJob = this.wallStages(river, x, vw, this.size[1], this.seed);
+    }
+    do {
+      if (this.wallJob.next().done) this.wallJob = null;
+    } while (this.wallJob && performance.now() <= this.until);
   }
 
   // The floodplain layers. Each has the simulated time its picture shows,
@@ -2248,7 +2273,7 @@ class SvgRenderer {
       },
       {
         shown: this.wallsAt?.t,
-        due: () => isDue(this.wallsAt, river.wall_version(), t, WALL_REFRESH, true),
+        due: () => this.wallJob || isDue(this.wallsAt, river.wall_version(), t, WALL_REFRESH, true),
         run: () => this.redrawWalls(river),
       },
     ];
@@ -2405,11 +2430,14 @@ class SvgRenderer {
     });
     yield;
     const treeArgs = [cols, rows, cell, shrub, forest, w, graze];
-    const [trees, crop] = [this.treeData(blur, ...treeArgs), this.cropMask];
+    const crop = this.cropMask;
+    const trees = yield* this.treeStages(blur, ...treeArgs);
     yield;
     forestData.forEach((d, k) => set(this.forest[k], 'd', d));
     farmData.forEach((d, k) => set(this.farmland[k], 'd', d));
     this.setTrees(trees);
+    // A crown redraw under way reads `treeBlur`, which changes here.
+    this.treeJob = null;
     if (this.treeBlur?.length !== blur.length) this.treeBlur = new Float32Array(blur.length);
     this.treeBlur.set(blur);
     this.treeArgs = treeArgs;
@@ -2427,10 +2455,20 @@ class SvgRenderer {
   }
 
   // Redraw the crowns from the last forest redraw's growth, after new
-  // fields change which crowns stand in crops.
+  // fields change which crowns stand in crops, a strip at a time while the
+  // call's `until` has not passed.
   redrawTrees() {
-    this.drawTrees(this.treeBlur, ...this.treeArgs);
-    this.treesStale = false;
+    if (!this.treeJob) {
+      this.treeJob = this.treeStages(this.treeBlur, ...this.treeArgs);
+      this.treeCrop = this.cropMask;
+    }
+    let step;
+    do step = this.treeJob.next(); while (!step.done && performance.now() <= this.until);
+    if (!step.done) return;
+    this.treeJob = null;
+    this.setTrees(step.value);
+    // Fields finished while the crowns were sized leave them stale still.
+    if (this.cropMask === this.treeCrop) this.treesStale = false;
   }
 
   // Carry on with work spread over frames, on a frame that draws nothing.
@@ -2474,25 +2512,22 @@ class SvgRenderer {
     }
   }
 
-  // Size each crown by the blurred growth of the cell under it, and
-  // rebuild the paths of each strip.
-  drawTrees(...args) {
-    this.setTrees(this.treeData(...args));
-  }
-
-  // Put path data from `treeData` on the page.
+  // Put path data from `treeStages` on the page.
   setTrees(data) {
     this.treeStrips.forEach(({ paths }, s) => paths.forEach((p, k) => set(p, 'd', data[s][k])));
   }
 
-  // Path data of the crowns of each strip, one string for each of its
-  // paths, without touching the page.
-  treeData(blur, cols, rows, cell, shrub, forest, w, farm) {
+  // Size each crown by the blurred growth of the cell under it, a stage
+  // for each strip, and return the path data of the crowns of each strip,
+  // one string for each of its paths, without touching the page.
+  *treeStages(blur, cols, rows, cell, shrub, forest, w, farm) {
     const [from, to] = [shrub + FOREST[1].at * forest, shrub + FOREST[2].at * forest];
     const grow = Math.max(1e-6, TREE_GROW * forest);
     const light = this.treeKinds.length - 1;
     const crop = this.cropMask;
-    return this.treeStrips.map(({ crowns, paths }) => {
+    const data = [];
+    for (const { crowns, paths } of this.treeStrips) {
+      if (data.length) yield;
       const d = paths.map(() => []);
       for (const c of crowns) {
         const i = Math.floor(c.x / cell), j = Math.floor(c.y / cell);
@@ -2506,8 +2541,9 @@ class SvgRenderer {
         for (const [dx, dy, lr] of c.lobes) d[1 + c.tone].push(circleData(c.x + dx * r, c.y + dy * r, lr * r));
         d[light].push(circleData(c.x - 0.3 * r, c.y - 0.3 * r, 0.45 * r));
       }
-      return d.map((parts) => parts.join(''));
-    });
+      data.push(d.map((parts) => parts.join('')));
+    }
+    return data;
   }
 
   // Erodibility grid columns over the window, with a column to spare each
