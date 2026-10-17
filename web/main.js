@@ -366,6 +366,11 @@ const RUN = 24;
 // with its bar reaches 1.5 widths from the centreline, and a curve's
 // handles up to half a width beyond its ends.
 const CHANNEL_MARGIN = 3;
+// Segments of the last centreline searched for each point's foot, behind
+// and ahead of the last foot. Resampling shifts the points along by under
+// a segment a step, so this spans ten steps at the top speed.
+const FOOT_BACK = 2;
+const FOOT_AHEAD = 8;
 // Sine of the turn between the tangents at a segment's ends, about 3°,
 // below which a channel edge is drawn as a straight segment and not a
 // curve. At 3° the curve lies under 0.1 px from the chord, and about three
@@ -484,6 +489,42 @@ function channelData(pts, widths, frame, scale, bar, start, end) {
     [right[j], right[j + 1]] = [x - hr * nx[i], y - hr * ny[i]];
   }
   return 'M' + edgeData(left, frame, start, false) + 'L' + edgeData(right, frame, start, true) + 'Z';
+}
+
+// The centreline and widths a fraction `f` of the way from `a`, with local
+// widths `wa`, to `b`, with `wb`, on the points of `b`. Each point of `b`
+// moves out from its foot on `a`, so the channel moves sideways as it
+// migrates, while resampling slides the points along it. A point more than
+// `far` from `a`, where a cutoff has rerouted the channel, stays put.
+function between(a, wa, b, wb, f, far) {
+  const na = a.length / 2, nb = b.length / 2;
+  const line = new Float32Array(2 * nb), widths = new Float32Array(nb);
+  let j = 0;
+  for (let i = 0; i < nb; i++) {
+    const [px, py] = [b[2 * i], b[2 * i + 1]];
+    let [best, fx, fy, fw, foot] = [far * far, px, py, wb[i], j];
+    for (let k = Math.max(0, j - FOOT_BACK); k < Math.min(na - 1, j + FOOT_AHEAD); k++) {
+      const [ax, ay] = [a[2 * k], a[2 * k + 1]];
+      const [dx, dy] = [a[2 * k + 2] - ax, a[2 * k + 3] - ay];
+      const len2 = dx * dx + dy * dy;
+      const t = len2 > 0 ? clamp01(((px - ax) * dx + (py - ay) * dy) / len2) : 0;
+      const [qx, qy] = [ax + t * dx, ay + t * dy];
+      const d2 = (px - qx) ** 2 + (py - qy) ** 2;
+      if (d2 < best) [best, fx, fy, fw, foot] = [d2, qx, qy, wa[k] + t * (wa[k + 1] - wa[k]), k];
+    }
+    j = foot;
+    line[2 * i] = fx + f * (px - fx);
+    line[2 * i + 1] = fy + f * (py - fy);
+    widths[i] = fw + f * (wb[i] - fw);
+  }
+  return { line, widths };
+}
+
+// Length of a flat x, y polyline.
+function lineLength(pts) {
+  let len = 0;
+  for (let i = 2; i < pts.length; i += 2) len += Math.sqrt((pts[i] - pts[i - 2]) ** 2 + (pts[i + 1] - pts[i - 1]) ** 2);
+  return len;
 }
 
 // Points [start, end) of a flat x, y array from the first point with x at
@@ -1544,6 +1585,7 @@ class SvgRenderer {
     this.dropped = [];
     this.shadedFor = null;
     this.lastBar = null;
+    this.from = this.to = null;
     this.window = [x, w];
     this.size = [w, h];
     this.seed = seed;
@@ -1995,14 +2037,15 @@ class SvgRenderer {
     const oxSilt = new Float32Array(buf, river.oxbow_silts_ptr(), oxPts.length / 2);
     const widths = new Float32Array(buf, river.widths_ptr(), line.length / 2);
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
-    const frame = channelFrame(line);
-    // The points to draw: the window, and room for the widest bank and its
-    // bar beyond it each side.
-    const [x0, vw] = this.window;
-    const shown = span(line, x0 - CHANNEL_MARGIN * w, x0 + vw + CHANNEL_MARGIN * w);
-    const waterRuns = channelRuns(line, widths, frame, shown, 0.5);
-    const bend = smoothed(frame.curv);
-    const bankRuns = channelRuns(line, widths, frame, shown, BANK_EDGE, barRim(bend, w));
+    // `tween` draws the channel between this centreline and the last. A
+    // cutoff shortens the river by a loop, and the channel jumps across it.
+    const t = river.time();
+    if (this.to?.t !== t) {
+      const next = { line: line.slice(), widths: widths.slice(), t, length: lineLength(line) };
+      this.from = this.to && this.to.length - next.length < w ? this.to : next;
+      this.to = next;
+      this.tweened = null;
+    }
     // Channel points, to find lake points beside it.
     const reach = (MAX_WIDTH + ALONGSIDE_GAP) * w;
     const channel = new Grid(line, reach);
@@ -2097,6 +2140,32 @@ class SvgRenderer {
       set(reed, 'stroke-width', (2 * reeds).toFixed(2));
     }
 
+    this.drawStreams(tribs, courses, w);
+    this.drawMills(river, mills, leats, line, widths, w);
+    this.drawJams(jams, w);
+    if (fords) this.drawFords(river, fords, w);
+  }
+
+  // Draw the channel as it stood at simulated time `at`, between the
+  // centrelines of the last two draws. At low speeds the river steps only
+  // every few frames, by up to a pixel, so the channel trails it by a step
+  // and moves on every frame. Returns whether it drew.
+  tween(river, at) {
+    const { from, to } = this;
+    if (!to) return false;
+    const f = to.t > from.t ? clamp01((at - from.t) / (to.t - from.t)) : 1;
+    if (f === this.tweened) return false;
+    this.tweened = f;
+    const w = river.get_param('width');
+    const { line, widths } = f < 1 ? between(from.line, from.widths, to.line, to.widths, f, w) : to;
+    const frame = channelFrame(line);
+    // The points to draw: the window, and room for the widest bank and its
+    // bar beyond it each side.
+    const [x0, vw] = this.window;
+    const shown = span(line, x0 - CHANNEL_MARGIN * w, x0 + vw + CHANNEL_MARGIN * w);
+    const waterRuns = channelRuns(line, widths, frame, shown, 0.5);
+    const bend = smoothed(frame.curv);
+    const bankRuns = channelRuns(line, widths, frame, shown, BANK_EDGE, barRim(bend, w));
     resize(this.bankRuns, bankRuns.length, this.bank);
     resize(this.waterRuns, waterRuns.length, this.water);
     bankRuns.forEach((d, k) => set(this.bankRuns[k], 'd', d));
@@ -2106,10 +2175,7 @@ class SvgRenderer {
       resize(paths, runs.length, g);
       runs.forEach((d, k) => set(paths[k], 'd', d));
     });
-    this.drawStreams(tribs, courses, w);
-    this.drawMills(river, mills, leats, line, widths, w);
-    this.drawJams(jams, w);
-    if (fords) this.drawFords(river, fords, w);
+    return true;
   }
 
   // Each tributary runs down its combe to the apex of its fan, then along

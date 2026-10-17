@@ -184,10 +184,9 @@ export async function startApp({ view, renderer, display }) {
   // Step the river and draw it, after the warm-up. Returns whether the loop
   // must run another frame.
   function update(elapsed) {
+    const dt = river.get_param('dt');
     // A held frame is not owed later, so the river does not lurch on.
-    if (running && renderer.behind(river) > MAX_LAG) owed = 0;
-    else if (running) {
-      const dt = river.get_param('dt');
+    if (running && renderer.behind(river) <= MAX_LAG) {
       owed += local.speed * elapsed;
       const n = Math.floor(owed / dt);
       if (n > 0) {
@@ -202,18 +201,24 @@ export async function startApp({ view, renderer, display }) {
       renderer.settle(river, wasm.memory, state);
     }
     // Draw only when something has changed, so a paused or slow river costs
-    // nothing between steps beyond drawing work spread over frames.
-    if (!dirty) return renderer.idle(river, wasm.memory, state) || running;
-    dirty = false;
-    renderer.draw(river, wasm.memory, state);
-    const years = (river.steps() - epoch()) * river.get_param('dt') * YEARS_PER_UNIT;
-    const year = `Year ${Math.round(years).toLocaleString('en-GB')}`;
-    if ($('year').textContent !== year) $('year').textContent = year;
-    // The step count from the reset, which with the seed and the view's
-    // width fixes the river's state. Not while it is being edited.
-    const tick = String(river.steps());
-    if ($('tick').value !== tick && document.activeElement !== $('tick')) $('tick').value = tick;
-    return true;
+    // nothing between steps beyond the channel and drawing work spread over
+    // frames.
+    const drew = dirty;
+    if (dirty) {
+      dirty = false;
+      renderer.draw(river, wasm.memory, state);
+      const years = (river.steps() - epoch()) * dt * YEARS_PER_UNIT;
+      const year = `Year ${Math.round(years).toLocaleString('en-GB')}`;
+      if ($('year').textContent !== year) $('year').textContent = year;
+      // The step count from the reset, which with the seed and the view's
+      // width fixes the river's state. Not while it is being edited.
+      const tick = String(river.steps());
+      if ($('tick').value !== tick && document.activeElement !== $('tick')) $('tick').value = tick;
+    }
+    // A running channel trails the river by a step, so it moves on every
+    // frame; a stopped one shows the river as it stands.
+    const moved = renderer.tween(river, running ? river.time() + owed - dt : Infinity);
+    return drew || renderer.idle(river, wasm.memory, state) || moved || running;
   }
 
   // The mean, 95th and 99th percentile of the recent frame times.
@@ -234,6 +239,9 @@ export async function startApp({ view, renderer, display }) {
 
   function togglePlay() {
     running = !running;
+    // The stopped channel shows the river as it stands, so a full step
+    // owed starts the trailing channel from there.
+    if (running) owed = river.get_param('dt');
     settle = !running;
     $('play').textContent = running ? 'Pause' : 'Play';
     wake();
