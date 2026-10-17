@@ -317,6 +317,10 @@ const BAR_STEP = 0.5;
 // browser rasterises the view in tiles and skips elements whose bounds miss
 // a tile, so short runs spare each tile from stroking the whole line.
 const RUN = 24;
+// Channel drawn beyond each side of the window, in widths: the widest bank
+// with its bar reaches 1.5 widths from the centreline, and a curve's
+// handles up to half a width beyond its ends.
+const CHANNEL_MARGIN = 3;
 // Sine of the turn between the tangents at a segment's ends, about 3°,
 // below which a channel edge is drawn as a straight segment and not a
 // curve. At 3° the curve lies under 0.1 px from the chord, and about three
@@ -437,12 +441,25 @@ function channelData(pts, widths, frame, scale, bar, start, end) {
   return 'M' + edgeData(left, frame, start, false) + 'L' + edgeData(right, frame, start, true) + 'Z';
 }
 
-// Channel outlines in runs of `RUN` segments, each overlapping its
-// neighbours by a segment so no seam shows between them.
-function channelRuns(pts, widths, frame, scale, bar = null) {
+// Points [start, end) of a flat x, y array from the first point with x at
+// or beyond `x0` to the last with x at or before `x1`, with a point to
+// spare each side. The hidden reaches lie outside it, so the views draw
+// only the window, though the span keeps any loop inside it whole.
+function span(pts, x0, x1) {
+  const n = pts.length / 2;
+  let [start, end] = [0, n];
+  while (start < n && pts[2 * start] < x0) start++;
+  while (end > start && pts[2 * end - 2] > x1) end--;
+  return [Math.max(0, start - 1), Math.min(n, end + 1)];
+}
+
+// Channel outlines over the points `[start, end)` in runs of `RUN`
+// segments, each overlapping its neighbours by a segment so no seam shows
+// between them.
+function channelRuns(pts, widths, frame, [start, end], scale, bar = null) {
   const n = pts.length / 2;
   const runs = [];
-  for (let s = 0; s < n - 1; s += RUN) {
+  for (let s = start; s < end - 1; s += RUN) {
     runs.push(channelData(pts, widths, frame, scale, bar, Math.max(0, s - 1), Math.min(n, s + RUN + 2)));
   }
   return runs;
@@ -484,12 +501,13 @@ function bandData(pts, frame, a, b, start, end) {
 }
 
 // Bands between offsets `a` and `b` over the stretches where they are
-// apart, one path data string each, skipping points where they meet.
-function bandRuns(pts, frame, a, b) {
+// apart over the points `[from, to)`, one path data string each, skipping
+// points where they meet.
+function bandRuns(pts, frame, a, b, [from, to]) {
   const n = pts.length / 2, runs = [];
   let start = -1;
-  for (let i = 0; i <= n; i++) {
-    const open = i < n && Math.abs(a[i] - b[i]) > 0.01;
+  for (let i = from; i <= to; i++) {
+    const open = i < to && Math.abs(a[i] - b[i]) > 0.01;
     if (open && start < 0) start = Math.max(0, i - 1);
     if (!open && start >= 0) {
       runs.push(bandData(pts, frame, a, b, start, Math.min(n, i + 1)));
@@ -502,8 +520,9 @@ function bandRuns(pts, frame, a, b) {
 // Pools, riffles and mid-channel bars, as lists of path data: one list per
 // pool level, then riffles, then bars. `bend` is the smoothed signed
 // curvature, `widths` the local width in world units, `w` the reference
-// width.
-function channelDepth(pts, widths, frame, bend, w) {
+// width. Only the points `shown` are drawn, though the bends and widths
+// are read along the whole river.
+function channelDepth(pts, widths, frame, bend, w, shown) {
   const n = bend.length;
   const lag = Math.round(POOL_LAG / SPACING);
   const pools = POOL_LEVELS.map((level) => {
@@ -517,7 +536,7 @@ function channelDepth(pts, widths, frame, bend, w) {
       a[i] = out * half;
       b[i] = out * Math.max(0, half - reach);
     }
-    return bandRuns(pts, frame, a, b);
+    return bandRuns(pts, frame, a, b, shown);
   });
   // Strength of the riffle at each point: the weaker of the strongest
   // bends of opposite sign upstream and downstream, ramped about
@@ -548,7 +567,7 @@ function channelDepth(pts, widths, frame, bend, w) {
     const h = 0.5 * MID_BAR * wide[i] * smoothstep((wide[i] / w - MID_BAR_FROM) / (MID_BAR_FULL - MID_BAR_FROM));
     [ba[i], bb[i]] = [h, -h];
   }
-  return [...pools, bandRuns(pts, frame, ra, rb), bandRuns(pts, frame, ba, bb)];
+  return [...pools, bandRuns(pts, frame, ra, rb, shown), bandRuns(pts, frame, ba, bb, shown)];
 }
 
 // Path data for points [start, end) of a flat x, y array.
@@ -1836,9 +1855,13 @@ class SvgRenderer {
     const widths = new Float32Array(buf, river.widths_ptr(), line.length / 2);
     const scarLife = Math.max(1e-6, river.get_param('scar_lifetime'));
     const frame = channelFrame(line);
-    const waterRuns = channelRuns(line, widths, frame, 0.5);
+    // The points to draw: the window, and room for the widest bank and its
+    // bar beyond it each side.
+    const [x0, vw] = this.window;
+    const shown = span(line, x0 - CHANNEL_MARGIN * w, x0 + vw + CHANNEL_MARGIN * w);
+    const waterRuns = channelRuns(line, widths, frame, shown, 0.5);
     const bend = smoothed(frame.curv);
-    const bankRuns = channelRuns(line, widths, frame, BANK_EDGE, barRim(bend, w));
+    const bankRuns = channelRuns(line, widths, frame, shown, BANK_EDGE, barRim(bend, w));
     // Channel points, to find lake points beside it.
     const reach = (MAX_WIDTH + ALONGSIDE_GAP) * w;
     const channel = new Grid(line, reach);
@@ -1938,7 +1961,7 @@ class SvgRenderer {
     resize(this.waterRuns, waterRuns.length, this.water);
     bankRuns.forEach((d, k) => set(this.bankRuns[k], 'd', d));
     waterRuns.forEach((d, k) => set(this.waterRuns[k], 'd', d));
-    channelDepth(line, widths, frame, bend, w).forEach((runs, m) => {
+    channelDepth(line, widths, frame, bend, w, shown).forEach((runs, m) => {
       const { g, paths } = this.depth[m];
       resize(paths, runs.length, g);
       runs.forEach((d, k) => set(paths[k], 'd', d));
