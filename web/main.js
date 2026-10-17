@@ -1334,12 +1334,14 @@ class SvgRenderer {
     // Both are filled outlines at the local width, which a stroke cannot vary.
     // Every lake's reed fringe lies under the water of all of them, so lakes
     // that meet join as one body of water.
-    // Tributary streams and mill leats lie under the bank, so the channel
-    // hides where they meet it.
+    // Tributary streams lie under the bank, so the channel hides where they
+    // meet it. Mill leats lie over it, since their ends run along the water's
+    // edge, which the bank would cover; the channel's water still hides
+    // where they meet it.
     this.streamLayer = el('g', { ...round, stroke: `rgb(${WATER})` }, svg);
     this.streams = [];
-    this.leatLayer = el('g', round, svg);
     this.bank = el('g', { fill: `rgb(${WET_SAND})` }, svg);
+    this.leatLayer = el('g', round, svg);
     this.reedLayer = el('g', { fill: 'none', 'stroke-linejoin': 'round', stroke: REEDS }, svg);
     this.lakeLayer = el('g', {}, svg);
     this.water = el('g', { fill: `rgb(${WATER})` }, svg);
