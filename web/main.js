@@ -222,6 +222,24 @@ const WALLING = [118, 106, 88];
 const HOUSE = [1.1, 0.7];
 // Points of a leat below its weir: `LEAT_DOWN` (3 widths) in the core.
 const LEAT_TAIL = 6;
+// Farmsteads: each building a roof at the core's footprint for its kind,
+// in channel widths along and across the ridge, in the order of `Kind`:
+// house, outshut, barn, byre, shed, cottage, field barn. Houses and
+// cottages are tiled, the farm buildings thatched, and an outshut is a
+// lean-to with no ridge. A building on a mound has a rim of raised ground
+// `MOUND_RIM` widths wide, and a farmstead's yard is trodden earth
+// `YARD_RIM` widths beyond its buildings. An abandoned building fades out
+// as a house platform over the core's `RUIN_TIME` (150 years); the
+// farmsteads are redrawn at least every `BUILDING_REFRESH` (50 years) as
+// the platforms fade.
+const FOOTPRINTS = [[1.1, 0.7], [0.9, 0.35], [1.5, 0.8], [1.0, 0.55], [0.8, 0.5], [0.8, 0.55], [0.7, 0.45]];
+const THATCH = [146, 128, 96];
+const YARD_EARTH = [204, 190, 152];
+const MOUND = [180, 170, 126];
+const PLATFORM = [150, 140, 108];
+const MOUND_RIM = 0.3;
+const YARD_RIM = 0.35;
+const BUILDING_REFRESH = 20;
 // The channel's edge: a thin line of bank on both sides, `BANK_EDGE` times
 // the local width from the centreline, and the wet sand of the point bar
 // on the inside of a bend, up to `BAR_RIM` widths more at a bend of radius
@@ -608,6 +626,25 @@ function chaikin(pts, closed) {
   if (closed) out.push(out[0], out[1]);
   else out.push(pts[2 * n - 2], pts[2 * n - 1]);
   return out;
+}
+
+// The convex hull of points given as a flat x, y array, as a flat array
+// in order round it, by Andrew's monotone chain.
+function hull(pts) {
+  const p = [];
+  for (let k = 0; k < pts.length; k += 2) p.push([pts[k], pts[k + 1]]);
+  p.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (list) => {
+    const out = [];
+    for (const q of list) {
+      while (out.length >= 2 && cross(out[out.length - 2], out[out.length - 1], q) <= 0) out.pop();
+      out.push(q);
+    }
+    out.pop();
+    return out;
+  };
+  return [...half(p), ...half([...p].reverse())].flat();
 }
 
 // A flat x, y array with its points in reverse order.
@@ -1317,6 +1354,16 @@ class SvgRenderer {
     this.plugAt = null;
     this.plugJob = null;
     this.plugBlur = null;
+    // The farmsteads over all of it: yards, then mounds, the platforms of
+    // ruins, and the roofs with their ridges.
+    const farms = el('g', { 'stroke-linejoin': 'round' }, ground);
+    this.yards = el('path', { fill: `rgb(${YARD_EARTH})`, 'fill-opacity': 0.55 }, farms);
+    this.mounds = el('path', { fill: `rgb(${MOUND})`, 'fill-opacity': 0.5 }, farms);
+    this.ruinLayer = el('g', { fill: `rgb(${PLATFORM})`, stroke: `rgb(${WALLING})` }, farms);
+    this.thatch = el('path', { fill: `rgb(${THATCH})`, stroke: `rgb(${WALLING})` }, farms);
+    this.tiles = el('path', { fill: `rgb(${ROOF})`, stroke: `rgb(${WALLING})` }, farms);
+    this.ridges = el('path', { fill: 'none', stroke: `rgb(${WALLING})` }, farms);
+    this.buildingsAt = null;
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
     // Both are filled outlines at the local width, which a stroke cannot vary.
@@ -1381,6 +1428,7 @@ class SvgRenderer {
     this.leveeAt = null;
     this.coarseAt = null;
     this.millsAt = null;
+    this.buildingsAt = null;
     this.wallsAt = { key: river.wall_version(), t: river.time() };
     this.drawPebbles(river.get_param('width'), seed);
     this.plugAt = null;
@@ -2035,6 +2083,66 @@ class SvgRenderer {
     return { parts: [water, weir, foam, house, pond], water, weir, pond, foam };
   }
 
+  // Draw the farmsteads when a building is raised, abandoned or lost, and
+  // every `BUILDING_REFRESH` of simulated time as the platforms fade. Each
+  // farmstead's yard is the rounded hull of its buildings but its field
+  // barn.
+  drawBuildings(river, w) {
+    this.buildingsAt = { key: river.building_version(), t: river.time() };
+    const data = river.buildings();
+    const [x0, vw] = this.window;
+    const yards = new Map();
+    let [mounds, thatch, tiles, ridges] = ['', '', '', ''];
+    const ruins = [];
+    for (let k = 0; k < data.length; k += 8) {
+      const [cx, cy, ux, uy, kind, mound, age, holding] = data.subarray(k, k + 8);
+      if (cx < x0 - 4 * w || cx > x0 + vw + 4 * w) continue;
+      const [hl, hd] = [0.5 * FOOTPRINTS[kind][0] * w, 0.5 * FOOTPRINTS[kind][1] * w];
+      const corners = (grow) => [[-1, -1], [1, -1], [1, 1], [-1, 1]].flatMap(([s, r]) => [
+        cx + s * (hl + grow) * ux + r * (hd + grow) * uy, cy + s * (hl + grow) * uy - r * (hd + grow) * ux,
+      ]);
+      const box = corners(0);
+      const outline = pointsData(box) + 'Z';
+      if (mound) {
+        const [rx, ry, deg] = [hl + MOUND_RIM * w, hd + MOUND_RIM * w, (Math.atan2(uy, ux) * 180) / Math.PI];
+        const arc = `A${dp1(rx)} ${dp1(ry)} ${deg.toFixed(1)} 1 0`;
+        const [ax, ay, bx, by] = [cx - rx * ux, cy - rx * uy, cx + rx * ux, cy + rx * uy];
+        mounds += `M${dp1(ax)} ${dp1(ay)}${arc} ${dp1(bx)} ${dp1(by)}${arc} ${dp1(ax)} ${dp1(ay)}Z`;
+      }
+      if (age > 0) {
+        ruins.push([outline, 1 - age]);
+        continue;
+      }
+      if (kind === 0 || kind === 5) tiles += outline;
+      else thatch += outline;
+      if (kind !== 1) ridges += `M${dp1(cx - hl * ux)} ${dp1(cy - hl * uy)}L${dp1(cx + hl * ux)} ${dp1(cy + hl * uy)}`;
+      if (kind !== 6) {
+        if (!yards.has(holding)) yards.set(holding, []);
+        yards.get(holding).push(...corners(YARD_RIM * w));
+      }
+    }
+    let yardData = '';
+    for (const pts of yards.values()) {
+      if (pts.length < 16) continue;
+      const ring = hull(pts);
+      yardData += pointsData(chaikin(chaikin([...ring, ring[0], ring[1]], true), true)) + 'Z';
+    }
+    const stroke = dp1(0.06 * w);
+    set(this.yards, 'd', yardData);
+    set(this.mounds, 'd', mounds);
+    set(this.thatch, 'd', thatch);
+    set(this.tiles, 'd', tiles);
+    set(this.ridges, 'd', ridges);
+    for (const p of [this.thatch, this.tiles, this.ridges]) set(p, 'stroke-width', stroke);
+    this.ruinLayer.replaceChildren();
+    for (const [d, fade] of ruins) {
+      el('path', {
+        d, 'fill-opacity': (0.3 * fade).toFixed(2), 'stroke-opacity': (0.6 * fade).toFixed(2), 'stroke-width': stroke,
+        'stroke-dasharray': `${dp1(0.2 * w)} ${dp1(0.15 * w)}`,
+      }, this.ruinLayer);
+    }
+  }
+
   // A pebble pattern for the coarse ground, scaled to the channel width.
   drawPebbles(w, seed) {
     const rand = random(seed ^ 0x9eb1);
@@ -2109,6 +2217,11 @@ class SvgRenderer {
         shown: this.coarseAt?.t,
         due: () => isDue(this.coarseAt, null, t, COARSE_REFRESH),
         run: () => this.drawCoarse(river, memory),
+      },
+      {
+        shown: this.buildingsAt?.t,
+        due: () => isDue(this.buildingsAt, river.building_version(), t, BUILDING_REFRESH),
+        run: () => this.drawBuildings(river, w),
       },
       {
         shown: this.wallsAt?.t,

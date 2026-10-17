@@ -121,12 +121,27 @@ The buildings follow the river through the risk field, at the holdings' reorgani
 - Tests: no building stands on the channel or past `FLEE_RISK`; the count follows the holding's area; a division can form a hamlet; turning the buildings on leaves the river's course unchanged.
 - Update the Landholdings and Floodplain sections of `docs/architecture.md`.
 
-- [ ] risk from ground height, field layouts checked
-- [ ] `Building`, targets, placement score
-- [ ] following the river, hamlets, ruins
-- [ ] tests, step time
-- [ ] WASM sync, drawing
-- [ ] docs
+### As built
+
+Risk: `RIDGE_RELIEF` is 0.6, and the relief comes in over the first `RIDGE_CLEAR` (1.5) widths from the water, so the bank keeps its full risk. Over seeds 1 and 3 at 24,000 steps, held ground at risk 0.25–0.5 now stands at a median 0.84–0.97 of `levee_height`, and ground above 0.5 at 0.50–0.58: the moderate band is old levee ground, and the high band young bars and silting lakes. The holdings still found 42–44 farmsteads. The fields look sound in the browser, though the river takes another course there, since holdings found mills.
+
+Where the farmsteads differ from the plan above:
+
+- They draw from a PRNG of their own in `Land`, and a building takes nothing from the search budget. With `hamlet_chance` 0 the holdings and the river then match a run with `farmsteads` off exactly. Hamlets change the holdings, and through the mills the river: on seed 2 the river ran 591 points long against 500.
+- A field barn stands on meadow to risk `BARN_RISK` (0.8), not above `FLEE_RISK`, while 15% of the holding is at risk 0.35 or more.
+- A courtyard's buildings go round a yard 1.6 widths across on the house's drier side, long wall to the yard. Scoring by distance from the seat alone joined every barn to the end of its house in the same T.
+- The miller's cottage belongs to the holding that has the ground at the middle of a working mill's leat.
+- The bank takes a building at the end of the next survey, within 40 steps (10 years).
+- The yards are drawn over the fields and the tree crowns, so the crop mask is left alone.
+
+Results on seed 1 over 24,000 steps: 178–194 buildings standing on 44–47 holdings, most with 3–5, 28–37 of them on mounds and 2–9 ruins at a time; the farmsteads changed in 901 of the steps. The step time with `hamlet_chance` 0 matches `farmsteads` off: median 0.146–0.149 ms against 0.145–0.148. All 50 tests pass.
+
+- [x] risk from ground height, field layouts checked
+- [x] `Building`, targets, placement score
+- [x] following the river, hamlets, ruins
+- [x] tests, step time
+- [x] WASM sync, drawing
+- [x] docs
 
 ## Left over
 

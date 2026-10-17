@@ -46,6 +46,14 @@ Each point carries a local width (`Sim::widths`, in multiples of `width`), after
 
 `land.rs` shares the ground between medieval landholdings, each the geodesic Voronoi cell of a farmstead over the grid: the channel and oxbow ground are barriers, and flood risk raises the cost of crossing a cell. Risk falls with distance from the water, and on high ground by up to `RIDGE_RELIEF` (0.6) of that, in proportion to the overbank deposit's height over `levee_height`. The relief comes in over the first `RIDGE_CLEAR` (1.5) widths from the water, so the bank keeps its full risk. Old levee ground and scroll ridges beside the river then stand at moderate risk, and young bars and silting lakes at high risk. Holdings take up ground beside them once grass has grown on it for `grazing_time` (20 units, 50 years) and keep ground the river cuts them off from. Each reorganises at random, with mean interval `reorganise_time` (60 units, 150 years), one at a time: it moves a threatened farmstead, is absorbed below 0.3 `holding_area`, takes cells it reaches more cheaply than their holder by a margin, and divides above twice `holding_area`. Holdings read the river and change it only through their mills.
 
+### Farmsteads (`farm.rs`)
+
+Each holding raises a farmstead of small buildings at its seat, one change at each reorganisation, so a farmstead grows over centuries. Buildings never grow; a farmstead grows by an outshut against a wall and by new buildings. The plan follows the flood risk at the seat. At or below `SEAT_RISK` it is a courtyard of up to seven buildings (house, barn, outshut, byre, shed, byre, shed), the first `1 + 4a` of them for a holding of `a` times `holding_area`, laid square to the holding's axis around a yard on the house's drier side. Above `SEAT_RISK` it is a row of up to three along the bank, square to the rise in risk, on mounds. A holding with a working mill on its ground keeps a miller's cottage, and one with 15% of its ground at risk 0.35 or more keeps a field barn on that meadow, to risk 0.8.
+
+At a reorganisation the holding abandons its worst threatened building: one past `FLEE_RISK`, or on ground it no longer holds. It then raises one building towards its plan, or abandons the newest beyond it. Sites lie against the existing buildings, or on the sides of the yard, and are scored by distance from where the plan wants them, by six times the risk, and by a random part, so new buildings go to the driest side and a farmstead creeps back from an advancing bank. A farmstead that moves or is absorbed leaves its buildings as ruins, which fade over `RUIN_TIME` (60 units, 150 years). The end of each survey removes the buildings and ruins the water has reached. A division places the heir's farmstead with chance `hamlet_chance` (0.5) on the nearest safe cell 4 widths or more from the parent's seat, making a hamlet.
+
+The farmsteads draw from their own PRNG and take nothing from the holdings' search budget, so with `hamlet_chance` 0 the holdings and the river run exactly as with `farmsteads` off.
+
 ### Floodplain processes
 
 Five floodplain processes, each with parameters in `Params`:
@@ -66,7 +74,7 @@ Five floodplain processes, each with parameters in `Params`:
 
 `sync()` copies geometry into flat `f32` buffers exposed as raw pointers. `sync_scrolls`, `sync_plugs` and `sync_forest` can grow memory too, so `draw` runs the floodplain layers that call them before it builds its own views. `sync_forest` copies the vegetation growth of each cell, which `main.js` contours into nested shrub and forest regions, each fading in over several contours, and uses to size seeded tree crowns on young and mature forest. `sync_plugs` copies the time since cutoff of each cell still stamped as oxbow, which `main.js` draws as a soft-edged marsh that fades with the scar to a faint trace. The scar itself is a tapered crescent of damp ground with a wetter core and survey-map marsh tufts. `sync_line` copies only the centreline and its widths, for the warm-up's point-bar capture.
 
-The floodplain features come as `Vec<f32>` copies, which also allocate: `jams` (8 floats each), `tributaries` (8, with each course's start and length in `tributary_courses`), `mills` (11, with each leat's start and length in `mill_leats`). `coarse_ptr` points at the gravel grid, and `mill_version` and `wall_version` tell the renderer when to rebuild.
+The floodplain features come as `Vec<f32>` copies, which also allocate: `jams` (8 floats each), `buildings` (8), `tributaries` (8, with each course's start and length in `tributary_courses`), `mills` (11, with each leat's start and length in `mill_leats`). `coarse_ptr` points at the gravel grid, and `mill_version`, `building_version` and `wall_version` tell the renderer when to rebuild.
 
 ## web (`web/`)
 
@@ -83,6 +91,8 @@ The channel is a filled outline at the local width in runs of 24 segments, overl
 Seeded soil patches are drawn as vector blobs typed by the erodibility noise. Fields are laid out in strips along each holding's long axis from its seed, traced along the cell edges of the label map into arcs shared by neighbouring fields, simplified and rounded, and redrawn after a reorganisation finishes, at most every `FIELD_REFRESH`. A field redraw runs within the floodplain's frame budget and writes the page only when it finishes. Meadow takes ground at high flood risk and arable the drier ground. Fields are masked by nested contours that fade them in from `grazing_time` (50 years), where holdings take up grassed ground, to `vegetation_time` (250 years), so the channel cuts them as it migrates and they follow it onto the bars it leaves. Tree crowns in crop fields are skipped on farmland, by a per-cell crop mask; crowns in woods and beside hedges stay.
 
 Coarse ground is contoured as a gravel tint and a pebble pattern every 50 years.
+
+The farmsteads lie over the whole floodplain layer: each standing building is a tiled or thatched roof at its core footprint with a ridge line (an outshut has none), on an elliptical mound where the core raised one, and each farmstead's yard is the rounded hull of its buildings but its field barn, in trodden earth. A ruin is a dashed house platform fading over its 150 years. They are redrawn when `building_version` changes, and at least every 50 years.
 
 ### Valley walls
 

@@ -5,6 +5,7 @@
 //! its normal at a rate given by the Howard–Knutson (1984) upstream-weighted
 //! curvature kernel, smooths, and cuts off any loop whose neck has closed.
 
+pub mod farm;
 pub mod field;
 pub mod geom;
 pub mod ips;
@@ -168,6 +169,13 @@ pub struct Params {
     /// `vegetation_time`, so holdings follow the channel onto bars long
     /// before shrub binds them.
     pub grazing_time: f64,
+    /// Whether landholdings raise farmsteads of small buildings (see
+    /// [`farm`]). The buildings read the land and change nothing else.
+    pub farmsteads: bool,
+    /// Chance that an heir's farmstead goes up beside the parent's when a
+    /// holding divides, making a hamlet. Takes effect only with
+    /// `farmsteads` on.
+    pub hamlet_chance: f64,
     /// Erodibility multiplier on wholly coarse ground: the gravel of a
     /// tributary fan, or colluvium slumped from a valley wall. 1 disables.
     pub coarse_factor: f64,
@@ -287,6 +295,8 @@ impl Default for Params {
             holding_area: HOLDING_AREA,
             reorganise_time: REORGANISE_TIME,
             grazing_time: GRAZING_TIME,
+            farmsteads: true,
+            hamlet_chance: HAMLET_CHANCE,
             coarse_factor: COARSE_FACTOR,
             clearance_start: CLEARANCE_START,
             clearance_time: CLEARANCE_TIME,
@@ -358,6 +368,8 @@ impl Params {
         "holding_area",
         "reorganise_time",
         "grazing_time",
+        "farmsteads",
+        "hamlet_chance",
         "coarse_factor",
         "clearance_start",
         "clearance_time",
@@ -425,6 +437,7 @@ impl Params {
             "holding_area" => &mut self.holding_area,
             "reorganise_time" => &mut self.reorganise_time,
             "grazing_time" => &mut self.grazing_time,
+            "hamlet_chance" => &mut self.hamlet_chance,
             "coarse_factor" => &mut self.coarse_factor,
             "clearance_start" => &mut self.clearance_start,
             "clearance_time" => &mut self.clearance_time,
@@ -455,6 +468,7 @@ impl Params {
         match name {
             "cutoff_min_sep" => Some(self.cutoff_min_sep as f64),
             "physics" => Some(if self.physics { 1.0 } else { 0.0 }),
+            "farmsteads" => Some(if self.farmsteads { 1.0 } else { 0.0 }),
             _ => self.clone().field(name).map(|v| *v),
         }
     }
@@ -467,6 +481,7 @@ impl Params {
         match name {
             "cutoff_min_sep" => self.cutoff_min_sep = value.max(2.0) as usize,
             "physics" => self.physics = value != 0.0,
+            "farmsteads" => self.farmsteads = value != 0.0,
             _ => match self.field(name) {
                 Some(v) => *v = value,
                 None => return false,
@@ -582,6 +597,8 @@ pub struct Sim {
     pub mills: Vec<Mill>,
     /// Counts changes to `mills`.
     pub mill_version: u64,
+    /// The `mill_version` the holdings last read the working mills at.
+    land_mills: u64,
     /// Counts slumps from the valley walls, so a renderer can redraw the
     /// walls after bluff erosion.
     pub wall_version: u64,
@@ -741,6 +758,9 @@ const REORGANISE_TIME: f64 = 60.0;
 /// was grazed, then mown, within a generation or two of the river leaving
 /// it: 20 units, 50 years.
 const GRAZING_TIME: f64 = 20.0;
+/// Under partible inheritance an heir often built beside the parent's
+/// farmstead, so about half of all divisions make a hamlet.
+const HAMLET_CHANCE: f64 = 0.5;
 
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
@@ -955,6 +975,7 @@ impl Sim {
             tributaries: Vec::new(),
             mills: Vec::new(),
             mill_version: 0,
+            land_mills: u64::MAX,
             wall_version: 0,
             rng: Rng::new(seed),
             events: Rng::new(seed ^ EVENTS_SEED),
@@ -1086,6 +1107,8 @@ impl Sim {
             reorganise_time: p.reorganise_time,
             grazing_time: p.grazing_time,
             levee_height: p.levee_height,
+            farmsteads: p.farmsteads,
+            hamlet_chance: p.hamlet_chance,
         }
     }
 
@@ -1161,6 +1184,12 @@ impl Sim {
         let phase = self.steps % land::SURVEY_STEPS;
         if phase == 0 {
             self.read_valley();
+        }
+        if self.land_mills != self.mill_version {
+            self.land_mills = self.mill_version;
+            self.land.mills = (self.mills.iter().filter(|m| m.working()))
+                .filter_map(|m| m.leat.get(m.leat.len() / 2).copied())
+                .collect();
         }
         let s = self.land_settings();
         self.land.tick(
@@ -2385,6 +2414,27 @@ mod tests {
                 assert!(sim.cutoffs >= 3, "only {} cutoffs", sim.cutoffs);
             }
         });
+    }
+
+    #[test]
+    fn farmsteads_leave_the_river_and_holdings_unchanged() {
+        let run = |farmsteads| {
+            let params = Params {
+                farmsteads,
+                hamlet_chance: 0.0,
+                ..Params::default()
+            };
+            let mut sim = Sim::new(params, [900.0, 480.0], 2, 0.5);
+            for _ in 0..4000 {
+                sim.step();
+            }
+            sim
+        };
+        let (off, on) = (run(false), run(true));
+        assert!(off.land.buildings.is_empty());
+        assert!(on.land.buildings.len() > on.land.count());
+        assert_eq!(off.centerline, on.centerline);
+        assert_eq!(off.land.owner, on.land.owner);
     }
 
     #[test]

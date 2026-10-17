@@ -26,6 +26,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
+use crate::farm::{Building, HAMLET_GAP};
 use crate::field::Erodibility;
 use crate::geom::P;
 use crate::rng::Rng;
@@ -69,8 +70,8 @@ const ROUGHNESS: f32 = 1.0;
 /// Highest flood risk at which a farmstead is founded, or moved to if the
 /// holding has such ground, and the risk at which it is moved. The gap
 /// between them keeps a farmstead from moving at every reorganisation.
-const SEAT_RISK: f32 = 0.25;
-const FLEE_RISK: f32 = 0.5;
+pub(crate) const SEAT_RISK: f32 = 0.25;
+pub(crate) const FLEE_RISK: f32 = 0.5;
 /// A reorganising holding takes a neighbour's cell when it reaches it for
 /// less than the neighbour's own cost, less this fraction and `SLACK`
 /// widths. Without the margin, boundaries would move at every
@@ -106,6 +107,11 @@ pub struct Settings {
     /// Flood level above fresh bar sand, in channel depths: the overbank
     /// deposit at which ground stands clear of all but the highest water.
     pub levee_height: f64,
+    /// Whether holdings raise farmsteads; see [`crate::farm`].
+    pub farmsteads: bool,
+    /// Chance that an heir's farmstead goes up beside the parent's, making
+    /// a hamlet, when farmsteads are on.
+    pub hamlet_chance: f64,
 }
 
 pub struct Holding {
@@ -145,6 +151,8 @@ enum Task {
     /// Fit a holding's box, and lay out its fields again if forced or its
     /// shape has turned.
     LayOut(usize, bool),
+    /// Make one change to a holding's farmstead.
+    Build(usize),
     /// The end of a reorganisation, which a renderer should draw.
     Done,
 }
@@ -172,13 +180,22 @@ pub struct Land {
     pub version: u64,
     /// Reorganisations begun so far.
     pub reorganisations: u64,
+    /// The farmsteads' buildings and the ruins of those abandoned.
+    pub buildings: Vec<Building>,
+    /// Counts changes to `buildings`.
+    pub building_version: u64,
+    /// A point on the leat of each working mill, which the holding that
+    /// has the ground there counts as its own.
+    pub mills: Vec<P>,
+    /// Simulated time of the work under way.
+    pub(crate) now: f64,
     /// Cells a holding can take: off the water, and grassed over.
-    open: Vec<bool>,
+    pub(crate) open: Vec<bool>,
     /// Cost of crossing each cell per unit length before flood risk, from
     /// the erodibility noise; see `ROUGHNESS`.
     rough: Vec<f32>,
     /// Distance of each cell from the water, in cells, during a survey.
-    dist: Vec<f32>,
+    pub(crate) dist: Vec<f32>,
     /// Cells under the channel when the current survey began, in order.
     channel: Vec<u32>,
     /// Open cells no holding had when last surveyed or freed since.
@@ -193,6 +210,8 @@ pub struct Land {
     touched: Vec<usize>,
     heap: BinaryHeap<Reverse<(u32, u32)>>,
     rng: Rng,
+    /// Draws for the farmsteads, apart from the holdings' own.
+    pub(crate) farm_rng: Rng,
     founded: bool,
 }
 
@@ -209,6 +228,10 @@ impl Land {
             holdings: Vec::new(),
             version: 0,
             reorganisations: 0,
+            buildings: Vec::new(),
+            building_version: 0,
+            mills: Vec::new(),
+            now: 0.0,
             open: vec![false; n],
             rough: field
                 .noise
@@ -225,17 +248,18 @@ impl Land {
             touched: Vec::new(),
             heap: BinaryHeap::new(),
             rng: Rng::new(seed ^ 0x1A4D_5EED),
+            farm_rng: Rng::new(seed ^ 0x0FA2_3570),
             founded: false,
         }
     }
 
-    fn index(&self, p: P) -> usize {
+    pub(crate) fn index(&self, p: P) -> usize {
         let x = ((p[0] / self.cell).max(0.0) as usize).min(self.cols - 1);
         let y = ((p[1] / self.cell).max(0.0) as usize).min(self.rows - 1);
         y * self.cols + x
     }
 
-    fn centre(&self, i: usize) -> P {
+    pub(crate) fn centre(&self, i: usize) -> P {
         [
             ((i % self.cols) as f64 + 0.5) * self.cell,
             ((i / self.cols) as f64 + 0.5) * self.cell,
@@ -308,6 +332,8 @@ impl Land {
             let (y0, y1) = band(2 * BANDS - 1 - p);
             self.backward(field, valley, s, y0, y1);
         } else if p == 2 * BANDS {
+            self.now = s.time;
+            self.weather();
             if self.founded {
                 self.tasks.push_back(Task::Accrete);
             } else {
@@ -440,8 +466,10 @@ impl Land {
 
     /// Do queued work until `budget` cells have been searched, starting the
     /// next due reorganisation whenever the queue empties. Each task other
-    /// than a search costs a quarter of a step's budget.
+    /// than a search or a farmstead's change costs a quarter of a step's
+    /// budget.
     fn work(&mut self, s: &Settings, mut budget: usize) {
+        self.now = s.time;
         let cw = (self.cell / s.width) as f32;
         let limit = (REACH * self.target(s).1) as f32;
         while budget > 0 {
@@ -477,6 +505,13 @@ impl Land {
                 Task::LayOut(h, force) => {
                     self.lay_out(h, force);
                     budget = budget.saturating_sub(BUDGET / 4);
+                    true
+                }
+                // A farmstead's change is small next to a search, and
+                // costs nothing from the budget, so the holdings run as
+                // they would without farmsteads.
+                Task::Build(h) => {
+                    self.build(h, s);
                     true
                 }
                 Task::Done => {
@@ -548,8 +583,11 @@ impl Land {
             },
             Task::Divide(h),
             Task::LayOut(h, moved),
-            Task::Done,
         ]);
+        if s.farmsteads {
+            self.tasks.push_back(Task::Build(h));
+        }
+        self.tasks.push_back(Task::Done);
         true
     }
 
@@ -633,7 +671,7 @@ impl Land {
     }
 
     /// Cells inside holding `h`'s box.
-    fn boxed(&self, h: usize) -> impl Iterator<Item = usize> + '_ {
+    pub(crate) fn boxed(&self, h: usize) -> impl Iterator<Item = usize> + '_ {
         let [x0, y0, x1, y1] = self.holdings[h].as_ref().map_or([1, 1, 0, 0], |g| g.bounds);
         (y0..=y1).flat_map(move |y| (x0..=x1).map(move |x| y * self.cols + x))
     }
@@ -782,7 +820,7 @@ impl Land {
 
     /// Area a holding settles to, in cells, and the side of a square
     /// holding of that area in channel widths.
-    fn target(&self, s: &Settings) -> (f64, f64) {
+    pub(crate) fn target(&self, s: &Settings) -> (f64, f64) {
         let cw = self.cell / s.width;
         (s.holding_area / (cw * cw), s.holding_area.sqrt())
     }
@@ -818,6 +856,9 @@ impl Land {
             let i = self.index(p);
             self.claim(i, k as u32, 0.0);
             self.tasks.push_back(Task::LayOut(k, true));
+            if s.farmsteads {
+                self.tasks.push_back(Task::Build(k));
+            }
         }
         self.tasks.push_front(Task::Accrete);
         self.tasks.push_back(Task::Done);
@@ -853,26 +894,51 @@ impl Land {
             self.owner[i] = NONE;
             self.free.push(i as u32);
         }
+        self.abandon(h, false);
         self.holdings[h] = None;
         self.tasks.extend([Task::Accrete, Task::Done]);
     }
 
     /// Divide holding `h` between two heirs if it has grown too large: a
     /// new farmstead on the safe cell of `h` farthest from its own takes
-    /// the ground it reaches first. The heir's tasks go to the front of the
-    /// queue.
+    /// the ground it reaches first. With farmsteads on, the heir builds
+    /// beside the parent instead with chance `hamlet_chance`, on the
+    /// nearest safe cell at least [`HAMLET_GAP`] widths from its seat, as
+    /// heirs did under partible inheritance. The heir's tasks go to the
+    /// front of the queue.
     fn divide(&mut self, h: usize, s: &Settings) {
         let me = h as u32;
         let area = self.holdings[h].as_ref().map_or(0, |x| x.area);
         if (area as f64) <= DIVIDE * self.target(s).0 {
             return;
         }
-        let far = self
-            .boxed(h)
-            .filter(|&i| self.owner[i] == me && self.risk[i] <= SEAT_RISK)
-            .max_by(|&a, &b| self.cost[a].total_cmp(&self.cost[b]));
+        let safe = |i: &usize| self.owner[*i] == me && self.risk[*i] <= SEAT_RISK;
+        let hamlet =
+            s.farmsteads && s.hamlet_chance > 0.0 && self.farm_rng.uniform() < s.hamlet_chance;
+        let seat = self.holdings[h].as_ref().map_or([0.0; 2], |x| x.seat);
+        let gap = (HAMLET_GAP * s.width).powi(2);
+        let d2 = |i: usize| {
+            let p = self.centre(i);
+            (p[0] - seat[0]).powi(2) + (p[1] - seat[1]).powi(2)
+        };
+        let near = hamlet
+            .then(|| {
+                self.boxed(h)
+                    .filter(safe)
+                    .filter(|&i| d2(i) >= gap)
+                    .min_by(|&a, &b| d2(a).total_cmp(&d2(b)))
+            })
+            .flatten();
+        let far = near.or_else(|| {
+            self.boxed(h)
+                .filter(safe)
+                .max_by(|&a, &b| self.cost[a].total_cmp(&self.cost[b]))
+        });
         let Some(i) = far else { return };
         let k = self.add(self.centre(i), s);
+        if s.farmsteads {
+            self.tasks.push_front(Task::Build(k));
+        }
         self.tasks.push_front(Task::LayOut(k, true));
         self.tasks.push_front(Task::Contest {
             h: k,
@@ -903,6 +969,7 @@ impl Land {
             sxy += x * y;
         }
         if n == 0.0 {
+            self.abandon(h, false);
             self.holdings[h] = None;
             return;
         }
@@ -932,6 +999,7 @@ impl Land {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::farm::Kind;
 
     type Valley = (Erodibility, Vec<P>, Vec<f64>, Vec<(f64, f64)>);
 
@@ -954,6 +1022,8 @@ mod tests {
             reorganise_time: 60.0,
             grazing_time: 100.0,
             levee_height: 0.25,
+            farmsteads: true,
+            hamlet_chance: 0.5,
         }
     }
 
@@ -1101,5 +1171,128 @@ mod tests {
         };
         land.update(&field, &line, &widths, &walls, &still);
         assert_eq!(land.owner[inside], before);
+    }
+
+    /// Run holdings over a valley for `steps` steps of 0.1, with the
+    /// farmsteads on, from settings `s` at time 0 and `later` after.
+    fn farmed(seed: u64, steps: u64, s: Settings, later: Settings) -> Land {
+        let (field, line, widths, walls) = valley(30.0);
+        let mut land = Land::new(&field, seed);
+        land.update(&field, &line, &widths, &walls, &s);
+        for k in 1..=steps {
+            let now = Settings {
+                time: k as f64 * 0.1,
+                ..later
+            };
+            land.tick(&field, &line, &widths, &walls, &now, k % SURVEY_STEPS);
+        }
+        land
+    }
+
+    #[test]
+    fn farmsteads_keep_to_dry_ground_and_grow_with_their_holdings() {
+        let land = farmed(5, 6000, settings(0.0), settings(0.0));
+        let standing: Vec<&Building> = land.buildings.iter().filter(|b| b.standing()).collect();
+        assert!(
+            standing.len() >= 3 * land.count(),
+            "{} buildings on {} holdings",
+            standing.len(),
+            land.count()
+        );
+        let mut owned = 0;
+        for b in &standing {
+            let i = land.index(b.pos);
+            let limit = if b.kind == Kind::FieldBarn {
+                0.8
+            } else {
+                FLEE_RISK
+            };
+            assert!(land.open[i], "{:?} stands on open ground", b.kind);
+            assert!(
+                land.risk[i] <= limit,
+                "{:?} at risk {}",
+                b.kind,
+                land.risk[i]
+            );
+            owned += (land.owner[i] == b.holding) as usize;
+        }
+        assert!(
+            owned as f64 >= 0.9 * standing.len() as f64,
+            "{owned} of {} buildings on their own holding's ground",
+            standing.len()
+        );
+        // The plan's buildings follow the holding's area on safe ground.
+        let cells = land.target(&settings(0.0)).0;
+        let mut rows: Vec<(f64, usize)> = Vec::new();
+        for (h, g) in land.holdings.iter().enumerate() {
+            let Some(g) = g else { continue };
+            if land.risk[land.index(g.seat)] > SEAT_RISK {
+                continue;
+            }
+            let n = (standing.iter())
+                .filter(|b| b.holding == h as u32)
+                .filter(|b| !matches!(b.kind, Kind::FieldBarn | Kind::Cottage))
+                .count();
+            rows.push((g.area as f64 / cells, n));
+        }
+        let close = (rows.iter())
+            .filter(|&&(a, n)| (n as f64 - (1.0 + 4.0 * a).round().clamp(1.0, 7.0)).abs() <= 1.0)
+            .count();
+        assert!(
+            close as f64 >= 0.75 * rows.len() as f64,
+            "{close} of {} farmsteads within one building of their target",
+            rows.len()
+        );
+        rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mean = |r: &[(f64, usize)]| r.iter().map(|x| x.1 as f64).sum::<f64>() / r.len() as f64;
+        let (small, large) = rows.split_at(rows.len() / 2);
+        eprintln!(
+            "{} buildings, {close} of {} farmsteads near target, means {:.2} and {:.2}",
+            standing.len(),
+            rows.len(),
+            mean(small),
+            mean(large)
+        );
+        assert!(
+            mean(large) > mean(small),
+            "larger holdings have more buildings: {:.2} against {:.2}",
+            mean(large),
+            mean(small)
+        );
+    }
+
+    #[test]
+    fn heirs_build_hamlets_beside_their_parents() {
+        // Holdings founded at 200 square widths divide once they settle to
+        // 70, so most of them divide at least once.
+        let hamlets = |chance: f64| {
+            let (s, later) = (
+                Settings {
+                    hamlet_chance: chance,
+                    ..settings(0.0)
+                },
+                Settings {
+                    hamlet_chance: chance,
+                    holding_area: 70.0,
+                    ..settings(0.0)
+                },
+            );
+            let land = farmed(6, 3000, s, later);
+            let seats: Vec<P> = land.holdings.iter().flatten().map(|g| g.seat).collect();
+            let near = (HAMLET_GAP + 1.5).powi(2);
+            (seats.iter().enumerate())
+                .filter(|&(k, p)| {
+                    (seats.iter().enumerate()).any(|(j, q)| {
+                        j != k && (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) < near
+                    })
+                })
+                .count()
+        };
+        let (apart, together) = (hamlets(0.0), hamlets(1.0));
+        eprintln!("{together} farmsteads in hamlets, {apart} without the hamlet rule");
+        assert!(
+            together >= 4 && together > 2 * apart,
+            "{together} farmsteads in hamlets, {apart} without the hamlet rule"
+        );
     }
 }

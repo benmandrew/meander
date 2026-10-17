@@ -8,6 +8,7 @@
 //! without copying. Call `sync` after stepping, then rebuild every typed
 //! array view: memory growth detaches old views.
 
+use meander_core::farm::RUIN_TIME;
 use meander_core::{FAN_MAX_DEPTH, MILL_RUIN, Params, Sim};
 use wasm_bindgen::prelude::*;
 
@@ -479,6 +480,42 @@ impl River {
     /// Changes whenever a mill is founded or falls into ruin.
     pub fn mill_version(&self) -> f64 {
         self.sim.mill_version as f64
+    }
+
+    /// The farmsteads' buildings, eight values each: the centre's x and y,
+    /// the unit vector along the ridge, the kind (0 house, 1 outshut, 2
+    /// barn, 3 byre, 4 shed, 5 cottage, 6 field barn), 1 if it stands on a
+    /// mound, its age as a ruin over `RUIN_TIME` (0 while it stands), and
+    /// the holding that keeps it, or −1 for a ruin.
+    pub fn buildings(&self) -> Vec<f32> {
+        let sim = &self.sim;
+        let mut out = Vec::with_capacity(8 * sim.land.buildings.len());
+        for b in &sim.land.buildings {
+            let age = if b.standing() {
+                0.0
+            } else {
+                ((sim.time - b.ruined) / RUIN_TIME).min(1.0)
+            };
+            let holding = if b.standing() { b.holding as f64 } else { -1.0 };
+            out.extend(
+                [
+                    b.pos[0],
+                    b.pos[1],
+                    b.dir[0],
+                    b.dir[1],
+                    b.kind as u8 as f64,
+                    b.mound as u8 as f64,
+                    age,
+                    holding,
+                ]
+                .map(|v| v as f32),
+            );
+        }
+        out
+    }
+    /// Changes whenever a building is raised, abandoned or lost.
+    pub fn building_version(&self) -> f64 {
+        self.sim.land.building_version as f64
     }
 
     /// Changes whenever a valley wall slumps, so its drawing can follow the
