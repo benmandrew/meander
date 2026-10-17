@@ -187,6 +187,10 @@ export async function startApp({ view, renderer, display }) {
     renderer.draw(river, wasm.memory, state);
     const year = `Year ${Math.round((river.time() - epoch) * YEARS_PER_UNIT).toLocaleString('en-GB')}`;
     if ($('year').textContent !== year) $('year').textContent = year;
+    // The step count from the reset, which with the seed and the window's
+    // aspect ratio fixes the river's state.
+    const tick = String(river.steps());
+    if ($('tick').textContent !== tick) $('tick').textContent = tick;
     return true;
   }
 

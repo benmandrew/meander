@@ -579,6 +579,11 @@ impl River {
     pub fn time(&self) -> f64 {
         self.sim.time
     }
+    /// Steps since the last reset, the warm-up's among them. A float, so
+    /// JS gets a number and not a BigInt; it is exact to 2^53 steps.
+    pub fn steps(&self) -> f64 {
+        self.sim.steps as f64
+    }
     pub fn sinuosity(&self) -> f64 {
         self.sim.sinuosity()
     }

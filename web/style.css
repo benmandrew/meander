@@ -180,6 +180,15 @@ button:hover { border-color: var(--accent); }
   accent-color: var(--accent);
 }
 
+.tick {
+  margin: 10px 0 0;
+  font: 11px/1.5 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+#tick { user-select: all; }
+
 #stats {
   margin: 14px 0 0;
   font: 11px/1.5 var(--mono);
