@@ -67,7 +67,9 @@ pub struct Params {
     /// more slowly.
     pub slope_sinuosity: f64,
     pub dt: f64,
-    /// Laplacian smoothing strength per step.
+    /// Laplacian smoothing strength per step. It straightens kinks from
+    /// point to point, which the filtered local term of the migration rate
+    /// leaves half as strongly.
     pub smoothing: f64,
     /// Cutoff distance `d_cut`, in channel widths.
     pub cutoff_dist: f64,
@@ -277,7 +279,7 @@ impl Default for Params {
             slope_exponent: SLOPE_EXPONENT,
             slope_sinuosity: SLOPE_SINUOSITY,
             dt: 0.1,
-            smoothing: 0.03,
+            smoothing: 0.045,
             cutoff_dist: 1.0,
             cutoff_min_sep: 20,
             max_step: 0.15,
