@@ -15,8 +15,9 @@
 //! The farmstead follows the river through the risk. A building whose
 //! ground grows too wet, or passes to another holding, is abandoned at a
 //! reorganisation, the worst first, and new buildings go where the ground
-//! is driest, so a farmstead creeps back from an advancing bank. The bank
-//! takes any building it reaches. Abandoned buildings stand as ruins that
+//! is driest, so a farmstead creeps back from an advancing bank. No
+//! building is sited across a tributary, and the bank or a stream takes
+//! any building it reaches. Abandoned buildings stand as ruins that
 //! fade over [`RUIN_TIME`], as the house platforms of deserted villages do.
 
 use crate::geom::P;
@@ -58,6 +59,15 @@ const FACING: f64 = 0.8;
 const JITTER: f64 = 0.6;
 /// Distance between the farmsteads of a hamlet, in channel widths.
 pub(crate) const HAMLET_GAP: f64 = 4.0;
+/// Half the width of the largest tributary, in channel widths, as drawn
+/// (`STREAM_WIDTH` in `main.js`); the smallest is half as wide.
+const STREAM_HALF: f64 = 0.15;
+/// Segments of a stream's course in each [`Reach`].
+const REACH_SEGMENTS: usize = 8;
+/// Farthest a house moves off its seat to keep clear of a stream, in
+/// channel widths, and the steps out to that distance it tries.
+const HOUSE_SHIFT: f64 = 1.5;
+const HOUSE_STEPS: usize = 6;
 /// Cells sampled from a holding to site its field barn.
 const BARN_SAMPLES: usize = 64;
 
@@ -109,6 +119,9 @@ pub struct Building {
     pub ruined: f64,
     /// Whether it stands on a mound, raised on ground above `SEAT_RISK`.
     pub mound: bool,
+    /// Its holding's seat when it was raised. A house serves that seat
+    /// even where a stream has moved it off.
+    pub seat: P,
 }
 
 impl Building {
@@ -141,11 +154,74 @@ fn overlap(a: Rect, b: Rect, pad: f64) -> bool {
         .all(|n| (d[0] * n[0] + d[1] * n[1]).abs() < reach(a, n) + reach(b, n) + pad)
 }
 
+/// A stretch of a tributary's course: the box about it, and its segments
+/// as footprints, so a building is tested only against the stretches near
+/// it.
+pub(crate) struct Reach {
+    lo: P,
+    hi: P,
+    pub(crate) segments: Vec<Rect>,
+}
+
+/// Whether footprint `r` comes within `pad` of any stream.
+fn on_stream(streams: &[Reach], r: Rect, pad: f64) -> bool {
+    let ((c, u, h), n) = (r, [-r.1[1], r.1[0]]);
+    let ex = h[0] * u[0].abs() + h[1] * n[0].abs() + pad;
+    let ey = h[0] * u[1].abs() + h[1] * n[1].abs() + pad;
+    streams.iter().any(|s| {
+        c[0] + ex >= s.lo[0]
+            && c[0] - ex <= s.hi[0]
+            && c[1] + ey >= s.lo[1]
+            && c[1] - ey <= s.hi[1]
+            && s.segments.iter().any(|&g| overlap(g, r, pad))
+    })
+}
+
 fn dist2(a: P, b: P) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)
 }
 
 impl Land {
+    /// Lay out the tributaries' courses, each with its share of the
+    /// largest tributary's flow, which sets its width.
+    pub(crate) fn set_streams<'a>(
+        &mut self,
+        courses: impl Iterator<Item = (&'a [P], f64)>,
+        w: f64,
+    ) {
+        self.streams.clear();
+        for (course, scale) in courses {
+            let r = STREAM_HALF * w * (0.5 + 0.5 * scale);
+            let last = course.len().saturating_sub(1);
+            for start in (0..last).step_by(REACH_SEGMENTS) {
+                let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+                let mut segments = Vec::with_capacity(REACH_SEGMENTS);
+                for k in start..(start + REACH_SEGMENTS).min(last) {
+                    let (a, b) = (course[k], course[k + 1]);
+                    for p in [a, b] {
+                        lo = [lo[0].min(p[0] - r), lo[1].min(p[1] - r)];
+                        hi = [hi[0].max(p[0] + r), hi[1].max(p[1] + r)];
+                    }
+                    let l = dist2(a, b).sqrt();
+                    let u = if l > 1e-9 {
+                        [(b[0] - a[0]) / l, (b[1] - a[1]) / l]
+                    } else {
+                        [1.0, 0.0]
+                    };
+                    let mid = [0.5 * (a[0] + b[0]), 0.5 * (a[1] + b[1])];
+                    segments.push((mid, u, [0.5 * l + r, r]));
+                }
+                self.streams.push(Reach { lo, hi, segments });
+            }
+        }
+    }
+
+    /// Whether building `b` stands across a stream.
+    #[cfg(test)]
+    pub(crate) fn across_stream(&self, b: &Building, w: f64) -> bool {
+        on_stream(&self.streams, b.rect(w), 0.0)
+    }
+
     /// Abandon every standing building of holding `h`, or every one but
     /// its field barn if `keep_barn`.
     pub(crate) fn abandon(&mut self, h: usize, keep_barn: bool) {
@@ -161,16 +237,19 @@ impl Land {
         self.building_version += changed as u64;
     }
 
-    /// Remove the buildings and ruins the water has reached, and the ruins
-    /// that have faded. Runs at the end of a survey, when `dist` is whole.
-    pub(crate) fn weather(&mut self) {
+    /// Remove the buildings and ruins the water has reached, a stream
+    /// among them, and the ruins that have faded. Runs at the end of a
+    /// survey, when `dist` is whole.
+    pub(crate) fn weather(&mut self, w: f64) {
         let (cols, rows, c, now) = (self.cols, self.rows, self.cell, self.now);
-        let dist = &self.dist;
+        let (dist, streams) = (&self.dist, &self.streams);
         let before = self.buildings.len();
         self.buildings.retain(|b| {
             let x = ((b.pos[0] / c).max(0.0) as usize).min(cols - 1);
             let y = ((b.pos[1] / c).max(0.0) as usize).min(rows - 1);
-            dist[y * cols + x] > 0.0 && now - b.ruined < RUIN_TIME
+            dist[y * cols + x] > 0.0
+                && now - b.ruined < RUIN_TIME
+                && !on_stream(streams, b.rect(w), 0.0)
         });
         self.building_version += (self.buildings.len() != before) as u64;
     }
@@ -189,11 +268,13 @@ impl Land {
         let housed = self
             .buildings
             .iter()
-            .any(|b| mine(b) && b.kind == Kind::House && dist2(b.pos, seat) < 0.0625 * w * w);
+            .any(|b| mine(b) && b.kind == Kind::House && dist2(b.seat, seat) < 0.0625 * w * w);
         if !housed {
             self.abandon(h, true);
             let dir = self.orientation(seat, axis, s);
-            self.raise(Kind::House, seat, dir, me);
+            if let Some((p, d)) = self.house_site(me, seat, dir, w) {
+                self.raise(Kind::House, p, d, me, seat);
+            }
             return;
         }
         let threat = |l: &Land, b: &Building| {
@@ -252,7 +333,7 @@ impl Land {
             self.site(kind, me, seat, dir, ridge, s)
         };
         if let Some((p, d)) = site {
-            self.raise(kind, p, d, me);
+            self.raise(kind, p, d, me, seat);
         }
     }
 
@@ -283,7 +364,7 @@ impl Land {
         want
     }
 
-    fn raise(&mut self, kind: Kind, pos: P, dir: P, me: u32) {
+    fn raise(&mut self, kind: Kind, pos: P, dir: P, me: u32, seat: P) {
         let mound = self.risk[self.index(pos)] > SEAT_RISK;
         self.buildings.push(Building {
             pos,
@@ -293,6 +374,7 @@ impl Land {
             built: self.now,
             ruined: f64::INFINITY,
             mound,
+            seat,
         });
         self.building_version += 1;
     }
@@ -411,36 +493,10 @@ impl Land {
                 }
             }
         }
-        let (width, height) = (self.cols as f64 * self.cell, self.rows as f64 * self.cell);
         let mut best: Option<(f64, (P, P))> = None;
         for (p, d, against) in sites {
             let r = rect(p, d, kind, w);
-            let (u, h) = (r.1, r.2);
-            let n = [-u[1], u[0]];
-            let mut risk = 0.0f32;
-            let mut ok = true;
-            for (a, b) in [
-                (0.0, 0.0),
-                (1.0, 1.0),
-                (1.0, -1.0),
-                (-1.0, 1.0),
-                (-1.0, -1.0),
-            ] {
-                let q = [
-                    p[0] + a * h[0] * u[0] + b * h[1] * n[0],
-                    p[1] + a * h[0] * u[1] + b * h[1] * n[1],
-                ];
-                if q[0] < 0.0 || q[1] < 0.0 || q[0] >= width || q[1] >= height {
-                    ok = false;
-                    break;
-                }
-                let i = self.index(q);
-                if self.owner[i] != me || !self.open[i] || self.risk[i] > FLEE_RISK {
-                    ok = false;
-                    break;
-                }
-                risk = risk.max(self.risk[i]);
-            }
+            let ground = self.ground(r, me);
             let blocked = self.buildings.iter().any(|b| {
                 let o = b.rect(w);
                 let pad = if against == Some(o) {
@@ -449,10 +505,10 @@ impl Land {
                     CLEAR * w
                 };
                 b.standing() && overlap(o, r, pad)
-            });
-            if !ok || blocked {
+            }) || on_stream(&self.streams, r, CLEAR * w);
+            let Some(risk) = ground.filter(|_| !blocked) else {
                 continue;
-            }
+            };
             let off = match yard {
                 Some((y, ..)) => {
                     let (dx, dy) = (p[0] - y[0], p[1] - y[1]);
@@ -468,6 +524,82 @@ impl Land {
             }
         }
         best.map(|(_, site)| site)
+    }
+
+    /// The highest flood risk under footprint `r`, sampled at its centre
+    /// and corners, if they all lie on holding `me`'s open ground below
+    /// `FLEE_RISK`.
+    fn ground(&self, r: Rect, me: u32) -> Option<f32> {
+        let (width, height) = (self.cols as f64 * self.cell, self.rows as f64 * self.cell);
+        let (p, u, h) = r;
+        let n = [-u[1], u[0]];
+        let mut risk = 0.0f32;
+        for (a, b) in [
+            (0.0, 0.0),
+            (1.0, 1.0),
+            (1.0, -1.0),
+            (-1.0, 1.0),
+            (-1.0, -1.0),
+        ] {
+            let q = [
+                p[0] + a * h[0] * u[0] + b * h[1] * n[0],
+                p[1] + a * h[0] * u[1] + b * h[1] * n[1],
+            ];
+            if q[0] < 0.0 || q[1] < 0.0 || q[0] >= width || q[1] >= height {
+                return None;
+            }
+            let i = self.index(q);
+            if self.owner[i] != me || !self.open[i] || self.risk[i] > FLEE_RISK {
+                return None;
+            }
+            risk = risk.max(self.risk[i]);
+        }
+        Some(risk)
+    }
+
+    /// Where holding `me` raises the house for `seat`, laid along `dir`:
+    /// on the seat, or, where a stream runs by it, at the nearest site
+    /// within `HOUSE_SHIFT` that keeps clear of the stream and of standing
+    /// buildings, on the holding's open ground below `FLEE_RISK`, turned
+    /// either way. With none, the holding goes without a farmstead until
+    /// the stream or its seat moves.
+    fn house_site(&self, me: u32, seat: P, dir: P, w: f64) -> Option<(P, P)> {
+        let clear = |r: Rect| !on_stream(&self.streams, r, CLEAR * w);
+        if clear(rect(seat, dir, Kind::House, w)) {
+            return Some((seat, dir));
+        }
+        let n = [-dir[1], dir[0]];
+        let diag = std::f64::consts::FRAC_1_SQRT_2;
+        let ways = [
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (diag, diag),
+            (diag, -diag),
+            (-diag, diag),
+            (-diag, -diag),
+        ];
+        for k in 1..=HOUSE_STEPS {
+            let t = k as f64 * HOUSE_SHIFT * w / HOUSE_STEPS as f64;
+            for (a, b) in ways {
+                let p = [
+                    seat[0] + t * (a * dir[0] + b * n[0]),
+                    seat[1] + t * (a * dir[1] + b * n[1]),
+                ];
+                for d in [dir, n] {
+                    let r = rect(p, d, Kind::House, w);
+                    let free = !self
+                        .buildings
+                        .iter()
+                        .any(|o| o.standing() && overlap(o.rect(w), r, CLEAR * w));
+                    if clear(r) && free && self.ground(r, me).is_some() {
+                        return Some((p, d));
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// A site for holding `h`'s field barn: of cells sampled from its
@@ -495,7 +627,8 @@ impl Land {
         let clear = !self
             .buildings
             .iter()
-            .any(|b| b.standing() && overlap(b.rect(s.width), r, CLEAR * s.width));
+            .any(|b| b.standing() && overlap(b.rect(s.width), r, CLEAR * s.width))
+            && !on_stream(&self.streams, r, CLEAR * s.width);
         clear.then_some((p, axis))
     }
 }

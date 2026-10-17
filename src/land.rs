@@ -26,7 +26,7 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, VecDeque};
 
-use crate::farm::{Building, HAMLET_GAP};
+use crate::farm::{Building, HAMLET_GAP, Reach};
 use crate::field::Erodibility;
 use crate::geom::P;
 use crate::rng::Rng;
@@ -38,7 +38,7 @@ pub const NONE: u32 = u32::MAX;
 /// its distance transform in `BANDS` bands of rows, the backward pass in as
 /// many, then the accretion of the open ground it found.
 pub const SURVEY_STEPS: u64 = 40;
-const BANDS: usize = 19;
+pub(crate) const BANDS: usize = 19;
 /// Most cells a search settles in one step.
 pub const BUDGET: usize = 128;
 
@@ -187,6 +187,8 @@ pub struct Land {
     /// A point on the leat of each working mill, which the holding that
     /// has the ground there counts as its own.
     pub mills: Vec<P>,
+    /// The tributaries' courses, which no building stands across.
+    pub(crate) streams: Vec<Reach>,
     /// Simulated time of the work under way.
     pub(crate) now: f64,
     /// Cells a holding can take: off the water, and grassed over.
@@ -231,6 +233,7 @@ impl Land {
             buildings: Vec::new(),
             building_version: 0,
             mills: Vec::new(),
+            streams: Vec::new(),
             now: 0.0,
             open: vec![false; n],
             rough: field
@@ -333,7 +336,7 @@ impl Land {
             self.backward(field, valley, s, y0, y1);
         } else if p == 2 * BANDS {
             self.now = s.time;
-            self.weather();
+            self.weather(s.width);
             if self.founded {
                 self.tasks.push_back(Task::Accrete);
             } else {
