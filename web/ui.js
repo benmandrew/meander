@@ -35,7 +35,8 @@ const STATS_EVERY = 250;
 // `renderer` provides draw(river, memory, state), reset(river, bounds, seed),
 // capture(river, memory, state), which is called during warm-up in place of
 // drawing, idle(river, memory, state), which is called on frames that draw
-// nothing, to carry on with drawing work spread over frames, and
+// nothing, to carry on with drawing work spread over frames, and returns
+// whether it did any, and
 // settle(river, memory, state), which finishes that work at once when the
 // river stops, and behind(river), the simulated time that work has waited.
 // `display` holds the renderer's own settings.
@@ -68,8 +69,17 @@ export async function startApp({ view, renderer, display }) {
   // Whether the river has stopped, on a pause or a single step, and the
   // drawing work spread over frames should finish on the next frame.
   let settle = false;
+  // Whether a frame is scheduled. The loop sleeps while the river is paused
+  // and has nothing left to draw, and `wake` starts it again.
+  let scheduled = false;
   let lastFrame;
   const $ = (id) => document.getElementById(id);
+
+  function wake() {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(frame);
+  }
 
   function reset() {
     const r = view.getBoundingClientRect();
@@ -82,6 +92,7 @@ export async function startApp({ view, renderer, display }) {
     dirty = true;
     $('overlay').hidden = warming <= 0;
     renderer.reset(river, state.bounds, seed);
+    wake();
   }
 
   function buildControls() {
@@ -98,6 +109,7 @@ export async function startApp({ view, renderer, display }) {
         local[s.key] = Number(input.value);
         out.textContent = String(local[s.key]);
         dirty = true;
+        wake();
       };
       input.addEventListener('input', apply);
       apply();
@@ -106,7 +118,21 @@ export async function startApp({ view, renderer, display }) {
   }
 
   function frame(now) {
-    requestAnimationFrame(frame);
+    scheduled = false;
+    // A frame that throws still schedules the next, so one failed draw
+    // does not stop the loop.
+    let busy = true;
+    try {
+      busy = tick(now);
+    } finally {
+      // A sleeping loop wakes with no time owed for the pause.
+      if (busy) wake();
+      else lastFrame = undefined;
+    }
+  }
+
+  // Run one frame. Returns whether the loop must run another.
+  function tick(now) {
     // Real seconds since the last frame, capped so a background tab does
     // not return to a huge backlog.
     const elapsed = Math.min(0.1, (now - (lastFrame ?? now)) / 1000);
@@ -122,18 +148,20 @@ export async function startApp({ view, renderer, display }) {
       if (warming <= 0) epoch = river.time();
       $('overlay').hidden = warming <= 0;
       $('overlay').textContent = `Developing river… ${Math.round(100 * (1 - warming / local.warmup))}%`;
-      return;
+      return true;
     }
     const t0 = performance.now();
-    update(elapsed);
+    const busy = update(elapsed);
     frameTimes[frames++ % FRAME_WINDOW] = performance.now() - t0;
     if (now - statsAt >= STATS_EVERY) {
       statsAt = now;
       showStats();
     }
+    return busy;
   }
 
-  // Step the river and draw it, after the warm-up.
+  // Step the river and draw it, after the warm-up. Returns whether the loop
+  // must run another frame.
   function update(elapsed) {
     // A held frame is not owed later, so the river does not lurch on.
     if (running && renderer.behind(river) > MAX_LAG) owed = 0;
@@ -154,14 +182,12 @@ export async function startApp({ view, renderer, display }) {
     }
     // Draw only when something has changed, so a paused or slow river costs
     // nothing between steps beyond drawing work spread over frames.
-    if (!dirty) {
-      renderer.idle(river, wasm.memory, state);
-      return;
-    }
+    if (!dirty) return renderer.idle(river, wasm.memory, state) || running;
     dirty = false;
     renderer.draw(river, wasm.memory, state);
     const year = `Year ${Math.round((river.time() - epoch) * YEARS_PER_UNIT).toLocaleString('en-GB')}`;
     if ($('year').textContent !== year) $('year').textContent = year;
+    return true;
   }
 
   // The mean, 95th and 99th percentile of the recent frame times.
@@ -170,13 +196,15 @@ export async function startApp({ view, renderer, display }) {
     if (!times.length) return;
     const at = (p) => times[Math.min(times.length - 1, Math.floor(p * times.length))].toFixed(1);
     const mean = times.reduce((a, b) => a + b, 0) / times.length;
-    $('stats').textContent = `ms/frame   mean ${mean.toFixed(1)}   p95 ${at(0.95)}   p99 ${at(0.99)}`;
+    const text = `ms/frame   mean ${mean.toFixed(1)}   p95 ${at(0.95)}   p99 ${at(0.99)}`;
+    if ($('stats').textContent !== text) $('stats').textContent = text;
   }
 
   function togglePlay() {
     running = !running;
     settle = !running;
     $('play').textContent = running ? 'Pause' : 'Play';
+    wake();
   }
 
   $('play').addEventListener('click', togglePlay);
@@ -185,6 +213,7 @@ export async function startApp({ view, renderer, display }) {
     river.advance(local.speed);
     dirty = true;
     settle = !running;
+    wake();
   };
   $('step').addEventListener('click', step);
   $('reset').addEventListener('click', reset);
@@ -213,5 +242,4 @@ export async function startApp({ view, renderer, display }) {
   const warmup = new URLSearchParams(location.search).get('warmup');
   if (warmup !== null) local.warmup = Number(warmup);
   reset();
-  requestAnimationFrame(frame);
 }
