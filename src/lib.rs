@@ -1748,6 +1748,18 @@ impl Sim {
         for i in 1..n.saturating_sub(1) {
             let free = self.held.get(i).copied().unwrap_or(1.0);
             let (a, b, c) = (src[i - 1], src[i], src[i + 1]);
+            // A point where the line turns back by more than 120 degrees
+            // is a hairpin too short for a neck cutoff, left by a sharp
+            // change of rate from one point to the next. It goes to the
+            // middle of its neighbours, before the arms cross.
+            let (u, v) = ([b[0] - a[0], b[1] - a[1]], [c[0] - b[0], c[1] - b[1]]);
+            let dot = u[0] * v[0] + u[1] * v[1];
+            let uv = (u[0] * u[0] + u[1] * u[1]) * (v[0] * v[0] + v[1] * v[1]);
+            let k = if dot < 0.0 && dot * dot > 0.25 * uv {
+                0.5
+            } else {
+                k
+            };
             let p = &mut self.centerline[i];
             p[0] += free * k * (a[0] + c[0] - 2.0 * b[0]);
             p[1] += free * k * (a[1] + c[1] - 2.0 * b[1]);
