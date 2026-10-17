@@ -67,20 +67,28 @@ const FLOODPLAIN_IDLE_BUDGET = 10;
 // contours bend into a V.
 // Relief is drawn as on old survey maps: hachures run down the slope over
 // the fields, in two staggered rows `HACHURE_GAP` widths apart, heavier
-// where the slope is steeper. The light comes from the upper left, as for
-// the trees, so the wall at the top faces away from it and its hachures
-// are darker. Where `HANGER` noise passes its threshold, favoured on steep
+// where the slope is steeper. Each is a wedge that thins down the slope
+// from `HACHURE_TAPER[0]` to `HACHURE_TAPER[1]` of its width. The light
+// comes from the upper left, as for the trees, so the wall at the top
+// faces away from it, with darker hachures and a shadow over the scarp,
+// and the wall at the bottom catches it. The shade or light is laid in
+// nested bands, `SCARP_TONE` opaque where they overlap over the steep
+// middle of the slope, so it softens towards the brow and foot. Where `HANGER` noise passes its threshold, favoured on steep
 // stretches and in combes, the slope is a hanger wood in place of fields,
 // tapering at each end. The upland's drier soil tints the ground beyond
 // the foot, under its fields.
 const UPLAND = [190, 182, 132];
 const UPLAND_OPACITY = 0.3;
 const SCARP_SHADE = [96, 100, 66];
+const SCARP_LIGHT = [244, 236, 200];
+const SCARP_TONE = { shade: 0.24, light: 0.26 };
+const SCARP_BANDS = [[0, 1], [0.15, 0.85], [0.3, 0.7]];
 const SCARP = [1.2, 4.5];
 const COMBE_BROW = 1.6;
 const HANGER = { knots: 14, threshold: 0.62 };
 const HACHURE_GAP = 0.45;
 const HACHURE_WIDTH = 0.11;
+const HACHURE_TAPER = [1.5, 0.25];
 // Vegetation on the floodplain, drawn as nested translucent regions that
 // darken with age: shrub once it binds a point bar after
 // `vegetation_time`, then young and mature forest at these fractions of
@@ -1823,6 +1831,19 @@ class SvgRenderer {
       const trace = (line, offset = 0) => Array.from(line, (d, k) => point(k, d + offset)).join(' ');
       const rim = side < 0 ? 0 : h;
       paths.push([this.uplandLayer, { d: `M${dp1(x0)} ${rim} L${trace(foot)} L${dp1(x0 + vw)} ${rim}Z` }]);
+      const lit = side > 0;
+      // Shade or light over the scarp, in nested bands between fractions
+      // of the way from brow to foot.
+      const tone = lit ? SCARP_TONE.light : SCARP_TONE.shade;
+      const bandOpacity = 1 - (1 - tone) ** (1 / SCARP_BANDS.length);
+      let bands = '';
+      for (const [a, b] of SCARP_BANDS) {
+        const along = (f) => Array.from(foot, (d, k) => point(k, brow[k] + f * (d - brow[k])));
+        bands += `M${along(a).join(' ')} L${along(b).reverse().join(' ')}Z`;
+      }
+      paths.push([this.scarpLayer, {
+        d: bands, fill: `rgb(${lit ? SCARP_LIGHT : SCARP_SHADE})`, 'fill-opacity': bandOpacity.toFixed(3),
+      }]);
       // Hanger woods, each tapering to a point at its ends, tinted like the
       // woods among the fields, which they hide.
       let woods = '';
@@ -1841,8 +1862,9 @@ class SvgRenderer {
       }
       maskData += woods;
       paths.push([this.scarpLayer, { d: woods, fill: `rgb(${FOREST.at(-1).colour})`, 'fill-opacity': WOODS_OPACITY }]);
-      const lit = side > 0;
-      // Hachures, sorted into three weights by steepness.
+      // Hachures, sorted into three weights by steepness, each a wedge
+      // around its course, thinning down the slope.
+      const half = [0, 1, 2].map((k) => 0.5 * HACHURE_WIDTH * w * (0.6 + 0.4 * k));
       const strokes = [[], [], []];
       const at = (line, x) => {
         const t = Math.max(0, Math.min(n - 1, (x - x0) / step)), k = Math.min(n - 2, Math.floor(t));
@@ -1866,16 +1888,22 @@ class SvgRenderer {
           }
           const run = at(foot, x) - at(brow, x);
           const weight = Math.min(2, Math.floor(3 * clamp01((SCARP[1] * w - run) / ((SCARP[1] - SCARP[0]) * w))));
-          let d = '';
-          for (let k = 0; k < pts.length; k += 2) d += `${k ? 'L' : 'M'}${dp1(pts[k])} ${y(pts[k + 1])}`;
-          strokes[weight].push(d);
+          // Offset each point across the course, by the taper at its place.
+          const m = pts.length / 2, left = [], right = [];
+          for (let k = 0; k < m; k++) {
+            const [a, b] = [Math.max(0, k - 1), Math.min(m - 1, k + 1)];
+            const tx = pts[2 * b] - pts[2 * a], td = pts[2 * b + 1] - pts[2 * a + 1];
+            const len = Math.sqrt(tx * tx + td * td) || 1;
+            const r = half[weight] * between(HACHURE_TAPER, k / Math.max(1, m - 1));
+            const [ox, od] = [-td / len * r, tx / len * r];
+            left.push(`${dp1(pts[2 * k] + ox)} ${y(pts[2 * k + 1] + od)}`);
+            right.push(`${dp1(pts[2 * k] - ox)} ${y(pts[2 * k + 1] - od)}`);
+          }
+          strokes[weight].push(`M${left.join(' ')} L${right.reverse().join(' ')}Z`);
         }
       }
-      strokes.forEach((list, k) => paths.push([this.scarpLayer, {
-        d: list.join(''), fill: 'none', 'stroke-linecap': 'round',
-        stroke: `rgb(${SCARP_SHADE})`,
-        'stroke-width': dp1(HACHURE_WIDTH * w * (0.6 + 0.4 * k)),
-        'stroke-opacity': lit ? 0.38 : 0.5,
+      strokes.forEach((list) => paths.push([this.scarpLayer, {
+        d: list.join(''), fill: `rgb(${SCARP_SHADE})`, 'fill-opacity': lit ? 0.38 : 0.55,
       }]));
     }
     this.uplandLayer.replaceChildren();

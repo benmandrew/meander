@@ -7,7 +7,7 @@ Six changes, in this order, one commit each. Measure each against seeds 1–12 a
 - [x] Tracks between farmsteads, with temporary fords where they cross the channel. No bridges: the channel moves too far. The network is found in the core, so replays match: a search from every farmstead, then a greedy spanner over the places the searches meet (`tracks.rs`). Over seeds 1–3 it holds 44–49 tracks and 3–9 fords at 24,000 steps, and adds 0.015 ms to the median step (0.161–0.181 ms, from 0.146–0.165).
 - [x] Chute cutoffs, as a steady process across point bars (`Sim::chute`, `chute_rate` 0.005 a unit times the supply). Over seeds 1–12 at 24,000 steps, chutes make 370 of 758 cutoffs, and mean sinuosity is unchanged (1.461 against 1.462 without them): chutes take bends that would otherwise close at the neck. Step time is unchanged.
 - [x] Wet ground: low ground away from the channel drawn as wet meadow and reed. Reworked ground silts fast (90% of vegetated ground stands above a third of the flood level), so wet ground is the reworked ground lowest against that, older than 250 years. Never-swept ground stays dry, or the whole valley would start as marsh. Over the middle half of the window at 24,000 steps it covers 1.3% of the floor on seed 1 and 11% on seed 3. Step time is unchanged (median 0.179 ms against 0.174 ms over seeds 1–3, within run-to-run noise).
-- [ ] Valley sides that read as slopes.
+- [x] Valley sides that read as slopes: shade or light over each scarp in nested bands, deepest over the steep middle, and hachures drawn as wedges that thin from 1.5 to 0.25 of their width down the slope. Drawing only; walls still redraw at most every 50 years.
 
 # Plan: drawing performance
 
