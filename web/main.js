@@ -496,6 +496,15 @@ function edgeData(edge, frame, start, back) {
   return d;
 }
 
+// Float64Arrays kept from draw to draw by name, so the channel's per-run
+// and per-pass arrays are not allocated each draw. `scratch` returns a view
+// of the first `n` entries, whose contents are left from the last use.
+const scratchArrays = {};
+function scratch(name, n) {
+  if (!(scratchArrays[name]?.length >= n)) scratchArrays[name] = new Float64Array(Math.ceil(1.25 * n));
+  return scratchArrays[name].subarray(0, n);
+}
+
 // Closed path data for the channel over points [start, end), out to
 // `scale` times the local width either side, plus `bar[i]` on the side of
 // the left normal its sign gives, if `bar` is given: one bank forwards, the
@@ -505,7 +514,7 @@ function edgeData(edge, frame, start, back) {
 function channelData(pts, widths, frame, scale, bar, start, end) {
   if (end - start < 2) return '';
   const { nx, ny, curv } = frame;
-  const [left, right] = [new Float64Array(2 * (end - start)), new Float64Array(2 * (end - start))];
+  const [left, right] = [scratch('left', 2 * (end - start)), scratch('right', 2 * (end - start))];
   for (let i = start; i < end; i++) {
     const h = scale * widths[i], k = curv[i], b = bar ? bar[i] : 0;
     const [bl, br] = [h + Math.max(0, b), h + Math.max(0, -b)];
@@ -588,23 +597,24 @@ function barRim(bend, w) {
   return bend.map((c) => Math.sign(c) * BAR_RIM * w * smoothstep(Math.abs(c) * w * BAR_RADIUS));
 }
 
-// `values` smoothed along the river by four [1, 2, 1] passes.
-function smoothed(values) {
+// `values` smoothed along the river by four [1, 2, 1] passes, in the
+// scratch array `name`, which the next call with that name overwrites.
+function smoothed(values, name) {
   const n = values.length;
-  let v = Float64Array.from(values);
-  for (let pass = 0; pass < 4; pass++) {
-    const prev = v;
-    v = new Float64Array(n);
+  const [out, between] = [scratch(name, n), scratch('smoothed', n)];
+  let prev = values;
+  for (const v of [between, out, between, out]) {
     for (let i = 0; i < n; i++) v[i] = 0.25 * prev[Math.max(0, i - 1)] + 0.5 * prev[i] + 0.25 * prev[Math.min(n - 1, i + 1)];
+    prev = v;
   }
-  return v;
+  return out;
 }
 
 // Closed path data for a band along the river over points [start, end),
 // between signed offsets `a[i]` and `b[i]` along the left normal.
 function bandData(pts, frame, a, b, start, end) {
   const { nx, ny } = frame;
-  const [left, right] = [new Float64Array(2 * (end - start)), new Float64Array(2 * (end - start))];
+  const [left, right] = [scratch('left', 2 * (end - start)), scratch('right', 2 * (end - start))];
   for (let i = start; i < end; i++) {
     const [x, y, j] = [pts[2 * i], pts[2 * i + 1], 2 * (i - start)];
     [left[j], left[j + 1]] = [x + a[i] * nx[i], y + a[i] * ny[i]];
@@ -673,7 +683,7 @@ function riffleRuns(pts, widths, frame, bend, w, shown) {
     strength[i] = grow * (1 - smoothstep(Math.abs(bend[i]) / (RIFFLE_CROSSING * bends)));
   }
   // Smoothed along the river, so each riffle tapers to round ends.
-  const riffle = smoothed(strength);
+  const riffle = smoothed(strength, 'riffle');
   const ra = new Float64Array(n), rb = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const h = 0.5 * RIFFLE_WIDTH * widths[i] * riffle[i];
@@ -686,7 +696,7 @@ function riffleRuns(pts, widths, frame, bend, w, shown) {
 // grow and shrink slowly.
 function midBarRuns(pts, widths, frame, w, shown) {
   const n = widths.length;
-  const wide = smoothed(widths);
+  const wide = smoothed(widths, 'wide');
   const ba = new Float64Array(n), bb = new Float64Array(n);
   for (let i = 0; i < n; i++) {
     const h = 0.5 * MID_BAR * wide[i] * smoothstep((wide[i] / w - MID_BAR_FROM) / (MID_BAR_FULL - MID_BAR_FROM));
@@ -1338,23 +1348,37 @@ function alongside(pts, oxWidths, start, end, line, widths, channel, w) {
 // point in a row are one run of the table.
 class Grid {
   constructor(pts, size) {
+    this.stride = 4099;
+    this.fill(pts, size);
+  }
+
+  // Hash `pts` afresh, in the arrays of the last fill while they are large
+  // enough. Returns the grid.
+  fill(pts, size) {
     const n = pts.length / 2;
     let buckets = 1;
     while (buckets < 4 * n) buckets *= 2;
     this.pts = pts;
     this.size = size;
     this.mask = buckets - 1;
-    this.stride = 4099;
-    this.start = new Int32Array(buckets + 1);
-    const cell = new Int32Array(n);
+    if (!(this.start?.length >= buckets + 1)) {
+      this.start = new Int32Array(buckets + 1);
+      this.next = new Int32Array(buckets);
+    }
+    if (!(this.items?.length >= n)) {
+      this.items = new Int32Array(n);
+      this.cell = new Int32Array(n);
+    }
+    const { start, next, items, cell } = this;
+    start.fill(0, 0, buckets + 1);
     for (let i = 0; i < n; i++) {
       cell[i] = this.bucket(Math.floor(pts[2 * i] / size), Math.floor(pts[2 * i + 1] / size));
-      this.start[cell[i] + 1]++;
+      start[cell[i] + 1]++;
     }
-    for (let b = 0; b < buckets; b++) this.start[b + 1] += this.start[b];
-    const fill = this.start.slice(0, buckets);
-    this.items = new Int32Array(n);
-    for (let i = 0; i < n; i++) this.items[fill[cell[i]]++] = 2 * i;
+    for (let b = 0; b < buckets; b++) start[b + 1] += start[b];
+    next.set(start.subarray(0, buckets));
+    for (let i = 0; i < n; i++) items[next[cell[i]]++] = 2 * i;
+    return this;
   }
 
   bucket(cx, cy) {
@@ -2097,7 +2121,7 @@ class SvgRenderer {
     }
     // Channel points, to find lake points beside it.
     const reach = (MAX_WIDTH + ALONGSIDE_GAP) * w;
-    const channel = new Grid(line, reach);
+    const channel = this.channelGrid = this.channelGrid?.fill(line, reach) ?? new Grid(line, reach);
 
     this.record(line, river.time(), w, local);
     this.drawBars(river.time(), w, local);
@@ -2213,7 +2237,7 @@ class SvgRenderer {
     const [x0, vw] = this.window;
     const shown = span(line, x0 - CHANNEL_MARGIN * w, x0 + vw + CHANNEL_MARGIN * w);
     const waterRuns = channelRuns(line, widths, frame, shown, 0.5);
-    const bend = smoothed(frame.curv);
+    const bend = smoothed(frame.curv, 'bend');
     const bankRuns = channelRuns(line, widths, frame, shown, BANK_EDGE, barRim(bend, w));
     resize(this.bankRuns, bankRuns.length, this.bank);
     resize(this.waterRuns, waterRuns.length, this.water);
