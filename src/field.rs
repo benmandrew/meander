@@ -49,7 +49,7 @@ pub(crate) fn lattice(seed: u64, x: i64, y: i64) -> f64 {
     (h >> 11) as f64 / (1u64 << 53) as f64
 }
 
-fn value_noise(seed: u64, x: f64, y: f64) -> f64 {
+pub(crate) fn value_noise(seed: u64, x: f64, y: f64) -> f64 {
     let (x0, y0) = (x.floor(), y.floor());
     let (fx, fy) = (x - x0, y - y0);
     let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));

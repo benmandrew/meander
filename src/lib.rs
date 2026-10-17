@@ -17,7 +17,7 @@ pub mod tributary;
 pub mod walls;
 pub mod wood;
 
-use field::{Erodibility, Ground, Overbank};
+use field::{Erodibility, Ground, Overbank, value_noise};
 use geom::{P, curvature, dist, resample, right_normal};
 use land::Land;
 pub use mills::Mill;
@@ -96,8 +96,12 @@ pub struct Params {
     /// square root of time. Bends drift downstream and leave the domain, so
     /// without this the river eventually straightens.
     pub jitter: f64,
-    /// Correlation length of the jitter along the river, in channel widths.
+    /// Correlation length of the jitter in space, in channel widths: its
+    /// lattice is twice this apart.
     pub jitter_scale: f64,
+    /// Time over which the jitter at a point turns, so the river drifts
+    /// steadily between frames and does not shake from step to step.
+    pub jitter_time: f64,
     /// Width of the valley the river may migrate within, centred on the
     /// domain, in channel widths. 0 allows the whole domain. The walls
     /// (see [`Sim::walls`]) wander outwards of it, never inwards.
@@ -284,6 +288,8 @@ impl Default for Params {
             scroll_lifetime: SCROLL_LIFETIME,
             jitter: 0.05,
             jitter_scale: 3.0,
+            // 5 years, a second at the page's default speed.
+            jitter_time: 2.0,
             valley_width: 45.0,
             edge_margin: 8.0,
             pinch_width: 6.0,
@@ -358,6 +364,7 @@ impl Params {
         "scroll_lifetime",
         "jitter",
         "jitter_scale",
+        "jitter_time",
         "valley_width",
         "edge_margin",
         "pinch_width",
@@ -428,6 +435,7 @@ impl Params {
             "scroll_lifetime" => &mut self.scroll_lifetime,
             "jitter" => &mut self.jitter,
             "jitter_scale" => &mut self.jitter_scale,
+            "jitter_time" => &mut self.jitter_time,
             "valley_width" => &mut self.valley_width,
             "edge_margin" => &mut self.edge_margin,
             "pinch_width" => &mut self.pinch_width,
@@ -627,6 +635,8 @@ pub struct Sim {
     /// walls after bluff erosion.
     pub wall_version: u64,
     rng: Rng,
+    /// Seed of the jitter's field, fixed at reset.
+    jitter_seed: u64,
     /// Draws for the floodplain's events (falling wood, new mills, scroll
     /// bars), from a stream of their own so they leave the river's draws
     /// unchanged.
@@ -719,6 +729,15 @@ fn edge_taper(p: P, bounds: P, margin: f64, floor: (f64, f64)) -> f64 {
 const EVENTS_SEED: u64 = 0x5eed_f10d;
 /// Mixed into the seed for the stream of tributary course draws.
 const STREAMS_SEED: u64 = 0x57e4_a3c1;
+/// Mixed into the seed for the jitter's field.
+const JITTER_SEED: u64 = 0x717e_b1e5;
+/// Mixed into the jitter's seed with each redraw of its field.
+const JITTER_DRAW: u64 = 0xD1B5_4A32_D192_ED03;
+/// Mean, over a redraw of the jitter's field, of the push blended from two
+/// draws and rescaled to unit RMS, for each unit of either draw: √2 asinh 1.
+/// Dividing by it, and by the square root of `jitter_time`, gives the river
+/// the same random drift over long times as a fresh push each step.
+const JITTER_BLEND: f64 = 1.2465;
 
 /// Feature size of the erodibility noise, in channel widths at reset.
 const NOISE_SCALE: f64 = 25.0;
@@ -1029,6 +1048,7 @@ impl Sim {
             land_streams: u64::MAX,
             wall_version: 0,
             rng: Rng::new(seed),
+            jitter_seed: seed ^ JITTER_SEED,
             events: Rng::new(seed ^ EVENTS_SEED),
             streams: Rng::new(seed ^ STREAMS_SEED),
             recent_cuts: Vec::new(),
@@ -1060,6 +1080,7 @@ impl Sim {
     /// amplitude `noise` channel widths.
     pub fn reset(&mut self, seed: u64, noise: f64) {
         self.rng = Rng::new(seed);
+        self.jitter_seed = seed ^ JITTER_SEED;
         self.events = Rng::new(seed ^ EVENTS_SEED);
         self.streams = Rng::new(seed ^ STREAMS_SEED);
         let [w, h] = self.bounds;
@@ -1557,19 +1578,23 @@ impl Sim {
             1.0
         };
 
-        // Noise smoothed along the river by a forward and a backward
-        // exponential filter, with correlation length `jitter_scale`, then
-        // rescaled to the target RMS. Short-correlated noise only adds kinks.
-        let amp = p.jitter * p.width * p.dt.sqrt();
+        // Value noise over the floodplain on a lattice `2 jitter_scale`
+        // widths apart, redrawn every `jitter_time` and blended between
+        // draws, so the push at each point turns over that time. Rescaled to
+        // the target RMS. Short-correlated noise only adds kinks.
+        let tau = p.jitter_time.max(p.dt);
+        let amp = p.jitter * p.width * p.dt / (JITTER_BLEND * tau.sqrt());
+        let cell = 1.0 / (2.0 * p.jitter_scale.max(SPACING) * p.width);
+        let draw = (self.time / tau).floor();
+        let s = self.time / tau - draw;
+        let seeds =
+            [draw as u64, draw as u64 + 1].map(|k| self.jitter_seed ^ k.wrapping_mul(JITTER_DRAW));
         self.noise.clear();
-        self.noise.extend((0..n).map(|_| self.rng.approx_normal()));
-        let a = (-SPACING / p.jitter_scale.max(SPACING)).exp();
-        for i in 1..n {
-            self.noise[i] = a * self.noise[i - 1] + (1.0 - a) * self.noise[i];
-        }
-        for i in (0..n.saturating_sub(1)).rev() {
-            self.noise[i] = a * self.noise[i + 1] + (1.0 - a) * self.noise[i];
-        }
+        self.noise.extend(pts.iter().map(|q| {
+            let (x, y) = (q[0] * cell, q[1] * cell);
+            let [a, b] = seeds.map(|seed| value_noise(seed, x, y) - 0.5);
+            a + (b - a) * s
+        }));
         let rms = (self.noise.iter().map(|x| x * x).sum::<f64>() / n.max(1) as f64).sqrt();
         if rms > 0.0 {
             for x in &mut self.noise {
