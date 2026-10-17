@@ -406,6 +406,29 @@ function set(e, name, value) {
   e.setAttribute(name, value);
 }
 
+// A detached twin of the path `e` with path data `d`, or `e` itself if its
+// data is already `d`. Chrome parses path data when it is set, which took
+// up to 8 ms for the forest's 370 KB at 4× throttling, so a staged redraw
+// parses its twins stage by stage and `swap` puts them on the page together.
+function twin(e, d) {
+  if (e.attrs?.d === d) return e;
+  const t = document.createElementNS(NS, 'path');
+  for (const a of e.attributes) if (a.name !== 'd') t.setAttribute(a.name, a.value);
+  t.attrs = { ...e.attrs, d };
+  t.setAttribute('d', d);
+  return t;
+}
+
+// Put each of `twins` on the page in place of the path at its index in
+// `paths`, and in `paths`.
+function swap(paths, twins) {
+  twins.forEach((t, k) => {
+    if (t === paths[k]) return;
+    paths[k].replaceWith(t);
+    paths[k] = t;
+  });
+}
+
 // `v` to one decimal place, without the trailing zero `toFixed` keeps,
 // and several times faster. The whole part and the tenths are written as
 // integers with the point between them, since V8 writes an integer faster
@@ -2714,46 +2737,52 @@ class SvgRenderer {
     return river.cutoffs();
   }
 
-  // The stages of a forest redraw: copy and blur the age grid like the plug
-  // grid, contour each forest level, then the farmland clip, then size the
-  // tree crowns. The first stage reads WASM memory, so it runs in the call
-  // that starts the redraw. The contours are kept until the last stage,
-  // which puts them on the page with the crowns, so the vegetation changes
-  // in one frame, not in a cascade of partial redraws, and drops the swept
-  // ground the new contours have caught up with.
+  // The stages of a forest redraw: copy the age grid, blur it like the plug
+  // grid, contour each of the forest's nested regions, then each region of
+  // the farmland clip, a stage for each, then size the tree crowns. A
+  // stage that contoured every region of a level at once overran the
+  // floodplain's budget. The first stage reads WASM memory, so it runs in
+  // the call that starts the redraw. The contours are kept on twins until
+  // the last stage, which swaps them onto the page with the crowns, so the
+  // vegetation changes in one frame, not in a cascade of partial redraws,
+  // and drops the swept ground the new contours have caught up with.
   *forestStages(river, memory) {
     river.sync_forest();
     const synced = river.time();
     const [cols, rows, cell] = [river.field_cols(), river.field_rows(), river.field_cell()];
     const age = new Float32Array(memory.buffer, river.forest_ptr(), cols * rows);
     const [c0, c1] = this.windowColumns(cols, cell);
+    if (this.forestAge?.length !== age.length) this.forestAge = new Float32Array(age.length);
+    this.forestAge.set(age);
+    yield;
     // A buffer of its own, since the plug marsh blurs between stages.
-    const blur = this.blur(age, cols, rows, c0, c1, 'forestBlur');
+    const blur = this.blur(this.forestAge, cols, rows, c0, c1, 'forestBlur');
     const [shrub, forest] = [river.get_param('vegetation_time'), river.get_param('forest_time')];
     const w = river.get_param('width');
     const forestData = [];
     for (const [k, { at }] of FOREST.entries()) {
-      yield;
       const age = shrub + at * forest;
       const start = 0.5 * (age + (k ? shrub + FOREST[k - 1].at * forest : 0));
       for (let s = 0; s < FOREST_STEPS; s++) {
+        yield;
         const level = start + (age - start) * (s + 1) / FOREST_STEPS;
-        forestData.push(contourData(blur, cols, rows, cell, c0, c1, level));
+        forestData.push(twin(this.forest[forestData.length], contourData(blur, cols, rows, cell, c0, c1, level)));
       }
     }
     const graze = river.get_param('grazing_time');
-    yield;
-    const farmData = this.farmland.map((_, k) => {
+    const farmData = [];
+    for (let k = 0; k < FIELD_FADE; k++) {
+      yield;
       const level = graze + (shrub - graze) * k / FIELD_FADE;
-      return contourData(blur, cols, rows, cell, c0, c1, level);
-    });
+      farmData.push(twin(this.farmland[k], contourData(blur, cols, rows, cell, c0, c1, level)));
+    }
     yield;
     const treeArgs = [cols, rows, cell, shrub, forest, w, graze];
     const crop = this.cropMask;
     const trees = yield* this.treeStages(blur, ...treeArgs);
     yield;
-    forestData.forEach((d, k) => set(this.forest[k], 'd', d));
-    farmData.forEach((d, k) => set(this.farmland[k], 'd', d));
+    swap(this.forest, forestData);
+    swap(this.farmland, farmData);
     this.setTrees(trees);
     // A crown redraw under way reads `treeBlur`, which changes here.
     this.treeJob = null;
@@ -2832,14 +2861,14 @@ class SvgRenderer {
     }
   }
 
-  // Put path data from `treeStages` on the page.
+  // Put the paths from `treeStages` on the page.
   setTrees(data) {
-    this.treeStrips.forEach(({ paths }, s) => paths.forEach((p, k) => set(p, 'd', data[s][k])));
+    this.treeStrips.forEach(({ paths }, s) => swap(paths, data[s]));
   }
 
   // Size each crown by the blurred growth of the cell under it, a stage
-  // for each strip, and return the path data of the crowns of each strip,
-  // one string for each of its paths, without touching the page.
+  // for each strip, and return twins of each strip's paths with its crowns,
+  // without touching the page.
   *treeStages(blur, cols, rows, cell, shrub, forest, w, farm) {
     const [from, to] = [shrub + FOREST[1].at * forest, shrub + FOREST[2].at * forest];
     const grow = Math.max(1e-6, TREE_GROW * forest);
@@ -2861,7 +2890,7 @@ class SvgRenderer {
         for (const [dx, dy, lr] of c.lobes) d[1 + c.tone].push(circleData(c.x + dx * r, c.y + dy * r, lr * r));
         d[light].push(circleData(c.x - 0.3 * r, c.y - 0.3 * r, 0.45 * r));
       }
-      data.push(d.map((parts) => parts.join('')));
+      data.push(d.map((parts, k) => twin(paths[k], parts.join(''))));
     }
     return data;
   }
