@@ -418,9 +418,25 @@ impl Land {
             self.weather(s.width);
             if self.founded {
                 self.tasks.push_back(Task::Accrete);
+                if s.farmsteads {
+                    self.rehouse(s);
+                }
             } else {
                 self.founded = true;
                 self.found(s);
+            }
+        }
+    }
+
+    /// Queue a house for each holding that has lost its own, to the water
+    /// or a stream, or has none since it was founded or divided, so it
+    /// rebuilds within a survey, 10 years, instead of at its next
+    /// reorganisation, 150 years away on average.
+    fn rehouse(&mut self, s: &Settings) {
+        for h in 0..self.holdings.len() {
+            let queued = (self.tasks.iter()).any(|t| matches!(*t, Task::Build(k) if k == h));
+            if !queued && !self.housed(h, s.width) {
+                self.tasks.extend([Task::Build(h), Task::Done]);
             }
         }
     }

@@ -253,6 +253,16 @@ impl Land {
         self.building_version += (self.buildings.len() != before) as u64;
     }
 
+    /// Whether holding `h` has a house at its seat.
+    pub(crate) fn housed(&self, h: usize, w: f64) -> bool {
+        let Some(g) = self.holdings[h].as_ref() else {
+            return true;
+        };
+        self.buildings.iter().any(|b| {
+            b.holding == h as u32 && b.kind == Kind::House && dist2(b.seat, g.seat) < 0.0625 * w * w
+        })
+    }
+
     /// Make one change to holding `h`'s farmstead at its reorganisation. A
     /// farmstead that has moved leaves its buildings and raises a house at
     /// its new seat. Otherwise the worst threatened building is abandoned,
@@ -264,11 +274,7 @@ impl Land {
         };
         let (seat, axis, me, w) = (g.seat, g.axis, h as u32, s.width);
         let mine = |b: &Building| b.holding == me;
-        let housed = self
-            .buildings
-            .iter()
-            .any(|b| mine(b) && b.kind == Kind::House && dist2(b.seat, seat) < 0.0625 * w * w);
-        if !housed {
+        if !self.housed(h, w) {
             self.abandon(h, true);
             let dir = self.orientation(seat, axis, s);
             if let Some((p, d)) = self.house_site(me, seat, dir, w) {

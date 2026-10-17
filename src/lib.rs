@@ -2707,11 +2707,11 @@ mod tests {
                 "seed {seed}: {checked} buildings checked, {segments} stream segments, {houseless} holdings without a house"
             );
             assert!(segments > 0 && checked > 0);
-            // A house moves off a stream beside its seat, so streams leave
-            // few holdings without one. Over seeds 1 to 12 the count runs
-            // from 0 to 75 and shifts between seeds with any change to the
-            // river's course, so the bound allows for that.
-            assert!(houseless <= 20, "{houseless} holdings without a house");
+            // A house moves off a stream beside its seat, and a holding
+            // that loses its house rebuilds by the next survey, so few
+            // holdings go without one. Over seeds 1 to 12 the count runs
+            // from 0 to 4, mostly houses the water took at that survey.
+            assert!(houseless <= 5, "{houseless} holdings without a house");
         }
     }
 

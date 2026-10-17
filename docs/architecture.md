@@ -28,7 +28,7 @@ Holdings are the *geodesic Voronoi cells* of farmsteads, with the channel and ox
 
 ### Farmsteads (`farm.rs`)
 
-Each reorganisation changes a farmstead by one building, towards a plan set by the seat's risk against `SEAT_RISK`. A building past `FLEE_RISK` or off the holding is abandoned first, and ruins fade over `RUIN_TIME` (150 years). Buildings keep `CLEAR` of tributaries, whose courses `Sim` hands over when they change. Each survey removes buildings the water has reached. A division makes a hamlet with chance `hamlet_chance`. The farmsteads draw from their own *pseudo-random number generator* (PRNG) stream and spend none of the holdings' search budget, so with `hamlet_chance` 0 the holdings and the river run exactly as with `farmsteads` off.
+Each reorganisation changes a farmstead by one building, towards a plan set by the seat's risk against `SEAT_RISK`. A building past `FLEE_RISK` or off the holding is abandoned first, and ruins fade over `RUIN_TIME` (150 years). Buildings keep `CLEAR` of tributaries, whose courses `Sim` hands over when they change. Each survey removes buildings the water has reached, and queues a new house for any holding left without one, so it rebuilds within 10 years instead of waiting for its next reorganisation. A division makes a hamlet with chance `hamlet_chance`. The farmsteads draw from their own *pseudo-random number generator* (PRNG) stream and spend none of the holdings' search budget, so with `hamlet_chance` 0 the holdings and the river run exactly as with `farmsteads` off.
 
 ### Tracks and fords (`tracks.rs`)
 
