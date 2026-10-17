@@ -1395,9 +1395,24 @@ class SvgRenderer {
     // redrawn whenever the water takes a building, and under the crowns, so
     // a crown on newly swept ground stands until the next forest redraw.
     this.sweptLayer = el('g', line, ground);
-    // The farmsteads lie over the fields, scroll bars and swept ground and
-    // under the trees, so crowns overhang the buildings: yards, then
-    // mounds, the platforms of ruins, and the roofs with their ridges.
+    // Natural levees: nested translucent silt regions, higher ground inside,
+    // over the ground and under the farmsteads and trees, so the silt tints
+    // the fields and swept sand but not the roofs and crowns.
+    this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
+    this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
+    this.leveeAt = null;
+    // Every clay plug the channel has not swept away keeps a faint marsh,
+    // so old meander belts stay legible after their scars fade.
+    const plugOpacity = 1 - (1 - PLUG_MARSH) ** (1 / PLUG_LEVELS.length);
+    const plugLayer = el('g', { fill: MARSH, 'fill-opacity': plugOpacity.toFixed(4), 'fill-rule': 'evenodd' }, ground);
+    this.plugMarsh = PLUG_LEVELS.map(() => el('path', {}, plugLayer));
+    this.plugAt = null;
+    this.plugJob = null;
+    this.plugBlur = null;
+    // The farmsteads lie over the fields, scroll bars, swept ground, levees
+    // and marsh, and under the trees, so crowns overhang the buildings:
+    // yards, then mounds, the platforms of ruins, and the roofs with their
+    // ridges.
     const farms = el('g', { 'stroke-linejoin': 'round' }, ground);
     this.yards = el('path', { fill: `rgb(${YARD_EARTH})`, 'fill-opacity': 0.55 }, farms);
     this.mounds = el('path', { fill: `rgb(${MOUND})`, 'fill-opacity': 0.5 }, farms);
@@ -1416,18 +1431,6 @@ class SvgRenderer {
       el('g', { fill: `rgb(${TREE_LIGHT})`, 'fill-opacity': 0.4 }, this.treeLayer),
     ];
     this.treeStrips = [];
-    // Natural levees: nested translucent silt regions, higher ground inside.
-    this.leveeLayer = el('g', { fill: `rgb(${LEVEE})`, 'fill-rule': 'evenodd', 'fill-opacity': 0.35 }, ground);
-    this.levees = LEVEE_LEVELS.map(() => el('path', {}, this.leveeLayer));
-    this.leveeAt = null;
-    // Every clay plug the channel has not swept away keeps a faint marsh,
-    // so old meander belts stay legible after their scars fade.
-    const plugOpacity = 1 - (1 - PLUG_MARSH) ** (1 / PLUG_LEVELS.length);
-    const plugLayer = el('g', { fill: MARSH, 'fill-opacity': plugOpacity.toFixed(4), 'fill-rule': 'evenodd' }, ground);
-    this.plugMarsh = PLUG_LEVELS.map(() => el('path', {}, plugLayer));
-    this.plugAt = null;
-    this.plugJob = null;
-    this.plugBlur = null;
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
     // Both are filled outlines at the local width, which a stroke cannot vary.
