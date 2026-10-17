@@ -1423,7 +1423,7 @@ class SvgRenderer {
     this.ruinLayer = el('g', { fill: `rgb(${PLATFORM})`, stroke: `rgb(${WALLING})` }, farms);
     this.thatch = el('path', { fill: `rgb(${THATCH})`, stroke: `rgb(${WALLING})` }, farms);
     this.tiles = el('path', { fill: `rgb(${ROOF})`, stroke: `rgb(${WALLING})` }, farms);
-    this.ridges = el('path', { fill: 'none', stroke: `rgb(${WALLING})` }, farms);
+    this.roofRidges = el('path', { fill: 'none', stroke: `rgb(${WALLING})` }, farms);
     this.buildingsAt = null;
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
@@ -2217,8 +2217,8 @@ class SvgRenderer {
     set(this.mounds, 'd', mounds);
     set(this.thatch, 'd', thatch);
     set(this.tiles, 'd', tiles);
-    set(this.ridges, 'd', ridges);
-    for (const p of [this.thatch, this.tiles, this.ridges]) set(p, 'stroke-width', stroke);
+    set(this.roofRidges, 'd', ridges);
+    for (const p of [this.thatch, this.tiles, this.roofRidges]) set(p, 'stroke-width', stroke);
     this.ruinLayer.replaceChildren();
     for (const [d, fade] of ruins) {
       el('path', {
