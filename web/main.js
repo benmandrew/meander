@@ -353,9 +353,13 @@ function set(e, name, value) {
 }
 
 // `v` to one decimal place, without the trailing zero `toFixed` keeps,
-// and several times faster.
+// and several times faster. The whole part and the tenths are written as
+// integers with the point between them, since V8 writes an integer faster
+// than it finds the shortest form of a fraction. A value between -1 and 0
+// has a whole part of -0, which writes as "0", so it takes its sign here.
 function dp1(v) {
-  return '' + Math.round(10 * v) / 10;
+  const r = Math.round(10 * v), q = Math.trunc(r / 10), f = Math.abs(r - 10 * q);
+  return (r < 0 && q === 0 ? '-0' : '' + q) + (f ? '.' + f : '');
 }
 
 // Unit left normal and signed curvature at each point of a flat x, y array,
