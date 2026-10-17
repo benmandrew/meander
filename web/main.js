@@ -317,6 +317,11 @@ const BAR_STEP = 0.5;
 // browser rasterises the view in tiles and skips elements whose bounds miss
 // a tile, so short runs spare each tile from stroking the whole line.
 const RUN = 24;
+// Sine of the turn between the tangents at a segment's ends, about 3°,
+// below which a channel edge is drawn as a straight segment and not a
+// curve. At 3° the curve lies under 0.1 px from the chord, and about three
+// segments in four turn less, so the path data stays short.
+const CURVE_TURN = 0.05;
 // Change in a lake's fill that redraws its outline. A lake fills over about
 // a thousand units of simulated time, so its outline is rebuilt every few
 // units, not every step, and moves less than a pixel at each rebuild.
@@ -373,6 +378,39 @@ function channelFrame(pts) {
   return { nx, ny, curv };
 }
 
+// Path data along an edge offset from the centreline over points
+// [start, end), given as a flat x, y array: cubic Béziers that leave each
+// point along the centreline's tangent, which an offset curve shares, so a
+// tight bend draws as a curve and not as a corner at each point. Each
+// handle is a third of the chord projected on the tangent, so it shrinks
+// to nothing where the edge folds back at a tight bend and cannot loop.
+// A segment that turns less than `CURVE_TURN` stays straight. `back` runs
+// the edge upstream. The data starts with the first point,
+// ready to follow an M or an L.
+function edgeData(edge, frame, start, back) {
+  const { nx, ny } = frame;
+  const n = edge.length / 2, s = back ? -1 : 1;
+  let k = back ? n - 1 : 0;
+  let d = dp1(edge[2 * k]) + ' ' + dp1(edge[2 * k + 1]);
+  for (let m = 1; m < n; m++, k += s) {
+    const j = k + s;
+    const [ax, ay, bx, by] = [edge[2 * k], edge[2 * k + 1], edge[2 * j], edge[2 * j + 1]];
+    const [dx, dy] = [bx - ax, by - ay];
+    // Tangents in the direction of travel: the left normal turned clockwise.
+    const [tax, tay] = [s * ny[start + k], -s * nx[start + k]];
+    const [tbx, tby] = [s * ny[start + j], -s * nx[start + j]];
+    if (Math.abs(tax * tby - tay * tbx) < CURVE_TURN) {
+      d += 'L' + dp1(bx) + ' ' + dp1(by);
+      continue;
+    }
+    const ha = Math.max(0, dx * tax + dy * tay) / 3;
+    const hb = Math.max(0, dx * tbx + dy * tby) / 3;
+    d += 'C' + dp1(ax + ha * tax) + ' ' + dp1(ay + ha * tay) + ' ' + dp1(bx - hb * tbx) + ' ' + dp1(by - hb * tby)
+      + ' ' + dp1(bx) + ' ' + dp1(by);
+  }
+  return d;
+}
+
 // Closed path data for the channel over points [start, end), out to
 // `scale` times the local width either side, plus `bar[i]` on the side of
 // the left normal its sign gives, if `bar` is given: one bank forwards, the
@@ -382,17 +420,17 @@ function channelFrame(pts) {
 function channelData(pts, widths, frame, scale, bar, start, end) {
   if (end - start < 2) return '';
   const { nx, ny, curv } = frame;
-  const left = [], right = [];
+  const [left, right] = [new Float64Array(2 * (end - start)), new Float64Array(2 * (end - start))];
   for (let i = start; i < end; i++) {
     const h = scale * widths[i], k = curv[i], b = bar ? bar[i] : 0;
     const [bl, br] = [h + Math.max(0, b), h + Math.max(0, -b)];
     const hl = k > 0 ? Math.min(bl, 0.95 / k) : bl;
     const hr = k < 0 ? Math.min(br, -0.95 / k) : br;
-    const [x, y] = [pts[2 * i], pts[2 * i + 1]];
-    left.push(dp1(x + hl * nx[i]) + ' ' + dp1(y + hl * ny[i]));
-    right.push(dp1(x - hr * nx[i]) + ' ' + dp1(y - hr * ny[i]));
+    const [x, y, j] = [pts[2 * i], pts[2 * i + 1], 2 * (i - start)];
+    [left[j], left[j + 1]] = [x + hl * nx[i], y + hl * ny[i]];
+    [right[j], right[j + 1]] = [x - hr * nx[i], y - hr * ny[i]];
   }
-  return 'M' + left.join(' ') + 'L' + right.reverse().join(' ') + 'Z';
+  return 'M' + edgeData(left, frame, start, false) + 'L' + edgeData(right, frame, start, true) + 'Z';
 }
 
 // Channel outlines in runs of `RUN` segments, each overlapping its
@@ -432,13 +470,13 @@ function smoothed(values) {
 // between signed offsets `a[i]` and `b[i]` along the left normal.
 function bandData(pts, frame, a, b, start, end) {
   const { nx, ny } = frame;
-  const left = [], right = [];
+  const [left, right] = [new Float64Array(2 * (end - start)), new Float64Array(2 * (end - start))];
   for (let i = start; i < end; i++) {
-    const [x, y] = [pts[2 * i], pts[2 * i + 1]];
-    left.push(dp1(x + a[i] * nx[i]) + ' ' + dp1(y + a[i] * ny[i]));
-    right.push(dp1(x + b[i] * nx[i]) + ' ' + dp1(y + b[i] * ny[i]));
+    const [x, y, j] = [pts[2 * i], pts[2 * i + 1], 2 * (i - start)];
+    [left[j], left[j + 1]] = [x + a[i] * nx[i], y + a[i] * ny[i]];
+    [right[j], right[j + 1]] = [x + b[i] * nx[i], y + b[i] * ny[i]];
   }
-  return 'M' + left.join(' ') + 'L' + right.reverse().join(' ') + 'Z';
+  return 'M' + edgeData(left, frame, start, false) + 'L' + edgeData(right, frame, start, true) + 'Z';
 }
 
 // Bands between offsets `a` and `b` over the stretches where they are
