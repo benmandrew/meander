@@ -1387,6 +1387,17 @@ class SvgRenderer {
     // Path element of each ridge drawn, by band and path data.
     this.ridges = new Map();
     this.scrollAt = null;
+    // The farmsteads lie over the fields and scroll bars and under the
+    // trees, so crowns overhang the buildings: yards, then mounds, the
+    // platforms of ruins, and the roofs with their ridges.
+    const farms = el('g', { 'stroke-linejoin': 'round' }, ground);
+    this.yards = el('path', { fill: `rgb(${YARD_EARTH})`, 'fill-opacity': 0.55 }, farms);
+    this.mounds = el('path', { fill: `rgb(${MOUND})`, 'fill-opacity': 0.5 }, farms);
+    this.ruinLayer = el('g', { fill: `rgb(${PLATFORM})`, stroke: `rgb(${WALLING})` }, farms);
+    this.thatch = el('path', { fill: `rgb(${THATCH})`, stroke: `rgb(${WALLING})` }, farms);
+    this.tiles = el('path', { fill: `rgb(${ROOF})`, stroke: `rgb(${WALLING})` }, farms);
+    this.roofRidges = el('path', { fill: 'none', stroke: `rgb(${WALLING})` }, farms);
+    this.buildingsAt = null;
     // Trees lie over the scroll bars, which the canopy hides as it closes:
     // the shadows of every crown, then the crowns in a few tones, then
     // their highlights.
@@ -1415,16 +1426,6 @@ class SvgRenderer {
     this.plugAt = null;
     this.plugJob = null;
     this.plugBlur = null;
-    // The farmsteads over all of it: yards, then mounds, the platforms of
-    // ruins, and the roofs with their ridges.
-    const farms = el('g', { 'stroke-linejoin': 'round' }, ground);
-    this.yards = el('path', { fill: `rgb(${YARD_EARTH})`, 'fill-opacity': 0.55 }, farms);
-    this.mounds = el('path', { fill: `rgb(${MOUND})`, 'fill-opacity': 0.5 }, farms);
-    this.ruinLayer = el('g', { fill: `rgb(${PLATFORM})`, stroke: `rgb(${WALLING})` }, farms);
-    this.thatch = el('path', { fill: `rgb(${THATCH})`, stroke: `rgb(${WALLING})` }, farms);
-    this.tiles = el('path', { fill: `rgb(${ROOF})`, stroke: `rgb(${WALLING})` }, farms);
-    this.roofRidges = el('path', { fill: 'none', stroke: `rgb(${WALLING})` }, farms);
-    this.buildingsAt = null;
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
     // Both are filled outlines at the local width, which a stroke cannot vary.
