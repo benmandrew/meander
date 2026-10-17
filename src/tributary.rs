@@ -11,7 +11,7 @@
 //! there, or leaves it, when it runs on from its end to the nearest water
 //! by the same rule. A stream that ends in a lake builds a delta out into
 //! it, which fills the lake and pushes the stream's end on across it, and
-//! its bedload stays in the lake. In a flood a stream can leave its course
+//! its bedload stays in the lake. Now and then a stream leaves its course
 //! on its fan for a new one.
 
 use std::cmp::Reverse;
@@ -48,8 +48,8 @@ const JITTER_SEED: u64 = 0x3d1f_9a07;
 const STREAM_JOIN: usize = 6;
 /// Factor on the cost of a step up the valley, against its slope.
 const STREAM_UPSTREAM: f32 = 1.6;
-/// Factor on the cost of the ground under a course a flood moves the
-/// stream off: the old course has built up its bed.
+/// Factor on the cost of the ground under a course the stream moves
+/// off: the old course has built up its bed.
 const STREAM_ABANDON: f32 = 4.0;
 /// Smoothing passes over a route.
 const STREAM_SMOOTH: usize = 16;
@@ -448,12 +448,13 @@ impl Sim {
         }
     }
 
-    /// In a flood of magnitude `u`, each tributary leaves its course with
-    /// chance `stream_avulsion` times `u`, at a point on its fan, for a new
-    /// route through low ground that keeps off the old course below that
-    /// point. A point near the apex is likelier, where the fan is steepest.
-    pub(crate) fn shift_streams(&mut self, u: f64) {
-        let chance = self.params.stream_avulsion * u;
+    /// Each tributary leaves its course as a Poisson process at
+    /// `stream_shift_rate`, approximated per step, at a point on its fan,
+    /// for a new route through low ground that keeps off the old course
+    /// below that point. A point near the apex is likelier, where the fan
+    /// is steepest.
+    pub(crate) fn shift_streams(&mut self) {
+        let chance = self.params.stream_shift_rate * self.params.dt;
         if chance <= 0.0 {
             return;
         }

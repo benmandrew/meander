@@ -1,6 +1,6 @@
 //! Large wood. Trees fall from mature forest on an eroding outer bank and
 //! lodge against it as jams, which push the flow off that bank and onto
-//! the other, until they rot or a flood breaks them up. A farmed bank, with
+//! the other, until they rot or break up. A farmed bank, with
 //! only its hedgerow and bankside trees, gives [`FARM_WOOD`] of the wood.
 
 use crate::geom::{self, P, right_normal};
@@ -154,13 +154,6 @@ impl Sim {
         }
     }
 
-    /// Let a flood of magnitude `u` flush each jam with probability `u`.
-    pub(crate) fn flush_jams(&mut self, u: f64) {
-        let mut jams = std::mem::take(&mut self.jams);
-        jams.retain(|_| self.events.uniform() >= u);
-        self.jams = jams;
-    }
-
     /// Add each jam's push to the migration rate: away from its bank,
     /// falling to 0 [`JAM_REACH`] widths along the channel either side.
     /// Jams on one reach push no harder together than one jam of full
@@ -196,15 +189,5 @@ impl Sim {
         for (rate, s) in self.rate.iter_mut().zip(&self.weights) {
             *rate -= push * s.clamp(-1.0, 1.0);
         }
-    }
-
-    /// Strength of the strongest jam within [`JAM_REACH`] widths along the
-    /// channel of point `i`.
-    pub(crate) fn jam_near(&self, i: usize) -> f64 {
-        let (r, life) = (self.reach_points(JAM_REACH), self.params.jam_lifetime);
-        self.jams
-            .iter()
-            .filter(|j| j.at.abs_diff(i) <= r)
-            .fold(0.0, |m, j| m.max(j.strength(self.time, life)))
     }
 }

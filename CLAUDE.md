@@ -21,7 +21,7 @@ The Nix flake supplies every tool (`direnv allow` once, or `nix develop`). The s
 
 Three layers, with data flowing one way:
 
-- `meander-core` (`src/`): pure Rust, no dependencies. `Sim::step` migrates the centreline with the Howard–Knutson kernel, then runs cutoffs. Flow runs from index 0 (upstream) to the last index. Floodplain state lives on a grid at half a width per cell. Modules: `field.rs` (erodibility, vegetation), `walls.rs` (valley walls), `land.rs` (landholdings), `wood.rs` (log jams), `tributary.rs`, `crevasse.rs` (splays, avulsion), `mills.rs`, `ips.rs` (hydraulics to Ω, Γ, α), `rng.rs`.
+- `meander-core` (`src/`): pure Rust, no dependencies. `Sim::step` migrates the centreline with the Howard–Knutson kernel, then runs cutoffs. There are no discrete floods: overbank silt is laid at a steady rate, and scroll bars and tributary shifts come as Poisson processes. Flow runs from index 0 (upstream) to the last index. Floodplain state lives on a grid at half a width per cell. Modules: `field.rs` (erodibility, vegetation), `walls.rs` (valley walls), `land.rs` (landholdings), `farm.rs` (farmsteads), `wood.rs` (log jams), `tributary.rs`, `mills.rs`, `ips.rs` (hydraulics to Ω, Γ, α), `rng.rs`.
 - `meander-wasm` (`wasm/`): wraps `Sim` as `River`, with hidden reaches upstream and downstream of the visible window. `sync*()` copies geometry into flat `f32` buffers exposed as raw pointers. JS must call `sync()` after stepping and rebuild every typed-array view, because WASM memory growth detaches old views.
 - `web/`: plain ES modules, no bundler. `ui.js` owns the panel, the frame loop and the warm-up; `main.js` draws three stacked SVGs (`#bars`, `#ground`, `#view`).
 

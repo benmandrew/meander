@@ -6,17 +6,19 @@ Detailed notes on the model and the renderer, moved out of `CLAUDE.md` so they l
 
 ### Step
 
-`Sim::step` resamples the centreline, computes Menger curvature, migrates points along their normals using the Howard–Knutson upstream-weighted kernel (an O(n) forward recurrence), smooths, clamps to the domain, then runs the hard neck cutoff and any flood-driven cutoffs. It resamples again after every cut. Flow runs from index 0 (upstream) to the last index. Geometry is `f64`.
+`Sim::step` resamples the centreline, computes Menger curvature, migrates points along their normals using the Howard–Knutson upstream-weighted kernel (an O(n) forward recurrence), smooths, clamps to the domain, then runs the neck cutoff and any capture. It resamples again after every cut. Flow runs from index 0 (upstream) to the last index. Geometry is `f64`.
 
-The rate is scaled by the channel slope (`Sim::slope`): the valley slope divided by the sinuosity of the reach `SLOPE_REACH` (12) widths either side, raised to `slope_exponent` (0.5, Chézy velocity) and taken relative to a reach of sinuosity `slope_sinuosity` (1.25, the mean measured without the feedback). A winding reach migrates more slowly, so necks close later and floods make a larger share of the cutoffs.
+The model draws no discrete floods, which changed the map in a single step. Overbank silt and lake filling run at steady mean rates, and scroll bars and tributary shifts come as Poisson processes, so the floodplain changes a little at a time.
+
+The rate is scaled by the channel slope (`Sim::slope`): the valley slope divided by the sinuosity of the reach `SLOPE_REACH` (12) widths either side, raised to `slope_exponent` (0.5, Chézy velocity) and taken relative to a reach of sinuosity `slope_sinuosity` (1.25, the mean measured without the feedback). A winding reach migrates more slowly, so necks close later.
 
 Migration reads the grid and the valley-wall taper at the bank a point moves into, chosen by the sign of the rate alone, not at the centreline. A recent cut no longer holds back a neck whose banks have closed to half the cutoff distance.
 
 ### Erodibility and vegetation (`field.rs`)
 
-`field.rs` holds the fBm erodibility grid, at half a width per cell. Each step stamps the cells under the channel as fresh point-bar sand with no vegetation growth. Growth, in age-equivalent time, decides when shrub binds the sand (at `vegetation_time`) and when forest stiffens it to the old floodplain's erodibility (a further `forest_time`). Each step advances one of 10 bands of rows, so every cell grows every 10 steps, at a rate set by the cell's overbank deposit, from 0.6 on bare bar sand to 1.6 at `vegetation_height`, so a median bar binds in about `vegetation_time`. Floods strip shrub still younger than `vegetation_time` within `scour_reach` of the bank.
+`field.rs` holds the fBm erodibility grid, at half a width per cell. Each step stamps the cells under the channel as fresh point-bar sand with no vegetation growth. Growth, in age-equivalent time, decides when shrub binds the sand (at `vegetation_time`) and when forest stiffens it to the old floodplain's erodibility (a further `forest_time`). Each step advances one of 10 bands of rows, so every cell grows every 10 steps, at a rate set by the cell's overbank deposit, from 0.6 on bare bar sand to 1.6 at `vegetation_height`, so a median bar binds in about `vegetation_time`.
 
-Floods lay overbank deposits, which slow erosion where banks are high and are drawn as levee contours.
+Overbank silt is laid at `overbank_rate`, the mean of what floods of uniform magnitude laid when the model drew them. Each step lays one of `DEPOSIT_EVERY` (50) bands of rows, so a cell gains silt every 5 units (12.5 years). The deposit thins away from the bank over `levee_length` and stops at the flood level `levee_height`. It slows erosion where banks are high and is drawn as levee contours.
 
 ### Valley walls (`walls.rs`)
 
@@ -30,35 +32,41 @@ A cutoff stamps the oxbow footprint as a lake that fills to a clay plug. Each st
 
 `Sim::capture` lets the channel take up an open lake (fill below `CAPTURE_FILL`) whose banks meet the channel's at two places, when the channel between them is longer than the route through the lake by more than `capture_ratio`; the lake becomes channel and the bypassed reach a new oxbow. The lake's ends are plugged for `END_PLUG` widths, and a route that turns through a right angle or crosses the channel is rejected.
 
-Lake silt is read only from cells still stamped as lake; each lake fills over `oxbow_lifetime`, faster where floods lay silt in it or bedload enters a connected entrance, then stays for `scar_lifetime` as a scar. Each oxbow keeps the widths of the channel it was cut from, for its footprint, its bedload entrance and its drawn lake and scar.
+Lake silt is read only from cells still stamped as lake; each lake fills over `oxbow_lifetime`, faster where overbank silt settles in it or bedload enters a connected entrance at `bedload_rate`, then stays for `scar_lifetime` as a scar. Each oxbow keeps the widths of the channel it was cut from, for its footprint, its bedload entrance and its drawn lake and scar.
 
 The neck search and the oxbow and scroll rework share one hashed grid, rebuilt only when `line_version` shows the centreline has moved. `oxbow_version` counts changes to oxbow shapes, not fills, so `sync` can skip recomputing their heights.
 
 ### Scroll bars and width
 
-Floods leave scroll bars along inner banks (`Sim::scrolls`), whose ridges raise the ground by `scroll_height` so vegetation takes to them first.
+Sets of scroll bars come as a Poisson process with mean interval `scroll_time` (50 units, 125 years), each along the inner banks of the migrating bends (`Sim::scrolls`). Their ridges raise the ground by `scroll_height`, so vegetation takes to them first.
 
-Each point carries a local width (`Sim::widths`, in multiples of `width`), after the bank-pull and bar-push model of Parker et al. (2011): the outer bank retreats at the migration rate times its erodibility, the inner bank advances at `bar_push` times the rate, and the width relaxes to 1 over `width_time`. Floods widen bends by `flood_widening`. The centreline keeps the Howard–Knutson rate, so width changes the planform only through the bank reads and the cutoffs, which fire when the banks meet.
+Each point carries a local width (`Sim::widths`, in multiples of `width`), after the bank-pull and bar-push model of Parker et al. (2011): the outer bank retreats at the migration rate times its erodibility, the inner bank advances at `bar_push` times the rate, and the width relaxes to 1 over `width_time`. The centreline keeps the Howard–Knutson rate, so width changes the planform only through the bank reads and the cutoffs, which fire when the banks meet.
 
 ### Landholdings (`land.rs`)
 
-`land.rs` shares the ground between medieval landholdings, each the geodesic Voronoi cell of a farmstead over the grid: the channel and oxbow ground are barriers, and flood risk (falling with distance from the water) raises the cost of crossing a cell. Holdings take up ground beside them once grass has grown on it for `grazing_time` (20 units, 50 years) and keep ground the river cuts them off from. Each reorganises at random, with mean interval `reorganise_time` (60 units, 150 years), one at a time: it moves a threatened farmstead, is absorbed below 0.3 `holding_area`, takes cells it reaches more cheaply than their holder by a margin, and divides above twice `holding_area`. Holdings read the river and change it only through their mills.
+`land.rs` shares the ground between medieval landholdings, each the geodesic Voronoi cell of a farmstead over the grid: the channel and oxbow ground are barriers, and flood risk raises the cost of crossing a cell. Risk falls with distance from the water, and on high ground by up to `RIDGE_RELIEF` (0.6) of that, in proportion to the overbank deposit's height over `levee_height`. The relief comes in over the first `RIDGE_CLEAR` (1.5) widths from the water, so the bank keeps its full risk. Old levee ground and scroll ridges beside the river then stand at moderate risk, and young bars and silting lakes at high risk. Holdings take up ground beside them once grass has grown on it for `grazing_time` (20 units, 50 years) and keep ground the river cuts them off from. Each reorganises at random, with mean interval `reorganise_time` (60 units, 150 years), one at a time: it moves a threatened farmstead, is absorbed below 0.3 `holding_area`, takes cells it reaches more cheaply than their holder by a margin, and divides above twice `holding_area`. Holdings read the river and change it only through their mills.
+
+### Farmsteads (`farm.rs`)
+
+Each holding raises a farmstead of small buildings at its seat, one change at each reorganisation, so a farmstead grows over centuries. Buildings never grow; a farmstead grows by an outshut against a wall and by new buildings. The plan follows the flood risk at the seat. At or below `SEAT_RISK` it is a courtyard of up to seven buildings (house, barn, outshut, byre, shed, byre, shed), the first `1 + 4a` of them for a holding of `a` times `holding_area`, laid square to the holding's axis around a yard on the house's drier side. Above `SEAT_RISK` it is a row of up to three along the bank, square to the rise in risk, on mounds. A holding with a working mill on its ground keeps a miller's cottage, and one with 15% of its ground at risk 0.35 or more keeps a field barn on that meadow, to risk 0.8.
+
+At a reorganisation the holding abandons its worst threatened building: one past `FLEE_RISK`, or on ground it no longer holds. It then raises one building towards its plan, or abandons the newest beyond it. Sites lie against the existing buildings, or on the sides of the yard, and are scored by distance from where the plan wants them, by six times the risk, and by a random part, so new buildings go to the driest side and a farmstead creeps back from an advancing bank. A farmstead that moves or is absorbed leaves its buildings as ruins, which fade over `RUIN_TIME` (60 units, 150 years). The end of each survey removes the buildings and ruins the water has reached. A division places the heir's farmstead with chance `hamlet_chance` (0.5) on the nearest safe cell 4 widths or more from the parent's seat, making a hamlet.
+
+The farmsteads draw from their own PRNG and take nothing from the holdings' search budget, so with `hamlet_chance` 0 the holdings and the river run exactly as with `farmsteads` off.
 
 ### Floodplain processes
 
-Seven floodplain processes, each with parameters in `Params`:
+Five floodplain processes, each with parameters in `Params`:
 
-- Clearance: `Sim::supply()` rises from 1 to `clearance_supply` (3) from `clearance_start` (600) over `clearance_time` (400), multiplying overbank silt, lake filling and fan growth. Floods bury scroll bars where the deposit nears the flood level.
-- Chutes: a flood's chute must cross bar that vegetation has not bound (`chute_vegetation`; neck breaches unchanged).
-- Wood (`wood.rs`): mature forest on eroding banks drops trees as jams, which stay where they lodge, push the flow off their bank, break up over `jam_lifetime` and are flushed by floods. A jam is lost when the channel leaves it `JAM_HOLD` (1.5) widths from the centreline or runs over it.
+- Clearance: `Sim::supply()` rises from 1 to `clearance_supply` (3) from `clearance_start` (600) over `clearance_time` (400), multiplying overbank silt, lake filling and fan growth. Overbank silt buries scroll bars where it nears the flood level.
+- Wood (`wood.rs`): mature forest on eroding banks drops trees as jams, which stay where they lodge, push the flow off their bank, and break up over `jam_lifetime`. A jam is lost when the channel leaves it `JAM_HOLD` (1.5) widths from the centreline or runs over it.
 - Bluff erosion: see the valley walls above.
-- Tributaries (`tributary.rs`): combes 3 widths deep or more carry a tributary that builds a gravel fan into the `coarse` grid (erodibility × `coarse_factor` on wholly coarse ground) and speeds migration for 30 widths below its confluence. Each stream keeps a course, routed by Dijkstra's search through low ground and leaning downstream. Every 10 steps the course is cut at the first water it meets and, if it ends dry, run on from its end, so it changes only at its lower end. A flood moves it on its fan with chance `stream_avulsion` times the magnitude. A stream that ends in an open lake builds a delta into the bed at `delta_rate`, which fills the lake and dries the stream's end so the course runs on across it, and it does not feed the channel's bars.
-- Crevasses (`crevasse.rs`): in the step after a flood, the outer bank with the greatest fall from levee crest to the ground 4 widths beyond breaches and lays a splay that buries vegetation, and a large flood avulses down the least-cost route through low ground if it shortens the channel by `avulsion_ratio`.
-- Mills (`mills.rs`): holdings found mills on straight reaches; a weir holds its reach, ponds the reach above (slower, wider, siltier) and is ruined when the channel outflanks or leaves it, or in a great flood. A leat keeps the course it was dug along, but its ends follow the bank, and the mill is ruined when the bank reaches the course.
+- Tributaries (`tributary.rs`): combes 3 widths deep or more carry a tributary that builds a gravel fan into the `coarse` grid (erodibility × `coarse_factor` on wholly coarse ground) and speeds migration for 30 widths below its confluence. Each stream keeps a course, routed by Dijkstra's search through low ground and leaning downstream. Every 10 steps the course is cut at the first water it meets and, if it ends dry, run on from its end, so it changes only at its lower end. It moves on its fan as a Poisson process at `stream_shift_rate` (once every 1,000 years on average). A stream that ends in an open lake builds a delta into the bed at `delta_rate`, which fills the lake and dries the stream's end so the course runs on across it, and it does not feed the channel's bars.
+- Mills (`mills.rs`): holdings found mills on straight reaches; a weir holds its reach, ponds the reach above (slower, wider, siltier) and is ruined when the channel outflanks or leaves it. A leat keeps the course it was dug along, but its ends follow the bank, and the mill is ruined when the bank reaches the course.
 
 ### Other modules
 
-`ips.rs` derives Ω, Γ and α from hydraulic inputs. `rng.rs` is a local seeded PRNG. Falling wood and new mills draw from a second stream, `events`, so with every new process off the river's draws match the old ones exactly.
+`ips.rs` derives Ω, Γ and α from hydraulic inputs. `rng.rs` is a local seeded PRNG. Falling wood, new mills and scroll bars draw from a second stream, `events`, and tributary shifts from a third, `streams`, so turning a process off leaves the river's own draws unchanged.
 
 ## meander-wasm (`wasm/`)
 
@@ -66,7 +74,7 @@ Seven floodplain processes, each with parameters in `Params`:
 
 `sync()` copies geometry into flat `f32` buffers exposed as raw pointers. `sync_scrolls`, `sync_plugs` and `sync_forest` can grow memory too, so `draw` runs the floodplain layers that call them before it builds its own views. `sync_forest` copies the vegetation growth of each cell, which `main.js` contours into nested shrub and forest regions, each fading in over several contours, and uses to size seeded tree crowns on young and mature forest. `sync_plugs` copies the time since cutoff of each cell still stamped as oxbow, which `main.js` draws as a soft-edged marsh that fades with the scar to a faint trace. The scar itself is a tapered crescent of damp ground with a wetter core and survey-map marsh tufts. `sync_line` copies only the centreline and its widths, for the warm-up's point-bar capture.
 
-The floodplain features come as `Vec<f32>` copies, which also allocate: `jams` (8 floats each), `splays` (7), `tributaries` (8, with each course's start and length in `tributary_courses`), `mills` (11, with each leat's start and length in `mill_leats`). `coarse_ptr` points at the gravel grid, and `splay_version`, `mill_version` and `wall_version` tell the renderer when to rebuild.
+The floodplain features come as `Vec<f32>` copies, which also allocate: `jams` (8 floats each), `buildings` (8), `tributaries` (8, with each course's start and length in `tributary_courses`), `mills` (11, with each leat's start and length in `mill_leats`). `coarse_ptr` points at the gravel grid, and `mill_version`, `building_version` and `wall_version` tell the renderer when to rebuild.
 
 ## web (`web/`)
 
@@ -82,7 +90,9 @@ The channel is a filled outline at the local width in runs of 24 segments, overl
 
 Seeded soil patches are drawn as vector blobs typed by the erodibility noise. Fields are laid out in strips along each holding's long axis from its seed, traced along the cell edges of the label map into arcs shared by neighbouring fields, simplified and rounded, and redrawn after a reorganisation finishes, at most every `FIELD_REFRESH`. A field redraw runs within the floodplain's frame budget and writes the page only when it finishes. Meadow takes ground at high flood risk and arable the drier ground. Fields are masked by nested contours that fade them in from `grazing_time` (50 years), where holdings take up grassed ground, to `vegetation_time` (250 years), so the channel cuts them as it migrates and they follow it onto the bars it leaves. Tree crowns in crop fields are skipped on farmland, by a per-cell crop mask; crowns in woods and beside hedges stay. Crowns are sized a strip of `TREE_STRIP` widths at a time, in the forest redraw and again when new fields change the mask; a forest redraw that finishes drops a crown redraw under way, which would otherwise write crowns sized from the old growth.
 
-Coarse ground is contoured as a gravel tint and a pebble pattern every 50 years, and splays are a lobe and distributaries each that fade over their 750 years.
+Coarse ground is contoured as a gravel tint and a pebble pattern every 50 years.
+
+The farmsteads lie over the whole floodplain layer: each standing building is a tiled or thatched roof at its core footprint with a ridge line (an outshut has none), on an elliptical mound where the core raised one, and each farmstead's yard is the rounded hull of its buildings but its field barn, in trodden earth. A ruin is a dashed house platform fading over its 150 years. They are redrawn when `building_version` changes, and at least every 50 years.
 
 ### Valley walls
 

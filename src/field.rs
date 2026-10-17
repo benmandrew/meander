@@ -2,7 +2,7 @@
 //! swept, which is loose point-bar sand until vegetation binds it, and oxbow
 //! footprints that erode fast while open water and stiffen to clay plugs as
 //! they fill. The same noise, with a finer layer added, gives the height of
-//! the land. Floods lay overbank deposits on top, thickest beside the
+//! the land. Overbank deposits build up on top, thickest beside the
 //! channel as natural levees, and a higher bank erodes more slowly.
 //! Tributary fans and slumps from the valley walls leave coarse ground,
 //! gravel and colluvium, which erodes more slowly still.
@@ -28,14 +28,14 @@ const HEIGHT_SEED: u64 = 0x4E1F_7A2B;
 /// depths: the bed of the channel it was cut from.
 pub const LAKE_DEPTH: f64 = 1.0;
 
-/// Distance from the bank, in levee lengths, beyond which a flood lays no
-/// deposit; exp(−4) is under 2% of the deposit at the bank.
+/// Distance from the bank, in levee lengths, beyond which no overbank
+/// deposit settles; exp(−4) is under 2% of the deposit at the bank.
 const LEVEE_REACH: f64 = 4.0;
 
 /// Growth rates of vegetation, as multiples of the rate the vegetation
-/// and forest times assume: on fresh point-bar sand, which floods cover
-/// often, and on ground raised by the growth height or more, which they
-/// seldom reach.
+/// and forest times assume: on fresh point-bar sand, which high water covers
+/// often, and on ground raised by the growth height or more, which it
+/// seldom reaches.
 const BARE_GROWTH: f32 = 0.6;
 const HIGH_GROWTH: f32 = 1.6;
 
@@ -91,45 +91,20 @@ pub struct Ground {
     pub coarse: f64,
 }
 
-/// One flood's work on the floodplain beside a channel; see
-/// [`Erodibility::flood`]. Lengths are in world units.
-pub struct Flood<'a> {
+/// Overbank deposit beside a channel; see [`Erodibility::lay_overbank`].
+/// Lengths are in world units.
+pub struct Overbank<'a> {
     /// Half the channel width, which each point's local width multiplies.
     pub half: f64,
-    /// Overbank deposit at the bank, in channel depths.
+    /// Deposit at the bank, in channel depths.
     pub amount: f64,
     /// Distance over which the deposit thins by a factor of e.
     pub length: f64,
     /// Flood level above fresh point-bar sand, in channel depths.
     pub stage: f64,
-    /// Distance beyond the bank over which young vegetation is stripped.
-    pub scour: f64,
-    /// Growth below which vegetation is young enough to strip.
-    pub young: f64,
     /// Factor on the deposit beside each channel point, as a mill pond
     /// raises it, or empty for 1 everywhere.
     pub boost: &'a [f64],
-}
-
-/// A crevasse splay: a lobe of sand a flood spreads through a breach in
-/// the levee. Lengths are in world units.
-pub struct Splay {
-    /// Where the lobe starts, on the far side of the levee.
-    pub apex: P,
-    /// Unit vector out through the breach.
-    pub dir: P,
-    /// Cosine of the half-angle the lobe spreads through.
-    pub spread: f64,
-    /// Length of the lobe.
-    pub length: f64,
-    /// Sand laid at the apex, in channel depths, thinning to nothing at
-    /// the lobe's edge.
-    pub sand: f64,
-    /// Flood level above fresh point-bar sand, in channel depths.
-    pub stage: f64,
-    /// Growth of mature forest. Old floodplain, whose growth is infinite,
-    /// is buried from this.
-    pub mature: f64,
 }
 
 /// Erodibility multiplier on a grid. Built from noise at reset. Cells the
@@ -149,8 +124,7 @@ pub struct Erodibility {
     /// Vegetation on each cell, as the simulated time it would have taken
     /// to grow at the rate the vegetation and forest times assume: 0 where
     /// the channel has just swept, infinity where it never has. It grows
-    /// faster on higher ground (see [`Erodibility::grow`]), and floods
-    /// strip it while it is young (see [`Erodibility::flood`]).
+    /// faster on higher ground (see [`Erodibility::grow`]).
     pub growth: Vec<f32>,
     /// Height of overbank deposits above fresh point-bar sand, in channel
     /// depths. The channel resets it to 0 where it sweeps, and a cutoff
@@ -160,10 +134,10 @@ pub struct Erodibility {
     /// tributary fan, colluvium slumped from a valley wall. The channel
     /// halves it where it sweeps, as it reworks the gravel into its bars.
     pub coarse: Vec<f32>,
-    /// Scratch: squared distance from each cell to the channel during a
-    /// flood.
+    /// Scratch: squared distance from each cell of a band of rows to the
+    /// channel, as overbank deposit is laid.
     near: Vec<f32>,
-    /// Scratch: the channel point nearest each cell during a flood.
+    /// Scratch: the channel point nearest each cell of the band.
     nearest: Vec<u32>,
     /// Scratch for the nearest-point search: the points in order of x, the
     /// points within reach of each row, from `row_start[y]` in
@@ -232,7 +206,7 @@ impl Erodibility {
     /// Multiplier at `p`: noise of strength `g.heterogeneity` around 1,
     /// times a factor for the ground's history. Inside an oxbow footprint it
     /// moves linearly from `g.lake` to `g.clay` over `g.lake_life`, or
-    /// faster as floods silt the lake up (see [`Erodibility::silt_at`]); on a
+    /// faster as silt fills the lake (see [`Erodibility::silt_at`]); on a
     /// point bar, from `g.bar` to `g.shrub` as growth reaches
     /// `g.vegetation`, then to 1 over a further `g.forest`. A bank raised by
     /// overbank deposits of height h, in channel depths, holds 1 + h times
@@ -272,8 +246,8 @@ impl Erodibility {
         self.deposit[self.index(p)] as f64
     }
 
-    /// Fraction of a fresh oxbow lake's depth that floods have filled with
-    /// silt at `p`, in [0, 1]: 1 once the bed reaches the level of fresh
+    /// Fraction of a fresh oxbow lake's depth that overbank silt has
+    /// filled at `p`, in [0, 1]: 1 once the bed reaches the level of fresh
     /// point-bar sand.
     pub fn silt_at(&self, p: P) -> f64 {
         (1.0 + self.deposit_at(p) / LAKE_DEPTH).clamp(0.0, 1.0)
@@ -302,10 +276,11 @@ impl Erodibility {
         if count > 0 { sum / count as f64 } else { 0.0 }
     }
 
-    /// Lay one flood's overbank deposit beside a channel along the points,
-    /// and strip young vegetation by the bank, with one search for the
-    /// point nearest each cell. `widths` holds the local width at each
-    /// point; see [`Flood`].
+    /// Lay overbank deposit beside a channel along the points, over the
+    /// rows from `y0` up to `y1`, with one search for the point nearest each
+    /// cell. `widths` holds the local width at each point; see [`Overbank`].
+    /// Each step lays one band of rows, so a cell gains its deposit a little
+    /// at a time, at the mean rate of the river's floods.
     ///
     /// A cell at distance d from the bank gains
     /// `amount · exp(−d / length) · (1 − h / stage)`, so deposits thin away
@@ -314,44 +289,29 @@ impl Erodibility {
     /// over the ground, so a lake bed `LAKE_DEPTH` below fresh bar level
     /// traps 1 + `LAKE_DEPTH / stage` times as much. Cells under the channel
     /// gain nothing.
-    ///
-    /// Growth below `young` is scaled by the distance from the bank over
-    /// `scour`, as a flood's current strips it, so it falls to 0 at the bank
-    /// and is untouched `scour` beyond it. Older vegetation holds.
-    pub fn flood(&mut self, pts: &[P], widths: &[f64], f: &Flood) {
-        let deposits = f.amount > 0.0 && f.length > 0.0 && f.stage > 0.0;
-        let scours = f.scour > 0.0;
-        if !deposits && !scours {
+    pub fn lay_overbank(&mut self, pts: &[P], widths: &[f64], f: &Overbank, y0: usize, y1: usize) {
+        let y1 = y1.min(self.rows);
+        if f.amount <= 0.0 || f.length <= 0.0 || f.stage <= 0.0 || y0 >= y1 {
             return;
         }
         let widest = widths.iter().fold(1.0f64, |a, &b| a.max(b));
-        let beyond = if deposits {
-            LEVEE_REACH * f.length
-        } else {
-            0.0
-        };
-        self.find_nearest(pts, widest * f.half + beyond.max(f.scour));
-        let young = f.young as f32;
-        let cells = self.deposit.iter_mut().zip(&mut self.growth);
-        for ((h, g), (&d2, &k)) in cells.zip(self.near.iter().zip(&self.nearest)) {
+        self.find_nearest(pts, widest * f.half + LEVEE_REACH * f.length, y0, y1);
+        let cells = &mut self.deposit[y0 * self.cols..y1 * self.cols];
+        for (h, (&d2, &k)) in cells.iter_mut().zip(self.near.iter().zip(&self.nearest)) {
             let (d, bank) = ((d2 as f64).sqrt(), f.half * widths[k as usize]);
             if !d.is_finite() || d < bank {
                 continue;
             }
-            if deposits {
-                let room = (1.0 - *h as f64 / f.stage).max(0.0);
-                let boost = f.boost.get(k as usize).copied().unwrap_or(1.0);
-                *h += (boost * f.amount * (-(d - bank) / f.length).exp() * room) as f32;
-            }
-            if scours && *g < young {
-                *g *= ((d - bank) / f.scour).min(1.0) as f32;
-            }
+            let room = (1.0 - *h as f64 / f.stage).max(0.0);
+            let boost = f.boost.get(k as usize).copied().unwrap_or(1.0);
+            *h += (boost * f.amount * (-(d - bank) / f.length).exp() * room) as f32;
         }
     }
 
-    /// Fill the scratch `near` with the squared distance from each cell to
-    /// the nearest of the points within `reach`, or infinity, and `nearest`
-    /// with that point's index.
+    /// Fill the scratch `near` with the squared distance from each cell of
+    /// the rows from `y0` up to `y1` to the nearest of the points within
+    /// `reach`, or infinity, and `nearest` with that point's index. The
+    /// scratch holds the band alone, from row `y0`.
     ///
     /// Row by row: over one row, the squared distance to point k is the
     /// parabola (x − x_k)² + g_k, with g_k the squared distance from the row
@@ -360,55 +320,58 @@ impl Erodibility {
     /// one sweep along it, as in Felzenszwalb and Huttenlocher's distance
     /// transform. Searching a box around each point instead visited every
     /// cell once for each point within reach of it, about 40 times.
-    fn find_nearest(&mut self, pts: &[P], reach: f64) {
-        let (c, r2) = (self.cell, reach * reach);
+    fn find_nearest(&mut self, pts: &[P], reach: f64, y0: usize, y1: usize) {
+        let (c, r2, cols) = (self.cell, reach * reach, self.cols);
+        let band = y1 - y0;
         self.near.clear();
-        self.near.resize(self.deposit.len(), f32::INFINITY);
+        self.near.resize(band * cols, f32::INFINITY);
         self.nearest.clear();
-        self.nearest.resize(self.deposit.len(), 0);
-        // The points within `reach` of each row: count them into
-        // `row_start`, sum the counts, then place each point by counting
-        // down, which leaves `row_start[y]` at the start of row y. Placing
-        // them in falling order of x leaves each row in rising order.
+        self.nearest.resize(band * cols, 0);
+        // The rows of the band within `reach` of a point, from 0 at `y0`.
         let rows_of = |p: P| {
-            let y0 = ((p[1] - reach) / c).floor().max(0.0) as usize;
-            let y1 = (((p[1] + reach) / c) as usize).min(self.rows - 1);
-            y0..=y1
+            let lo = ((p[1] - reach) / c).floor().max(y0 as f64) as usize - y0;
+            let hi = ((((p[1] + reach) / c).max(0.0) as usize) + 1).min(y1);
+            lo..hi.saturating_sub(y0).max(lo)
         };
-        self.row_start.clear();
-        self.row_start.resize(self.rows + 1, 0);
-        for &p in pts {
-            for y in rows_of(p) {
-                self.row_start[y] += 1;
-            }
-        }
-        for y in 1..=self.rows {
-            self.row_start[y] += self.row_start[y - 1];
-        }
-        self.row_points.clear();
-        self.row_points
-            .resize(self.row_start[self.rows] as usize, 0);
+        // Only the points that reach the band, in order of x.
         self.order.clear();
-        self.order.extend(0..pts.len() as u32);
+        self.order
+            .extend((0..pts.len() as u32).filter(|&k| !rows_of(pts[k as usize]).is_empty()));
         self.order.sort_unstable_by(|&a, &b| {
             pts[a as usize][0]
                 .total_cmp(&pts[b as usize][0])
                 .then(a.cmp(&b))
         });
+        // The points within `reach` of each row: count them into
+        // `row_start`, sum the counts, then place each point by counting
+        // down, which leaves `row_start[y]` at the start of row y. Placing
+        // them in falling order of x leaves each row in rising order.
+        self.row_start.clear();
+        self.row_start.resize(band + 1, 0);
+        for &k in &self.order {
+            for y in rows_of(pts[k as usize]) {
+                self.row_start[y] += 1;
+            }
+        }
+        for y in 1..=band {
+            self.row_start[y] += self.row_start[y - 1];
+        }
+        self.row_points.clear();
+        self.row_points.resize(self.row_start[band] as usize, 0);
         for &k in self.order.iter().rev() {
             for y in rows_of(pts[k as usize]) {
                 self.row_start[y] -= 1;
                 self.row_points[self.row_start[y] as usize] = k;
             }
         }
-        for y in 0..self.rows {
+        for y in 0..band {
             let row = &self.row_points[self.row_start[y] as usize..self.row_start[y + 1] as usize];
             if row.is_empty() {
                 continue;
             }
             // The envelope, as (vertex x, g, point, x from which it is the
             // lowest), built in order of x.
-            let cy = (y as f64 + 0.5) * c;
+            let cy = ((y0 + y) as f64 + 0.5) * c;
             let hull = &mut self.hull;
             hull.clear();
             for &k in row.iter() {
@@ -436,7 +399,7 @@ impl Erodibility {
                 }
             }
             let mut h = 0;
-            for x in 0..self.cols {
+            for x in 0..cols {
                 let cx = (x as f64 + 0.5) * c;
                 while h + 1 < hull.len() && hull[h + 1].3 <= cx {
                     h += 1;
@@ -444,15 +407,15 @@ impl Erodibility {
                 let (px, g, k, _) = hull[h];
                 let d2 = (cx - px) * (cx - px) + g;
                 if d2 < r2 {
-                    self.near[y * self.cols + x] = d2 as f32;
-                    self.nearest[y * self.cols + x] = k;
+                    self.near[y * cols + x] = d2 as f32;
+                    self.nearest[y * cols + x] = k;
                 }
             }
         }
     }
 
     /// Raise the ground under each point by `height` channel depths, as the
-    /// ridge of a scroll bar does, scaled like a flood's deposit by the room
+    /// ridge of a scroll bar does, scaled like overbank deposit by the room
     /// left under the flood level `stage`. Oxbow footprints are left alone.
     pub fn raise(&mut self, pts: &[P], height: f64, stage: f64) {
         if height <= 0.0 || stage <= 0.0 {
@@ -567,44 +530,6 @@ impl Erodibility {
         }
     }
 
-    /// Lay a crevasse splay: sand that thins from the apex to the lobe's
-    /// edge, filling no higher than the flood level, and buries the
-    /// vegetation under it, wholly at the apex and not at all at the edge.
-    /// Returns the cells it covered.
-    pub fn splay(&mut self, s: &Splay) -> usize {
-        let (mut count, c) = (0, self.cell);
-        let [x0, y0, x1, y1] = self.disc(s.apex, s.length);
-        for y in y0..=y1 {
-            let dy = (y as f64 + 0.5) * c - s.apex[1];
-            for x in x0..=x1 {
-                let (dx, i) = ((x as f64 + 0.5) * c - s.apex[0], y * self.cols + x);
-                let d = (dx * dx + dy * dy).sqrt();
-                let cos = if d > 0.0 {
-                    (dx * s.dir[0] + dy * s.dir[1]) / d
-                } else {
-                    1.0
-                };
-                if d >= s.length || cos < s.spread {
-                    continue;
-                }
-                // Thinning along the lobe and towards its flanks. A lake
-                // bed lies below the flood level, so it has room for more.
-                let across = ((cos - s.spread) / (1.0 - s.spread).max(1e-9)).min(1.0);
-                let t = (1.0 - d / s.length) * across.sqrt();
-                let h = &mut self.deposit[i];
-                let room = if s.stage > 0.0 {
-                    (1.0 - *h as f64 / s.stage).max(0.0)
-                } else {
-                    0.0
-                };
-                *h += (s.sand * t * room) as f32;
-                self.growth[i] = self.growth[i].min(s.mature as f32) * (1.0 - t) as f32;
-                count += 1;
-            }
-        }
-        count
-    }
-
     /// Mark cells within `half` times the width at each point (`widths`,
     /// one per point) as cut off at `time`, with the bed `LAKE_DEPTH` below
     /// fresh bar level.
@@ -659,30 +584,21 @@ mod tests {
         assert!(hi - lo > 0.1, "range {lo}..{hi}");
     }
 
-    /// A flood that lays the deposit, up to the flood level `stage`.
-    fn deposit(stage: f64) -> Flood<'static> {
-        Flood {
+    /// Overbank deposit up to the flood level `stage`.
+    fn deposit(stage: f64) -> Overbank<'static> {
+        Overbank {
             half: 1.0,
             amount: 0.3,
             length: 2.0,
             stage,
-            scour: 0.0,
-            young: 0.0,
             boost: &[],
         }
     }
 
-    /// A flood that only strips vegetation younger than `young`.
-    fn scour(reach: f64, young: f64) -> Flood<'static> {
-        Flood {
-            half: 1.0,
-            amount: 0.0,
-            length: 0.0,
-            stage: 0.0,
-            scour: reach,
-            young,
-            boost: &[],
-        }
+    /// Lay `f` over every row, as a full cycle of bands does.
+    fn lay(e: &mut Erodibility, channel: &[P], f: &Overbank) {
+        let rows = e.rows;
+        e.lay_overbank(channel, &vec![1.0; channel.len()], f, 0, rows);
     }
 
     fn ground(time: f64) -> Ground {
@@ -767,62 +683,44 @@ mod tests {
             .collect();
         pts.extend([[10.0, 5.0], [10.0, 7.0], [-3.0, 12.0], [45.0, 20.0]]);
         let reach = 4.0;
-        e.find_nearest(&pts, reach);
-        for y in 0..e.rows {
-            for x in 0..e.cols {
-                let (cx, cy) = ((x as f64 + 0.5) * e.cell, (y as f64 + 0.5) * e.cell);
-                let best = pts
-                    .iter()
-                    .map(|p| (cx - p[0]).powi(2) + (cy - p[1]).powi(2))
-                    .fold(f64::INFINITY, f64::min);
-                let i = y * e.cols + x;
-                if best >= reach * reach {
-                    assert!(e.near[i].is_infinite(), "cell {x}, {y} is out of reach");
-                    continue;
+        // The whole grid, and bands of rows as the steps lay them.
+        for (y0, y1) in [(0, e.rows), (0, 7), (7, 23), (e.rows - 3, e.rows)] {
+            e.find_nearest(&pts, reach, y0, y1);
+            for y in y0..y1 {
+                for x in 0..e.cols {
+                    let (cx, cy) = ((x as f64 + 0.5) * e.cell, (y as f64 + 0.5) * e.cell);
+                    let best = pts
+                        .iter()
+                        .map(|p| (cx - p[0]).powi(2) + (cy - p[1]).powi(2))
+                        .fold(f64::INFINITY, f64::min);
+                    let i = (y - y0) * e.cols + x;
+                    if best >= reach * reach {
+                        assert!(e.near[i].is_infinite(), "cell {x}, {y} is out of reach");
+                        continue;
+                    }
+                    let p = pts[e.nearest[i] as usize];
+                    let found = (cx - p[0]).powi(2) + (cy - p[1]).powi(2);
+                    assert!(
+                        (found - best).abs() < 1e-9 && (e.near[i] as f64 - best).abs() < 1e-4,
+                        "cell {x}, {y}: {found} for {best}"
+                    );
                 }
-                let p = pts[e.nearest[i] as usize];
-                let found = (cx - p[0]).powi(2) + (cy - p[1]).powi(2);
-                assert!(
-                    (found - best).abs() < 1e-9 && (e.near[i] as f64 - best).abs() < 1e-4,
-                    "cell {x}, {y}: {found} for {best}"
-                );
             }
         }
     }
 
     #[test]
-    fn floods_strip_young_growth_beside_the_bank() {
-        let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
-        let channel: Vec<P> = (0..80).map(|k| [k as f64 * 0.5, 20.0]).collect();
-        let (old, young, far) = ([10.0, 21.25], [20.0, 21.25], [30.0, 25.25]);
-        e.sweep(&[old]);
-        e.grow(200.0, 0.0);
-        e.sweep(&[young, far]);
-        e.grow(10.0, 0.0);
-        e.flood(&channel, &vec![1.0; channel.len()], &scour(2.0, 50.0));
-        let growth = |p| e.growth[e.index(p)];
-        // The cell centre lies a quarter cell along from the nearest point.
-        let d = (1.25f64 * 1.25 + 0.25 * 0.25).sqrt();
-        assert!(
-            (growth(young) as f64 - 10.0 * (d - 1.0) / 2.0).abs() < 1e-4,
-            "scaled by the distance from the bank"
-        );
-        assert_eq!(growth(old), 210.0, "established vegetation holds");
-        assert_eq!(growth(far), 10.0, "beyond the reach");
-    }
-
-    #[test]
-    fn floods_build_levees_that_slow_erosion() {
+    fn overbank_deposit_builds_levees_that_slow_erosion() {
         let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
         let channel: Vec<P> = (0..80).map(|k| [k as f64 * 0.5, 20.0]).collect();
         let h = |e: &Erodibility, y: f64| e.deposit_at([20.0, y]);
-        e.flood(&channel, &vec![1.0; channel.len()], &deposit(1.0));
+        lay(&mut e, &channel, &deposit(1.0));
         assert_eq!(h(&e, 20.25), 0.0, "nothing settles under the channel");
         assert!(h(&e, 21.25) > 0.25, "bank {}", h(&e, 21.25));
         assert!(h(&e, 21.25) > 2.0 * h(&e, 23.25) && h(&e, 23.25) > 2.0 * h(&e, 25.25));
         assert_eq!(h(&e, 38.0), 0.0, "beyond the reach");
         for _ in 0..200 {
-            e.flood(&channel, &vec![1.0; channel.len()], &deposit(1.0));
+            lay(&mut e, &channel, &deposit(1.0));
         }
         assert!(
             h(&e, 21.25) <= 1.0 && h(&e, 21.25) > 0.95,
@@ -836,14 +734,14 @@ mod tests {
     }
 
     #[test]
-    fn floods_silt_up_lakes() {
+    fn overbank_deposit_silts_up_lakes() {
         let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
         let channel: Vec<P> = (0..80).map(|k| [k as f64 * 0.5, 20.0]).collect();
         e.stamp_oxbow(&[[20.0, 22.25]], &[1.0], 0.25, 0.0);
         assert_eq!(e.silt_at([20.0, 22.25]), 0.0);
         let at = |e: &Erodibility| e.at([20.0, 22.25], &ground(0.0));
         assert!((at(&e) - 3.0).abs() < 1e-9, "open water");
-        e.flood(&channel, &vec![1.0; channel.len()], &deposit(0.25));
+        lay(&mut e, &channel, &deposit(0.25));
         let silt = e.silt_at([20.0, 22.25]);
         assert!(silt > 0.3 && silt < 1.0, "silt {silt}");
         assert!(
@@ -851,7 +749,7 @@ mod tests {
             "stiffens with the silt"
         );
         for _ in 0..50 {
-            e.flood(&channel, &vec![1.0; channel.len()], &deposit(0.25));
+            lay(&mut e, &channel, &deposit(0.25));
         }
         assert_eq!(e.silt_at([20.0, 22.25]), 1.0);
         assert!(
@@ -893,42 +791,6 @@ mod tests {
             back,
             "a cone never lowers the ground"
         );
-    }
-
-    #[test]
-    fn a_splay_buries_vegetation_in_a_lobe() {
-        let mut e = Erodibility::new([40.0, 40.0], 0.5, 5.0, 0);
-        e.growth.fill(500.0);
-        let s = Splay {
-            apex: [10.0, 20.0],
-            dir: [1.0, 0.0],
-            spread: 0.8,
-            length: 10.0,
-            sand: 0.3,
-            stage: 0.25,
-            mature: 500.0,
-        };
-        assert!(e.splay(&s) > 50);
-        let (near, far, behind, flank) = (
-            [11.25, 20.25],
-            [18.75, 20.25],
-            [8.25, 20.25],
-            [12.25, 26.25],
-        );
-        assert!(
-            e.growth_at(near) < 100.0 && e.deposit_at(near) > 0.15,
-            "buried under sand at the apex"
-        );
-        assert!(
-            e.growth_at(far) > 400.0 && e.deposit_at(far) < 0.05,
-            "thin at the edge"
-        );
-        assert_eq!(e.growth_at(behind), 500.0, "nothing behind the breach");
-        assert_eq!(e.growth_at(flank), 500.0, "nothing outside the lobe");
-        assert!(e.deposit_at(near) <= 0.25, "no higher than the flood level");
-        e.growth.fill(f32::INFINITY);
-        e.splay(&s);
-        assert!(e.growth_at(near) < 100.0, "old floodplain is buried too");
     }
 
     #[test]

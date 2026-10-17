@@ -54,76 +54,152 @@ Not targets: `drawBars`, `record`, `drawMills`, `drawJams` and `drawStreams` are
 
 Measure each change against the commit before it, alternating old and new runs on the same viewport, since single runs vary: at 8× on 844 × 390 two runs of the same build gave 23 and 43 fps.
 
-# Done: floodplain processes
+# Done: slow change
 
-Branch `feat/floodplain-processes`. Seven processes, each a core change with its own parameters (in `Params`, `NAMES`, `field`), a test, a WASM sync and a drawing. Every length is in channel widths and every time in units of 2.5 years. Baseline step time (snapshot, `UP=60 DOWN=20`, 30,000 steps, seed 1): median 0.106 ms, 99.9% 0.538 ms, max 0.83 ms.
+Two pieces of work, in this order. The first removes floods, which change the map in a single step, and puts steady processes in place of the slow work they do. The second gives each holding a farmstead of small buildings that changes with its fields and with the river. The buildings read the ground the floods leave, so the flood work comes first. Every length is in channel widths and every time in units of 2.5 years.
 
-## Status
+Baseline to measure against, taken on 3ecd506 (snapshot, `UP=60 DOWN=20`, 24,000 steps, seeds 1–6, all processes on):
 
-The core is on `main` in one commit per process. The WASM syncs, the renderer and the `CLAUDE.md` frontend notes are done on `feat/floodplain-render`, uncommitted. The renderer added 0.1–0.2 ms to the mean frame and 0.4 ms to p95 (1.5 → 1.7 ms and 5.2 → 5.7 ms, 600 frames at speed 2, headless Chrome); p99 stayed at 6.3–7.1 ms.
+| Seed | Mean sinuosity after step 6,000 | Cutoffs (by floods) | Floods | Avulsions | Lakes filled, median time | Step time median / 99.9% / max (ms) |
+|---|---|---|---|---|---|---|
+| 1 | 1.323 | 48 (3) | 43 | 2 | 24, 234 | 0.139 / 0.643 / 1.128 |
+| 2 | 1.392 | 39 (6) | 40 | 2 | 27, 325 | 0.138 / 0.628 / 0.827 |
+| 3 | 1.251 | 46 (8) | 33 | 1 | 25, 399 | 0.133 / 0.531 / 0.981 |
+| 4 | 1.493 | 52 (8) | 54 | 2 | 37, 283 | 0.152 / 0.775 / 1.047 |
+| 5 | 1.273 | 41 (5) | 46 | 3 | 25, 279 | 0.136 / 0.683 / 1.440 |
+| 6 | 1.414 | 52 (11) | 58 | 0 | 36, 295 | 0.147 / 0.766 / 1.397 |
 
-- [x] 1 clearance alluviation
-- [x] 2 chute cutoffs
-- [x] 3 large wood
-- [x] 4 bluff erosion
-- [x] 5 tributary fans
-- [x] 6 crevasse splays and avulsion
-- [x] 7 mills and weirs
-- [x] CLAUDE.md core notes
-- [x] WASM syncs
-- [x] renderer
-- [x] CLAUDE.md frontend notes
+Across the six seeds: mean sinuosity 1.358, 278 cutoffs of which floods made 41 (15%), 10 avulsions in 14,400 units. Each row comes from `UP=60 DOWN=20 cargo run --release -p meander-core --example snapshot -- <out_dir> 24000 2000 <seed>`: the sinuosity column of the `step` lines past 6,000, and the counts on the last one.
 
-Core results. With every new process off (`CLEARANCE_SUPPLY=1 CHUTE_VEGETATION=0 WOOD_RATE=0 BLUFF_RATE=0 FAN_RADIUS=0 CREVASSE_DROP=0 MILL_RATE=0`) the snapshot matches the baseline exactly: 70 cutoffs, 13 in 64 floods, sinuosity 1.46. With all on, over seeds 1–6 and 24,000 steps: mean sinuosity after step 6,000 is 1.39 (1.34 with all off), 50 cutoffs (54), about 6 jams and 5 splays at a time, 1–2 working mills, 1 avulsion per 1,600 units, walls retreating up to 6 widths. Step time with all on: median 0.132 ms, 99.9% 0.62 ms, max 0.79 ms. 48 tests pass, and 32 runs of the self-intersection configurations (seeds 1–16, calm and stormy) stay clean.
+## 1 Remove floods
 
-## How the core turned out
+Floods arrive as a Poisson process at `flood_rate` (0.02 a unit, one every 125 years on average), each with a magnitude `u` drawn from [0, 1). `Sim::step` does all of the following in the step a flood arrives:
 
-Where the code differs from the first plan:
+| Effect | Code | After this work |
+|---|---|---|
+| Neck breaches and chutes, up to `MAX_FLOOD_CUTS` (4) | `flood_cutoff` | Removed. Neck cutoffs at `cutoff_dist` stay. |
+| Bend widening | `widen` | Removed. |
+| Overbank deposit (levees) | `Erodibility::flood` | Steady deposit, below. |
+| Stripping of shrub younger than `vegetation_time` within `scour_reach` | `Erodibility::flood` | Removed. |
+| Lake silting | `fill_lakes` | Folded into the steady lake fill rate. |
+| Scroll bars on the inner banks | `add_scrolls` | A Poisson process of their own, below. |
+| Crevasse splays and avulsion, in the next step | `crevasse.rs` | Removed, with `sync_splays` and the splay drawing. |
+| Jam flushes | `flush_jams` | Removed. Jams still break up over `jam_lifetime`. |
+| Mills ruined in a great flood | `flood_mills` | Removed. Mills still fall when outflanked or when the bank reaches the leat. |
+| Tributary course shifts | `shift_streams` | A Poisson process of their own, below. |
 
-- Clearance multiplies the overbank amount, the lake fill rate, the bedload fill and fan growth. It leaves `levee_length` alone: the decay length is set by how fast silt settles, and lengthening it widened the flood's band and its cost by 1.7 times.
-- Scroll bars are dropped where the deposit stands within `BURY` (0.95) of the flood level.
-- Jams push at most `jam_push` (0.15) summed over a reach, smoothed along the channel over `JAM_REACH` (3 widths). A tree within `JAM_MERGE` (4 widths) of a jam on either bank joins it. Stronger or unsmoothed pushes kinked the channel into small loops that the neck cutoff, which needs 20 points of separation, cannot remove.
-- Bluff erosion uses the square of the wall taper's shortfall at the bank. Each slump bumps `wall_version`, about 600 times per run of 2,400 units, so the renderer must throttle wall redraws.
-- A breach is found in the step after its flood (`Sim::breach`), so the flood deposit and the avulsion search never share a step. The search runs on 2 × 2 blocks of grid cells, each as low as its lowest cell, and takes the rejoining point with the best length ratio among routes whose mean ground stands below the levee crest.
-- A weir holds its points against migration and smoothing within `WEIR_HOLD` and frees them linearly over as far again; `pin_weirs` puts the weir point back after smoothing. A mill is ruined when the channel turns more than 60° over a width within twice `WEIR_HOLD` of the weir (outflanked), when it moves off the weir, or in a great flood.
-- `Sim::cutoff` now cuts through the cooldown after a recent cut when any pair of points has closed to half the cutoff distance. The cooldown let necks cross before.
+### As built
 
-## Remaining work
+`Erodibility::lay_overbank` lays the steady deposit over one of `DEPOSIT_EVERY` (50) bands of rows each step, so every cell gains silt once every 5 units (12.5 years). The banded nearest-point search sorts only the centreline points within reach of the band. A pass every 10 steps over the whole grid raised the median step from 0.147 to 0.198 ms, and the 50-step band brought it back to 0.145 ms. Lakes take their bedload in the band-0 step, over the 50 steps since the last.
 
-### WASM syncs (`wasm/src/lib.rs`)
+The rates are the means of the floods the model drew, at `flood_rate` 0.02 and a mean magnitude of 0.5:
 
-Flat `f32` buffers as for the scrolls, each behind its version counter, and the window offset applied as for the other geometry:
+| Parameter | Value | From |
+|---|---|---|
+| `overbank_rate` | 0.003 a unit | `overbank` 0.3 |
+| `bedload_rate` | 0.002 a unit | `bedload_fill` 0.2 |
+| `scroll_time` | 50 units (125 years) | one set per flood |
+| `stream_shift_rate` | 0.0025 a unit (once in 1,000 years per stream) | `stream_avulsion` 0.25 |
 
-- `jams`: per jam, x, y, the downstream and into-channel directions fixed where it lodged, strength (`Jam::strength(time, jam_lifetime)`), and `until`.
-- `sync_splays`: per splay, apex, dir, length and age over `SPLAY_LIFE`; `splay_version`.
-- `tributaries` and `tributary_courses`: per tributary, mouth, scale and the course the core keeps from the mouth to the water it meets, with a version that changes with the course.
-- `sync_mills`: per mill, weir, across, working flag, age of ruin over `MILL_RUIN`, then the leat polylines; `mill_version`.
-- `wall_version()` getter, and `supply()` for the panel or year label.
-- `sync_forest` and the deposit pointer already carry splay burial and fan deposits; add a `coarse_ptr` for the gravel and colluvium.
+Scroll bars draw from `events`. Stream shifts draw from `streams`. A flood's magnitude set only the chance of a shift, so each shift moves a stream as before. `crevasse.rs`, `flush_jams`, `flood_mills`, `widen` and `flood_cutoff` are gone, with their parameters and constants.
 
-Every new sync can grow memory, so call them in `draw` before building the typed-array views, as for `sync_scrolls`.
+### Results
 
-### Renderer (`web/main.js`)
+Over the same runs as the baseline:
 
-All vector, no raster, in the existing layers:
+| Seed | Mean sinuosity after step 6,000 | Cutoffs | Lakes filled, median time | Step time median / 99.9% / max (ms) |
+|---|---|---|---|---|
+| 1 | 1.303 | 38 | 15, 395 | 0.137 / 0.292 / 0.463 |
+| 2 | 1.394 | 47 | 24, 348 | 0.152 / 0.295 / 0.423 |
+| 3 | 1.529 | 47 | 23, 351 | 0.157 / 0.297 / 0.522 |
+| 4 | 1.606 | 49 | 27, 336 | 0.163 / 0.331 / 0.396 |
+| 5 | 1.450 | 56 | 32, 332 | 0.168 / 0.455 / 0.819 |
+| 6 | 1.501 | 42 | 24, 351 | 0.157 / 0.487 / 1.850 |
 
-- Log jams: a few short dark strokes across the bank at each jam, length and count from strength, in `#view` over the water.
-- Splays: a pale sand lobe (a fan path from apex along dir) in `#ground`, fading with age as the forest contours take it back.
-- Tributaries: a thin stream from the combe mouth along its course, winding in bends set by the distance from the mouth; the fan as a faint cone of stippled gravel from `coarse`, contoured like the levees.
-- Walls: redraw `drawWalls` when `wall_version` changes, at most every few seconds; colluvium lobes from `coarse` at the foot.
-- Mills: the weir as a short bar across the channel at the weir, the leat as a thin water line, the mill house as a small rectangle on the leat beside the weir, the pond as a slightly wider, darker water reach above; ruins drawn greyed for `MILL_RUIN`.
-- Clearance: no new drawing needed. Lakes fill and scroll bars vanish faster, which the existing layers show. Optionally tint the upland as it is cleared.
+Across the six seeds: mean sinuosity 1.464 against 1.358, and 279 cutoffs against 278, all now at necks. The median time to fill a lake rose from 234–399 units to 332–395. The 99.9% step time fell from 0.53–0.78 ms to 0.29–0.49 ms, since no step lays a whole flood. Single-run maxima vary from run to run on this machine: a run with timers on every call of the step put the largest spikes in `migrate`, `cutoff` and `capture`, none of which this work changed.
 
-### CLAUDE.md frontend notes
+Sinuosity stays inside the bounded-sinuosity test, so `cutoff_dist` is unchanged. All 45 tests pass, and the self-intersection test stays clean over seeds 1–16, with the isolated and the default parameters (32 runs). The renderer drops the splay layer; the levees redraw every `LEVEE_REFRESH`, and the forest after each cutoff.
 
-Describe the new sync functions and drawings once they exist.
+Not checked: whether a median bar still binds in about `vegetation_time` (250 years) now that floods no longer strip young shrub.
 
-### Left over from the renderer
+- [x] re-run the baseline
+- [x] steady deposit, timed
+- [x] scroll bars and stream shifts as Poisson processes
+- [x] remove the sudden effects and their parameters
+- [x] retune, tests, snapshot numbers
+- [x] WASM and renderer: drop the splays
+- [x] docs
 
-- A mill's leat is fixed where it was built, so the channel can migrate over its ends; the core could trim or rebuild it.
+## 2 Farmsteads
+
+### Model
+
+No calibrated model of farmstead growth exists to take whole, so the rules come from historical geography, as the holdings' rules do:
+
+- **Plan types.** Historic England's farmstead characterisation sorts farmsteads into dispersed, linear, L-plan, loose courtyard and regular courtyard plans. R. W. Brunskill's *Traditional Farm Buildings of Britain* reads them as stages of one farmstead: a house gains an outshut, then a detached barn, then ranges that close a yard. Buildings never grow. A farmstead grows by extensions against a wall and by new buildings around the yard.
+- **Hamlets.** Under *partible inheritance* (gavelkind in Kent, the Irish *clachan*), an heir often builds beside the parent's farmstead. Holdings already divide above twice `holding_area`, so hamlets form when the heir's farmstead is sometimes placed next to the parent's.
+- **Desertion.** Deserted medieval villages (Beresford and Hurst) survive as *house platforms*: low earthworks where buildings stood. Abandoned buildings become platforms that fade, as mill ruins fade now.
+- **Placement.** Emilien et al., "Procedural generation of villages on arbitrary terrains" (*The Visual Computer*, 2012), places buildings one at a time by scoring candidate sites. The score here is flood risk, overlap, distance from the yard and alignment with the buildings already there.
+
+### Building near the river
+
+Lowland rivers give a clear pattern for farmsteads near the water. In the Rhine–Meuse delta, settlement since the Bronze Age has stood on the *stream ridges* (*stroomruggen*): the natural levees and crevasse deposits beside the channel, which stand above the *backswamps* (*kommen*) behind them. The backswamps were left as meadow and hayland. Where no ridge stood high enough, Frisian farmers raised their own mounds (*terpen*). English floodplain meadows show the same split: hay barns stand on the meadow, and the houses stand on the gravel terrace or at the foot of the valley side.
+
+Today's flood risk, in `Land::backward`, depends only on distance from the water: `inside / (1 + u²)`, with `u` the distance over `RISK_LENGTH` (6 widths). Under this rule the safest ground is always farthest from the river. Ground height should lower the risk. Cells whose overbank deposit approaches `levee_height` (levee crests, scroll ridges and fans) take a risk lowered by up to `RIDGE_RELIEF`, and filled lakes and backswamps keep the full risk. Farmsteads then string out along the levees beside the river, with meadow behind them. Risk also raises the cost of crossing ground (`RISK_COST`), so this moves holding boundaries too. Check the field layouts after the change.
+
+Risk then sets what a farmstead looks like:
+
+- Below `SEAT_RISK` (0.25): the full sequence up to a regular courtyard, laid along the holding's axis.
+- Between `SEAT_RISK` and `FLEE_RISK` (0.5): fewer buildings in a dispersed or linear plan, laid along the levee crest, parallel to the bank, on a raised platform drawn as a contour ring. The platform stays as an earthwork after the buildings go.
+- Meadow above `FLEE_RISK`: at most a field barn, and no house.
+
+### Following the river
+
+The buildings follow the river through the risk field, at the holdings' reorganisations (mean interval 150 years), one building at a time:
+
+- **The bank comes closer.** A building whose cell passes `FLEE_RISK` is abandoned at the holding's next reorganisation, nearest the water first, and its replacement goes on the side of the yard away from the water. The farmstead creeps back over several reorganisations. The whole-farmstead move (`Land::refuge`, for a seat past `FLEE_RISK`) stays for a bank that comes faster than this.
+- **The bank reaches a building.** It goes into the river in that step, as the channel cuts the fields now.
+- **The river moves away.** A holding takes the new bar after `grazing_time` (50 years), as now. A field barn may follow on meadow there after `vegetation_time` (250 years), and houses only once the risk falls below `SEAT_RISK`.
+- **Mills.** A working mill adds one cottage to the target of the holding that founded it, and a ruined mill takes it away.
+- **Absorption and moves.** The buildings of an absorbed holding, or of a farmstead that moved, become platforms over `RUIN_TIME` (60 units, 150 years).
+
+### Core (`land.rs`)
+
+- A `Building` holds a centre and a long-axis direction in world units, a kind (house, barn, byre, cart shed, field barn, cottage), an optional parent for an extension, and an optional ruin time. Footprints are fixed per kind, at the mill house's scale (`HOUSE`, 1.1 × 0.7 widths). Buildings keep world positions, so a farmstead that moves leaves them standing.
+- A holding's target count comes from `area / holding_area` and its seat's risk band. Each reorganisation adds or ruins at most one building towards the target, so change stays gradual.
+- A division places the heir's farmstead on the heir's share nearest the parent's seat with chance `HAMLET_CHANCE`, and on the safe cell farthest from it otherwise, as now.
+- Every draw comes from the `events` stream, so the river's draws do not change. The work runs only at reorganisations, one holding at a time, and must fit the per-step `BUDGET`.
+
+### WASM, renderer and docs
+
+- `buildings()`: a `Vec<f32>` copy, per building x, y, direction, kind, and ruin age over `RUIN_TIME`, behind `building_version`. Platforms come with the building that stands on them.
+- `main.js`: a group in `#ground` above the fields, redrawn on `building_version` within the floodplain budget. Each building is a rectangle with a ridge line, a ruin a faint outline, a platform a contour ring. Clear each yard from the crop mask.
+- Tests: no building stands on the channel or past `FLEE_RISK`; the count follows the holding's area; a division can form a hamlet; turning the buildings on leaves the river's course unchanged.
+- Update the Landholdings and Floodplain sections of `docs/architecture.md`.
+
+### As built
+
+Risk: `RIDGE_RELIEF` is 0.6, and the relief comes in over the first `RIDGE_CLEAR` (1.5) widths from the water, so the bank keeps its full risk. Over seeds 1 and 3 at 24,000 steps, held ground at risk 0.25–0.5 now stands at a median 0.84–0.97 of `levee_height`, and ground above 0.5 at 0.50–0.58: the moderate band is old levee ground, and the high band young bars and silting lakes. The holdings still found 42–44 farmsteads. The fields look sound in the browser, though the river takes another course there, since holdings found mills.
+
+Where the farmsteads differ from the plan above:
+
+- They draw from a PRNG of their own in `Land`, and a building takes nothing from the search budget. With `hamlet_chance` 0 the holdings and the river then match a run with `farmsteads` off exactly. Hamlets change the holdings, and through the mills the river: on seed 2 the river ran 591 points long against 500.
+- A field barn stands on meadow to risk `BARN_RISK` (0.8), not above `FLEE_RISK`, while 15% of the holding is at risk 0.35 or more.
+- A courtyard's buildings go round a yard 1.6 widths across on the house's drier side, long wall to the yard. Scoring by distance from the seat alone joined every barn to the end of its house in the same T.
+- The miller's cottage belongs to the holding that has the ground at the middle of a working mill's leat.
+- The bank takes a building at the end of the next survey, within 40 steps (10 years).
+- The yards are drawn over the fields and the tree crowns, so the crop mask is left alone.
+
+Results on seed 1 over 24,000 steps: 178–194 buildings standing on 44–47 holdings, most with 3–5, 28–37 of them on mounds and 2–9 ruins at a time; the farmsteads changed in 901 of the steps. The step time with `hamlet_chance` 0 matches `farmsteads` off: median 0.146–0.149 ms against 0.145–0.148. All 50 tests pass.
+
+- [x] risk from ground height, field layouts checked
+- [x] `Building`, targets, placement score
+- [x] following the river, hamlets, ruins
+- [x] tests, step time
+- [x] WASM sync, drawing
+- [x] docs
+
+## Left over
+
 - The weir pins one point, and the channel can turn up to 60° about it before the mill counts as outflanked, which draws as a visible corner. A lower limit would ruin mills sooner.
-
-### Open questions for the user
-
-- Fords and embankments: answered in chat, not built.
-- Mill founding is constant in time; a medieval peak and later decline could follow the clearance clock.
+- Mill founding is constant in time. A medieval peak and a later decline could follow the clearance clock.
