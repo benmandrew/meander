@@ -10,7 +10,7 @@ Read `docs/architecture.md` before changing a process or a renderer layer: it de
 
 The Nix flake supplies every tool (`direnv allow` once, or `nix develop`). The shell's `wasm-bindgen-cli` version is read from `Cargo.lock`, so after bumping the `wasm-bindgen` crate, nixpkgs must carry the matching `wasm-bindgen-cli_0_2_N`.
 
-- The pre-commit hook in `.githooks/` runs on a copy of the index, so only staged changes count. Staged Rust gets `cargo fmt --check` and `cargo clippy -- -D warnings`; staged Rust or `web/` also gets `make build` and the smoke test. The dev shell sets `core.hooksPath` to enable it.
+- The pre-commit hook in `.githooks/` runs on a copy of the index, so only staged changes count. Staged Rust gets `cargo fmt --check` and `cargo clippy -- -D warnings`; staged Rust or `web/` also gets `make build` and the smoke test. The dev shell sets `core.hooksPath` to enable it. CI (`.github/workflows/ci.yml`) runs fmt, clippy and `make test`'s tests in the same dev shell on every push to `main` and every PR, caching the Nix store and Cargo's build output; it skips the build and the smoke test.
 - `nix build .#web-dist`: build the deployable site into `result/`, without `wasm-pack`.
 - `make build`: build the WASM package into `web/pkg`.
 - `make serve`: build, then serve `web/` at http://localhost:8000 through `serve.py`, which turns caching off (`Cache-Control: no-store`). This is for development only; a deployment must set its own caching headers. `?warmup=T` overrides the warm-up in simulated time. `?seed=S&tick=N&view=W` (the panel's Link button) replays to step N and pauses; `<html data-idle>` marks when drawing has finished, for screenshots.
