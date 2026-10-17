@@ -32,33 +32,47 @@ Floods arrive as a Poisson process at `flood_rate` (0.02 a unit, one every 125 y
 | Mills ruined in a great flood | `flood_mills` | Removed. Mills still fall when outflanked or when the bank reaches the leat. |
 | Tributary course shifts | `shift_streams` | A Poisson process of their own, below. |
 
-The steady deposit runs a deposit-only pass of `Erodibility::flood` every `DEPOSIT_EVERY` steps, laying the mean of what floods lay today: `0.5 · overbank · supply · flood_rate · DEPOSIT_EVERY · dt`, where 0.5 is the mean magnitude. Measure one pass's cost first. If it breaks the step-time budget, spread it over bands of channel points, as `grow_rows` spreads growth over bands of rows. Each pass lays a small fraction of a levee, so the levee contours thicken without a visible jump.
+### As built
 
-Scroll bars come one set per flood today, 125 years apart on average. They become a Poisson process of their own with mean interval `scroll_time` (50 units, 125 years), so the spacing of the ridges on a bar keeps its present mean and stays irregular.
+`Erodibility::lay_overbank` lays the steady deposit over one of `DEPOSIT_EVERY` (50) bands of rows each step, so every cell gains silt once every 5 units (12.5 years). The banded nearest-point search sorts only the centreline points within reach of the band. A pass every 10 steps over the whole grid raised the median step from 0.147 to 0.198 ms, and the 50-step band brought it back to 0.145 ms. Lakes take their bedload in the band-0 step, over the 50 steps since the last.
 
-Tributary course shifts also become a Poisson process of their own, at today's mean rate: a shift now happens in a flood with a chance that grows with its magnitude, so the new rate is `flood_rate` times that chance averaged over magnitude. Each shift draws a magnitude as a flood does now, so `shift_streams` keeps its behaviour. Fans still spread across their cones.
+The rates are the means of the floods the model drew, at `flood_rate` 0.02 and a mean magnitude of 0.5:
 
-Both processes draw from the `events` stream. Removing the floods changes the river's own draws once; after that, these processes leave them alone.
+| Parameter | Value | From |
+|---|---|---|
+| `overbank_rate` | 0.003 a unit | `overbank` 0.3 |
+| `bedload_rate` | 0.002 a unit | `bedload_fill` 0.2 |
+| `scroll_time` | 50 units (125 years) | one set per flood |
+| `stream_shift_rate` | 0.0025 a unit (once in 1,000 years per stream) | `stream_avulsion` 0.25 |
 
-Parameters: `flood_rate` splits into `scroll_time`, the deposit rate (given per unit time as `overbank_rate`) and the shift rate (`stream_shift_rate`, in place of `stream_avulsion`). Drop `breach_dist`, the chute parameters, `flood_widening`, `scour_reach`, `avulsion_flood`, `avulsion_ratio` and `crevasse_drop`, each from `Params`, `NAMES` and the `field` match. Keep the snapshot's env overrides working for the parameters that remain.
+Scroll bars draw from `events`. Stream shifts draw from `streams`. A flood's magnitude set only the chance of a shift, so each shift moves a stream as before. `crevasse.rs`, `flush_jams`, `flood_mills`, `widen` and `flood_cutoff` are gone, with their parameters and constants.
 
-Retuning:
+### Results
 
-- Floods made 41 of 278 cutoffs in the baseline, so sinuosity will rise. If it leaves the range the bounded-sinuosity test allows, lower `cutoff_dist`, and do not loosen the test.
-- `vegetation_time` was tuned with scour stripping young shrub. Check that a median bar still binds in about `vegetation_time` (250 years).
-- Check that lakes still fill over about `oxbow_lifetime` without the flood silt.
+Over the same runs as the baseline:
 
-Tests: delete the tests that pin flood behaviour (`floods_cut_off_earlier_and_never_self_intersect`, `floods_strip_young_growth_beside_the_bank`, the crevasse and avulsion tests). Recast `floods_build_levees_that_slow_erosion`, `floods_silt_up_lakes` and `floods_leave_scroll_bars_inside_migrating_bends` on the steady processes. The validation tests in `src/lib.rs` must pass unchanged, and the self-intersection configurations must stay clean over seeds 1–16.
+| Seed | Mean sinuosity after step 6,000 | Cutoffs | Lakes filled, median time | Step time median / 99.9% / max (ms) |
+|---|---|---|---|---|
+| 1 | 1.303 | 38 | 15, 395 | 0.137 / 0.292 / 0.463 |
+| 2 | 1.394 | 47 | 24, 348 | 0.152 / 0.295 / 0.423 |
+| 3 | 1.529 | 47 | 23, 351 | 0.157 / 0.297 / 0.522 |
+| 4 | 1.606 | 49 | 27, 336 | 0.163 / 0.331 / 0.396 |
+| 5 | 1.450 | 56 | 32, 332 | 0.168 / 0.455 / 0.819 |
+| 6 | 1.501 | 42 | 24, 351 | 0.157 / 0.487 / 1.850 |
 
-Docs: remove floods, splays and avulsion from `docs/architecture.md` (the erodibility, lakes, scroll bar and floodplain process sections) and from the `CLAUDE.md` module list. `crevasse.rs` goes.
+Across the six seeds: mean sinuosity 1.464 against 1.358, and 279 cutoffs against 278, all now at necks. The median time to fill a lake rose from 234–399 units to 332–395. The 99.9% step time fell from 0.53–0.78 ms to 0.29–0.49 ms, since no step lays a whole flood. Single-run maxima vary from run to run on this machine: a run with timers on every call of the step put the largest spikes in `migrate`, `cutoff` and `capture`, none of which this work changed.
+
+Sinuosity stays inside the bounded-sinuosity test, so `cutoff_dist` is unchanged. All 45 tests pass, and the self-intersection test stays clean over seeds 1–16, with the isolated and the default parameters (32 runs). The renderer drops the splay layer; the levees redraw every `LEVEE_REFRESH`, and the forest after each cutoff.
+
+Not checked: whether a median bar still binds in about `vegetation_time` (250 years) now that floods no longer strip young shrub.
 
 - [x] re-run the baseline
-- [ ] steady deposit, timed
-- [ ] scroll bars and stream shifts as Poisson processes
-- [ ] remove the sudden effects and their parameters
-- [ ] retune, tests, snapshot numbers
-- [ ] WASM and renderer: drop the splays
-- [ ] docs
+- [x] steady deposit, timed
+- [x] scroll bars and stream shifts as Poisson processes
+- [x] remove the sudden effects and their parameters
+- [x] retune, tests, snapshot numbers
+- [x] WASM and renderer: drop the splays
+- [x] docs
 
 ## 2 Farmsteads
 

@@ -195,7 +195,7 @@ fn main() {
         }
         let reach = reach_sinuosity(&mut sim);
         println!(
-            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  reach {:4.2}  tight {:4.2}  cutoffs {:4} ({:4} in {:4} floods)  oxbows {:3}  holdings {:3} ({:4} reorganised)  width {}",
+            "step {:6}  t {:8.1}  n {:5}  sinuosity {:5.2}  reach {:4.2}  tight {:4.2}  cutoffs {:4}  oxbows {:3}  holdings {:3} ({:4} reorganised)  width {}",
             sim.steps,
             sim.time,
             sim.centerline.len(),
@@ -203,8 +203,6 @@ fn main() {
             reach,
             tight_fraction(&sim),
             sim.cutoffs,
-            sim.flood_cutoffs,
-            sim.floods,
             sim.oxbows.len(),
             sim.land.count(),
             sim.land.reorganisations,
@@ -219,11 +217,9 @@ fn main() {
                 .fold(0.0f64, f64::max)
         };
         println!(
-            "        supply {:4.2}  jams {:2}  splays {:2}  avulsions {:2}  captures {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {} ({} into lakes)",
+            "        supply {:4.2}  jams {:2}  captures {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {} ({} into lakes)",
             sim.supply(),
             sim.jams.len(),
-            sim.splays.len(),
-            sim.avulsions,
             sim.captures,
             sim.mills.iter().filter(|m| m.working()).count(),
             sim.mills.len(),

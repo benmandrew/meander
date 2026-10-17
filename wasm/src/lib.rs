@@ -8,7 +8,7 @@
 //! without copying. Call `sync` after stepping, then rebuild every typed
 //! array view: memory growth detaches old views.
 
-use meander_core::{FAN_MAX_DEPTH, MILL_RUIN, Params, SPLAY_LIFE, Sim};
+use meander_core::{FAN_MAX_DEPTH, MILL_RUIN, Params, Sim};
 use wasm_bindgen::prelude::*;
 
 /// Hidden reach lengths, in channel widths.
@@ -41,7 +41,7 @@ pub struct River {
     oxbow_widths: Vec<f32>,
     /// Land height at each oxbow point, in [0, 1], matching `oxbow_line`.
     oxbow_heights: Vec<f32>,
-    /// Fraction of the lake depth filled with flood silt at each oxbow
+    /// Fraction of the lake depth filled with overbank silt at each oxbow
     /// point, in [0, 1], matching `oxbow_line`.
     oxbow_silts: Vec<f32>,
     /// `Sim::oxbow_version` the oxbow polylines, heights, lengths and
@@ -186,8 +186,8 @@ impl River {
         }
     }
 
-    /// Copy the scroll bars into flat buffers. They change only at floods
-    /// and when the channel crosses them; see `scroll_version`.
+    /// Copy the scroll bars into flat buffers. They change only when a set
+    /// is laid and when the channel crosses them; see `scroll_version`.
     pub fn sync_scrolls(&mut self) {
         let sim = &self.sim;
         self.scroll_line.clear();
@@ -385,28 +385,6 @@ impl River {
         out
     }
 
-    /// The crevasse splays, seven values each: the apex's x and y, the unit
-    /// vector out through the breach, the lobe's length, its age over the
-    /// time it is drawn for, and the time it was laid.
-    pub fn splays(&self) -> Vec<f32> {
-        let sim = &self.sim;
-        let mut out = Vec::with_capacity(7 * sim.splays.len());
-        for s in &sim.splays {
-            let age = (sim.time - s.born) / SPLAY_LIFE;
-            out.extend(
-                [
-                    s.apex[0], s.apex[1], s.dir[0], s.dir[1], s.length, age, s.born,
-                ]
-                .map(|v| v as f32),
-            );
-        }
-        out
-    }
-    /// Changes whenever the splays do.
-    pub fn splay_version(&self) -> f64 {
-        self.sim.splay_version as f64
-    }
-
     /// The tributaries, eight values each: the wall they come down (0 the
     /// low-y wall, 1 the high-y wall), the fan's apex at the combe mouth,
     /// the start and number of their course's points in
@@ -569,17 +547,6 @@ impl River {
     }
     pub fn cutoffs(&self) -> u32 {
         self.sim.cutoffs as u32
-    }
-    pub fn floods(&self) -> u32 {
-        self.sim.floods as u32
-    }
-    /// Cutoffs made by floods, included in `cutoffs`.
-    pub fn flood_cutoffs(&self) -> u32 {
-        self.sim.flood_cutoffs as u32
-    }
-    /// Avulsions through a crevasse, included in `cutoffs`.
-    pub fn avulsions(&self) -> u32 {
-        self.sim.avulsions as u32
     }
     /// Sediment supply from the upland, as a multiple of the wooded
     /// upland's; it rises as the upland is cleared.

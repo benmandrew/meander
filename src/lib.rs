@@ -5,7 +5,6 @@
 //! its normal at a rate given by the Howard–Knutson (1984) upstream-weighted
 //! curvature kernel, smooths, and cuts off any loop whose neck has closed.
 
-pub mod crevasse;
 pub mod field;
 pub mod geom;
 pub mod ips;
@@ -16,8 +15,7 @@ pub mod tributary;
 pub mod walls;
 pub mod wood;
 
-pub use crevasse::SplayMark;
-use field::{Erodibility, Flood, Ground};
+use field::{Erodibility, Ground, Overbank};
 use geom::{P, curvature, dist, resample, right_normal};
 use land::Land;
 pub use mills::Mill;
@@ -43,10 +41,6 @@ pub struct Params {
     /// channel widens where the outer bank erodes faster than this, and
     /// narrows where it erodes slower.
     pub bar_push: f64,
-    /// Widening of a bend by a flood of magnitude 1, in channel widths per
-    /// unit of migration rate at the bend, before bar push narrows it back.
-    /// 0 disables.
-    pub flood_widening: f64,
     /// Erodibility `E`: migration speed, in channel widths per unit time per
     /// unit of dimensionless rate.
     pub erodibility: f64,
@@ -79,17 +73,21 @@ pub struct Params {
     /// Per-step displacement limit, as a fraction of the point spacing.
     pub max_step: f64,
     /// Simulation time an oxbow lake takes to fill with no sediment from the
-    /// channel. Floods fill lakes near the channel faster.
+    /// channel. Lakes near the channel fill faster.
     pub oxbow_lifetime: f64,
-    /// Fraction of a lake a flood of magnitude 1 fills with bedload through
-    /// an entrance still at the channel, at a diversion angle of 0. It
-    /// falls with the cosine of the angle and with the entrance's distance
-    /// from the channel over `levee_length`. 0 disables.
-    pub bedload_fill: f64,
+    /// Fraction of a lake filled per unit time with bedload through an
+    /// entrance still at the channel, at a diversion angle of 0. It falls
+    /// with the cosine of the angle and with the entrance's distance from
+    /// the channel over `levee_length`. 0 disables.
+    pub bedload_rate: f64,
     /// Simulation time a filled oxbow stays as a scar before it is dropped.
     pub scar_lifetime: f64,
-    /// Simulation time a scroll bar, the ridge a flood leaves along the
-    /// inner bank, lasts before it is dropped. 0 disables scroll bars.
+    /// Mean time between the sets of scroll bars, the ridges the river
+    /// leaves along its inner banks at high water. They come as a Poisson
+    /// process, so the ridges on a bar are spaced unevenly. 0 disables.
+    pub scroll_time: f64,
+    /// Simulation time a scroll bar lasts before it is dropped. 0 disables
+    /// scroll bars.
     pub scroll_lifetime: f64,
     /// Random lateral perturbation added each step, in channel widths per
     /// square root of time. Bends drift downstream and leave the domain, so
@@ -132,17 +130,6 @@ pub struct Params {
     pub shrub_factor: f64,
     /// Simulation time shrub takes to grow into mature forest.
     pub forest_time: f64,
-    /// Expected floods per unit time. A flood can breach necks wider than
-    /// `cutoff_dist` and cut chutes across point bars. 0 disables floods.
-    pub flood_rate: f64,
-    /// Widest neck, in channel widths, that the largest flood can breach.
-    /// A flood of magnitude `u` in [0, 1) breaches necks narrower than
-    /// `cutoff_dist + u·(breach_dist − cutoff_dist)`.
-    pub breach_dist: f64,
-    /// A flood of magnitude `u` cuts a chute across a bend whose arc length
-    /// is at least `chute_ratio / u` times the chord, for chords up to
-    /// [`CHUTE_CHORD`] widths. 0 disables chute cutoffs.
-    pub chute_ratio: f64,
     /// The channel takes up an open oxbow lake whose banks it meets at two
     /// places when the route through the lake is shorter than the channel
     /// between them by more than this factor, and abandons the channel's
@@ -150,9 +137,10 @@ pub struct Params {
     /// avulsion takes up an abandoned channel. A lake filled past
     /// [`CAPTURE_FILL`] resists. 0 disables.
     pub capture_ratio: f64,
-    /// Overbank deposit a flood of magnitude 1 lays at the bank, in channel
-    /// depths, before it thins towards the flood level. 0 disables.
-    pub overbank: f64,
+    /// Overbank deposit laid at the bank per unit time, in channel depths,
+    /// before it thins towards the flood level: the mean of what the
+    /// river's floods lay, spread evenly over time. 0 disables.
+    pub overbank_rate: f64,
     /// Distance over which overbank deposits thin by a factor of e away
     /// from the bank, in channel widths.
     pub levee_length: f64,
@@ -161,14 +149,10 @@ pub struct Params {
     /// erodes 1 / (1 + h) as fast.
     pub levee_height: f64,
     /// Overbank deposit, in channel depths, at which vegetation grows
-    /// fastest. Ground the floods seldom cover grows shrub and forest
+    /// fastest. Ground that high water seldom covers grows shrub and forest
     /// sooner than bare bar sand beside the water; 0 grows every cell at the
     /// rate `vegetation_time` and `forest_time` assume.
     pub vegetation_height: f64,
-    /// Distance past the bank, in channel widths, over which a flood of
-    /// magnitude 1 strips shrub younger than `vegetation_time`. It scales
-    /// with the magnitude. 0 disables.
-    pub scour_reach: f64,
     /// Height a scroll bar's ridge raises the ground, in channel depths, so
     /// vegetation takes to the ridges first. 0 disables.
     pub scroll_height: f64,
@@ -196,12 +180,6 @@ pub struct Params {
     /// Sediment supply once the upland is cleared, as a multiple of the
     /// wooded upland's. 1 disables.
     pub clearance_supply: f64,
-    /// Resistance vegetation lends a point bar against a flood's chute.
-    /// A chute must cross a bend whose arc length is `1 + chute_vegetation
-    /// · v` times what bare sand needs, where v is the bar's mean growth
-    /// over `vegetation_time` along the chord, up to 2, plus its overbank
-    /// deposit over `levee_height`. 0 lets a chute cross any bar.
-    pub chute_vegetation: f64,
     /// Jams of large wood recruited per channel width of mature forest
     /// bank eroded. Farmland gives [`FARM_WOOD`] of that. 0 disables.
     pub wood_rate: f64,
@@ -231,24 +209,9 @@ pub struct Params {
     /// fraction of a fresh lake's depth, at a sediment supply of 1. 0
     /// disables.
     pub delta_rate: f64,
-    /// Chance that a flood of magnitude 1 moves a tributary's course from
-    /// a point on its fan to a new route through low ground. A flood of
-    /// magnitude u moves it with u times that chance. 0 disables.
-    pub stream_avulsion: f64,
-    /// Fall from the levee crest to the ground [`SPLAY_PROBE`] widths
-    /// beyond it, in channel depths, at which a flood of magnitude 1
-    /// breaches an outer bank and lays a crevasse splay. A flood of
-    /// magnitude u needs a fall of `crevasse_drop / u`. 0 disables.
-    pub crevasse_drop: f64,
-    /// Length of the splay laid by a flood of magnitude 1, in channel
-    /// widths.
-    pub splay_length: f64,
-    /// The channel avulses through a breach when it finds a route through
-    /// low ground that rejoins it downstream and is shorter than the
-    /// channel between by more than this factor. 0 disables.
-    pub avulsion_ratio: f64,
-    /// Least flood magnitude whose breach can avulse.
-    pub avulsion_flood: f64,
+    /// Expected moves per unit time of each tributary's course, from a
+    /// point on its fan to a new route through low ground. 0 disables.
+    pub stream_shift_rate: f64,
     /// Mills founded per unit time along the whole river, by holdings on
     /// straight reaches beside their ground. 0 disables.
     pub mill_rate: f64,
@@ -285,7 +248,6 @@ impl Default for Params {
             width: 8.0,
             width_time: WIDTH_TIME,
             bar_push: BAR_PUSH,
-            flood_widening: FLOOD_WIDENING,
             erodibility: 1.0,
             omega,
             gamma,
@@ -299,8 +261,9 @@ impl Default for Params {
             cutoff_min_sep: 20,
             max_step: 0.15,
             oxbow_lifetime: OXBOW_LIFETIME,
-            bedload_fill: BEDLOAD_FILL,
+            bedload_rate: BEDLOAD_RATE,
             scar_lifetime: 1600.0,
+            scroll_time: SCROLL_TIME,
             scroll_lifetime: SCROLL_LIFETIME,
             jitter: 0.05,
             jitter_scale: 3.0,
@@ -315,15 +278,11 @@ impl Default for Params {
             vegetation_time: VEGETATION_TIME,
             shrub_factor: SHRUB_FACTOR,
             forest_time: FOREST_TIME,
-            flood_rate: FLOOD_RATE,
-            breach_dist: BREACH_DIST,
-            chute_ratio: CHUTE_RATIO,
             capture_ratio: CAPTURE_RATIO,
-            overbank: OVERBANK,
+            overbank_rate: OVERBANK_RATE,
             levee_length: LEVEE_LENGTH,
             levee_height: LEVEE_HEIGHT,
             vegetation_height: VEGETATION_HEIGHT,
-            scour_reach: SCOUR_REACH,
             scroll_height: SCROLL_HEIGHT,
             holding_area: HOLDING_AREA,
             reorganise_time: REORGANISE_TIME,
@@ -332,7 +291,6 @@ impl Default for Params {
             clearance_start: CLEARANCE_START,
             clearance_time: CLEARANCE_TIME,
             clearance_supply: CLEARANCE_SUPPLY,
-            chute_vegetation: CHUTE_VEGETATION,
             wood_rate: WOOD_RATE,
             jam_lifetime: JAM_LIFETIME,
             jam_push: JAM_PUSH,
@@ -341,11 +299,7 @@ impl Default for Params {
             fan_time: FAN_TIME,
             tributary_boost: TRIBUTARY_BOOST,
             delta_rate: DELTA_RATE,
-            stream_avulsion: STREAM_AVULSION,
-            crevasse_drop: CREVASSE_DROP,
-            splay_length: SPLAY_LENGTH,
-            avulsion_ratio: AVULSION_RATIO,
-            avulsion_flood: AVULSION_FLOOD,
+            stream_shift_rate: STREAM_SHIFT_RATE,
             mill_rate: MILL_RATE,
             mill_gap: MILL_GAP,
             weir_backwater: WEIR_BACKWATER,
@@ -365,7 +319,6 @@ impl Params {
         "width",
         "width_time",
         "bar_push",
-        "flood_widening",
         "erodibility",
         "omega",
         "gamma",
@@ -379,8 +332,9 @@ impl Params {
         "cutoff_min_sep",
         "max_step",
         "oxbow_lifetime",
-        "bedload_fill",
+        "bedload_rate",
         "scar_lifetime",
+        "scroll_time",
         "scroll_lifetime",
         "jitter",
         "jitter_scale",
@@ -395,15 +349,11 @@ impl Params {
         "vegetation_time",
         "shrub_factor",
         "forest_time",
-        "flood_rate",
-        "breach_dist",
-        "chute_ratio",
         "capture_ratio",
-        "overbank",
+        "overbank_rate",
         "levee_length",
         "levee_height",
         "vegetation_height",
-        "scour_reach",
         "scroll_height",
         "holding_area",
         "reorganise_time",
@@ -412,7 +362,6 @@ impl Params {
         "clearance_start",
         "clearance_time",
         "clearance_supply",
-        "chute_vegetation",
         "wood_rate",
         "jam_lifetime",
         "jam_push",
@@ -421,11 +370,7 @@ impl Params {
         "fan_time",
         "tributary_boost",
         "delta_rate",
-        "stream_avulsion",
-        "crevasse_drop",
-        "splay_length",
-        "avulsion_ratio",
-        "avulsion_flood",
+        "stream_shift_rate",
         "mill_rate",
         "mill_gap",
         "weir_backwater",
@@ -442,7 +387,6 @@ impl Params {
             "width" => &mut self.width,
             "width_time" => &mut self.width_time,
             "bar_push" => &mut self.bar_push,
-            "flood_widening" => &mut self.flood_widening,
             "erodibility" => &mut self.erodibility,
             "omega" => &mut self.omega,
             "gamma" => &mut self.gamma,
@@ -455,8 +399,9 @@ impl Params {
             "cutoff_dist" => &mut self.cutoff_dist,
             "max_step" => &mut self.max_step,
             "oxbow_lifetime" => &mut self.oxbow_lifetime,
-            "bedload_fill" => &mut self.bedload_fill,
+            "bedload_rate" => &mut self.bedload_rate,
             "scar_lifetime" => &mut self.scar_lifetime,
+            "scroll_time" => &mut self.scroll_time,
             "scroll_lifetime" => &mut self.scroll_lifetime,
             "jitter" => &mut self.jitter,
             "jitter_scale" => &mut self.jitter_scale,
@@ -471,15 +416,11 @@ impl Params {
             "vegetation_time" => &mut self.vegetation_time,
             "shrub_factor" => &mut self.shrub_factor,
             "forest_time" => &mut self.forest_time,
-            "flood_rate" => &mut self.flood_rate,
-            "breach_dist" => &mut self.breach_dist,
-            "chute_ratio" => &mut self.chute_ratio,
             "capture_ratio" => &mut self.capture_ratio,
-            "overbank" => &mut self.overbank,
+            "overbank_rate" => &mut self.overbank_rate,
             "levee_length" => &mut self.levee_length,
             "levee_height" => &mut self.levee_height,
             "vegetation_height" => &mut self.vegetation_height,
-            "scour_reach" => &mut self.scour_reach,
             "scroll_height" => &mut self.scroll_height,
             "holding_area" => &mut self.holding_area,
             "reorganise_time" => &mut self.reorganise_time,
@@ -488,7 +429,6 @@ impl Params {
             "clearance_start" => &mut self.clearance_start,
             "clearance_time" => &mut self.clearance_time,
             "clearance_supply" => &mut self.clearance_supply,
-            "chute_vegetation" => &mut self.chute_vegetation,
             "wood_rate" => &mut self.wood_rate,
             "jam_lifetime" => &mut self.jam_lifetime,
             "jam_push" => &mut self.jam_push,
@@ -497,11 +437,7 @@ impl Params {
             "fan_time" => &mut self.fan_time,
             "tributary_boost" => &mut self.tributary_boost,
             "delta_rate" => &mut self.delta_rate,
-            "stream_avulsion" => &mut self.stream_avulsion,
-            "crevasse_drop" => &mut self.crevasse_drop,
-            "splay_length" => &mut self.splay_length,
-            "avulsion_ratio" => &mut self.avulsion_ratio,
-            "avulsion_flood" => &mut self.avulsion_flood,
+            "stream_shift_rate" => &mut self.stream_shift_rate,
             "mill_rate" => &mut self.mill_rate,
             "mill_gap" => &mut self.mill_gap,
             "weir_backwater" => &mut self.weir_backwater,
@@ -560,8 +496,8 @@ pub struct Oxbow {
     pub offset: f64,
     /// Fraction of the lake filled, in [0, 1].
     pub fill: f64,
-    /// Fill that floods have brought into the lake and that has yet to
-    /// settle into `fill`, which it does over about `SETTLE_TIME`.
+    /// Fill that silt and bedload have brought into the lake and that has
+    /// yet to settle into `fill`, which it does over about `SETTLE_TIME`.
     pub settling: f64,
     /// Time the lake filled and became a scar, or infinity.
     pub filled_at: f64,
@@ -594,7 +530,7 @@ impl Oxbow {
     }
 }
 
-/// A scroll bar: the ridge a flood leaves along the inner bank of a
+/// A scroll bar: the ridge high water leaves along the inner bank of a
 /// migrating bend, as a polyline.
 #[derive(Clone, Debug)]
 pub struct Scroll {
@@ -636,21 +572,12 @@ pub struct Sim {
     pub time: f64,
     pub steps: u64,
     pub cutoffs: u64,
-    /// Floods so far, and the cutoffs they made (included in `cutoffs`).
-    pub floods: u64,
-    pub flood_cutoffs: u64,
     /// Oxbow lakes the channel has taken up (included in `cutoffs`).
     pub captures: u64,
-    /// Avulsions through a crevasse (included in `cutoffs`).
-    pub avulsions: u64,
     /// Jams of large wood against the banks.
     pub jams: Vec<Jam>,
     /// Tributaries entering from the deeper combes, with their fans.
     pub tributaries: Vec<Tributary>,
-    /// Crevasse splays laid by recent floods.
-    pub splays: Vec<SplayMark>,
-    /// Counts changes to `splays`.
-    pub splay_version: u64,
     /// Mills, working and ruined.
     pub mills: Vec<Mill>,
     /// Counts changes to `mills`.
@@ -659,14 +586,12 @@ pub struct Sim {
     /// walls after bluff erosion.
     pub wall_version: u64,
     rng: Rng,
-    /// Draws for the floodplain's events (falling wood, new mills), from a
-    /// stream of their own so they leave the river's draws unchanged.
+    /// Draws for the floodplain's events (falling wood, new mills, scroll
+    /// bars), from a stream of their own so they leave the river's draws
+    /// unchanged.
     events: Rng,
     /// Draws for the tributaries' courses, from a stream of their own.
     streams: Rng,
-    /// Magnitude of the last step's flood, whose levee breach is still to
-    /// be found.
-    breach: Option<f64>,
     /// Recent cut points and the step count until which they suppress new
     /// cutoffs nearby.
     recent_cuts: Vec<(P, u64)>,
@@ -690,7 +615,7 @@ pub struct Sim {
     /// retreat and its limit.
     cuts: Vec<(usize, f64, f64, f64)>,
     /// Whether each point may migrate (1) or a weir holds it (0), the
-    /// width it relaxes to, and the factor on the silt a flood lays beside
+    /// width it relaxes to, and the factor on the overbank silt laid beside
     /// it; set by [`Sim::migration_rate`].
     held: Vec<f64>,
     target: Vec<f64>,
@@ -768,7 +693,6 @@ const BANK_BEYOND: f64 = 0.25;
 /// Default width parameters; see [`Params`].
 const WIDTH_TIME: f64 = 3.0;
 const BAR_PUSH: f64 = 0.6;
-const FLOOD_WIDENING: f64 = 1.0;
 
 /// Default slope feedback; see [`Params`].
 const SLOPE_EXPONENT: f64 = 0.5;
@@ -795,13 +719,16 @@ const VEGETATION_TIME: f64 = 100.0;
 /// 1.5 times as fast through cleared farmland as through it.
 const SHRUB_FACTOR: f64 = 1.15;
 const FOREST_TIME: f64 = 1500.0;
-/// Default vegetation growth and flood scour; see [`Params`].
+/// Default vegetation growth; see [`Params`].
 const VEGETATION_HEIGHT: f64 = 0.05;
-const SCOUR_REACH: f64 = 1.5;
 const SCROLL_HEIGHT: f64 = 0.05;
 /// Steps between vegetation growth updates of a cell. Each step grows one
 /// of this many bands of rows, so the cost is the same at every step.
 const GROWTH_EVERY: u64 = 10;
+/// Steps between the overbank deposits on a cell, laid a band of rows a
+/// step as growth is: 5 units, 12.5 years, more often than the levees are
+/// drawn.
+const DEPOSIT_EVERY: u64 = 50;
 /// Default landholdings; see [`Params`]. A medieval holding changed hands
 /// about once a generation, some 30 years, but its hedges and headlands
 /// mostly stayed put, and dated hedges show field boundaries lasting
@@ -818,17 +745,21 @@ const GRAZING_TIME: f64 = 20.0;
 /// Steps during which a cut suppresses further cutoffs around it.
 const CUT_COOLDOWN: u64 = 100;
 
-/// Default flood parameters; see [`Params`].
-const FLOOD_RATE: f64 = 0.02;
-const BREACH_DIST: f64 = 2.5;
-const CHUTE_RATIO: f64 = 4.0;
+/// Default overbank deposition, lake filling and scroll bars; see
+/// [`Params`]. The rates are the means of the floods the model once drew,
+/// one every 50 units (125 years) on average, of magnitude uniform in
+/// [0, 1): a flood of magnitude 1 laid 0.3 channel depths at the bank and
+/// filled a fifth of a lake near the channel with bedload, so the mean
+/// rates are 0.3 and 0.2 times 0.5 / 50. Scroll bars keep the floods'
+/// mean spacing of 125 years.
 const CAPTURE_RATIO: f64 = 1.3;
-const OVERBANK: f64 = 0.3;
+const OVERBANK_RATE: f64 = 0.003;
 const OXBOW_LIFETIME: f64 = 1200.0;
-/// Time over which the fill a flood brings into a lake settles, as the
-/// e-folding time. At the default speed it is under two seconds on screen.
+/// Time over which the fill brought into a lake settles, as the e-folding
+/// time. At the default speed it is under two seconds on screen.
 const SETTLE_TIME: f64 = 10.0;
-const BEDLOAD_FILL: f64 = 0.2;
+const BEDLOAD_RATE: f64 = 0.002;
+const SCROLL_TIME: f64 = 50.0;
 const SCROLL_LIFETIME: f64 = 1000.0;
 
 /// Distance of a scroll bar past the inner bank, in channel widths.
@@ -862,8 +793,6 @@ const CLEARANCE_SUPPLY: f64 = 3.0;
 /// Overbank deposit, as a fraction of the flood level, above which a
 /// scroll bar's ridge is buried and dropped.
 const BURY: f64 = 0.95;
-/// Default chute resistance; see [`Params`].
-const CHUTE_VEGETATION: f64 = 1.0;
 /// Default large wood; see [`Params`]. A jam of full size lasts 12 units,
 /// 30 years, about the life of a jam in a temperate lowland river.
 const WOOD_RATE: f64 = 0.3;
@@ -880,9 +809,6 @@ pub const JAM_REACH: f64 = 3.0;
 const JAM_MERGE: f64 = 4.0;
 /// Most jams at once.
 const MAX_JAMS: usize = 40;
-/// Factor by which a jam of full size raises the chance of a breach
-/// beside it, as it backs the flood up behind it.
-const JAM_CREVASSE: f64 = 2.0;
 /// Default bluff erosion; see [`Params`]. Valley sides of terrace gravel
 /// and bedrock erode a few times slower than the floodplain.
 const BLUFF_RATE: f64 = 0.05;
@@ -902,10 +828,10 @@ const FAN_RADIUS: f64 = 7.0;
 const FAN_TIME: f64 = 400.0;
 const TRIBUTARY_BOOST: f64 = 0.3;
 /// The deepest combe's tributary fills the head of its delta in 100 units,
-/// 250 years, and a flood of mean magnitude moves its course on its fan
-/// about once in 8 floods, every 1,000 years.
+/// 250 years, and each tributary moves its course on its fan every 400
+/// units, 1,000 years, on average.
 const DELTA_RATE: f64 = 0.01;
-const STREAM_AVULSION: f64 = 0.25;
+const STREAM_SHIFT_RATE: f64 = 0.0025;
 /// Combe depth, in channel widths, below which a combe carries no
 /// tributary, and the depth of the deepest combe; see [`walls`].
 pub const FAN_MIN_DEPTH: f64 = 3.0;
@@ -918,39 +844,6 @@ pub const TRIBUTARY_REACH: f64 = 30.0;
 /// Steps between the walks along each tributary's course for the water
 /// it meets first.
 const JUNCTION_EVERY: u64 = 10;
-/// Default crevasse splays and avulsion; see [`Params`].
-const CREVASSE_DROP: f64 = 0.15;
-const SPLAY_LENGTH: f64 = 8.0;
-const AVULSION_RATIO: f64 = 2.5;
-const AVULSION_FLOOD: f64 = 0.75;
-/// Distance beyond the bank, in channel widths, at which a breach reads
-/// the ground the flood falls to.
-const SPLAY_PROBE: f64 = 4.0;
-/// Cosine of the half-angle a splay spreads through, 35°.
-const SPLAY_SPREAD: f64 = 0.82;
-/// Sand a flood of magnitude 1 lays at a splay's apex, in channel depths.
-const SPLAY_SAND: f64 = 0.3;
-/// Time a splay is kept for drawing, as vegetation grows over it.
-pub const SPLAY_LIFE: f64 = 300.0;
-/// Farthest along the valley an avulsion's route reaches from its breach,
-/// in channel widths.
-const AVULSION_REACH: f64 = 40.0;
-/// Width of a new channel cut by avulsion, in multiples of the reference
-/// width. It widens as the flow takes it.
-const AVULSION_WIDTH: f64 = 0.7;
-/// Cost of crossing ground in an avulsion's search, per unit length: the
-/// floor, and the rise per channel depth of ground above a fresh lake
-/// bed. Old channels and lakes draw the flow.
-const AVULSION_BASE: f32 = 0.5;
-const AVULSION_RISE: f32 = 4.0;
-/// Points either side of an avulsion's route that are smoothed into it, so
-/// it joins the channel without a sharp turn.
-const AVULSION_JOIN: usize = 6;
-/// Smoothing passes over an avulsion's route.
-const AVULSION_SMOOTH: usize = 40;
-/// Distance either side of a pinch, as a fraction of `pinch_length`,
-/// which an avulsion's route keeps out of.
-const PINCH_CLEAR: f64 = 0.5;
 /// Default mills; see [`Params`]. The Domesday survey of 1086 counted
 /// about 5,600 mills in England, several to a river every few kilometres;
 /// with a channel 40 m wide, 50 widths is 2 km.
@@ -978,12 +871,6 @@ const LEAT_DOWN: f64 = 3.0;
 const LEAT_OFFSET: f64 = 1.5;
 /// Time an abandoned mill stands as a ruin before it is dropped.
 pub const MILL_RUIN: f64 = 200.0;
-/// Flood magnitude above which a flood can sweep a weir away, certainly
-/// at magnitude 1.
-const MILL_FLOOD: f64 = 0.9;
-
-/// Longest chute a flood can cut, in channel widths.
-pub const CHUTE_CHORD: f64 = 5.0;
 
 /// Oxbow pieces with fewer points than this are dropped.
 const MIN_OXBOW_POINTS: usize = 3;
@@ -1006,9 +893,6 @@ pub const CAPTURE_FILL: f64 = 0.5;
 /// so the ends close before the rest of the lake fills. The channel meeting
 /// a lake there opens no route through it.
 const END_PLUG: f64 = 3.0;
-
-/// Most cutoffs a single flood can make.
-const MAX_FLOOD_CUTS: usize = 4;
 
 /// Layout of the hashed grid of centreline points: the cell size, the
 /// bucket mask, and the step in buckets from one row of cells to the next.
@@ -1066,21 +950,15 @@ impl Sim {
             time: 0.0,
             steps: 0,
             cutoffs: 0,
-            floods: 0,
-            flood_cutoffs: 0,
             captures: 0,
-            avulsions: 0,
             jams: Vec::new(),
             tributaries: Vec::new(),
-            splays: Vec::new(),
-            splay_version: 0,
             mills: Vec::new(),
             mill_version: 0,
             wall_version: 0,
             rng: Rng::new(seed),
             events: Rng::new(seed ^ EVENTS_SEED),
             streams: Rng::new(seed ^ STREAMS_SEED),
-            breach: None,
             recent_cuts: Vec::new(),
             curv: Vec::new(),
             rate: Vec::new(),
@@ -1112,7 +990,6 @@ impl Sim {
         self.rng = Rng::new(seed);
         self.events = Rng::new(seed ^ EVENTS_SEED);
         self.streams = Rng::new(seed ^ STREAMS_SEED);
-        self.breach = None;
         let [w, h] = self.bounds;
         let line = vec![[0.0, h / 2.0], [w, h / 2.0]];
         let mut pts = resample(&line, self.ds());
@@ -1146,13 +1023,8 @@ impl Sim {
         self.time = 0.0;
         self.steps = 0;
         self.cutoffs = 0;
-        self.floods = 0;
-        self.flood_cutoffs = 0;
         self.captures = 0;
-        self.avulsions = 0;
         self.jams.clear();
-        self.splays.clear();
-        self.splay_version += 1;
         self.mills.clear();
         self.mill_version += 1;
         self.wall_version += 1;
@@ -1256,52 +1128,13 @@ impl Sim {
             self.resample(ds);
             self.track();
         }
-        if let Some(u) = self.breach.take()
-            && self.crevasse(u)
-        {
-            self.resample(ds);
-            self.track();
-        }
-        // Floods arrive as a Poisson process, approximated per step.
-        if self.params.flood_rate > 0.0
-            && self.rng.uniform() < self.params.flood_rate * self.params.dt
-        {
-            self.floods += 1;
-            let magnitude = self.rng.uniform();
-            self.flush_jams(magnitude);
-            self.flood_mills(magnitude);
-            self.shift_streams(magnitude);
-            for _ in 0..MAX_FLOOD_CUTS {
-                if !self.flood_cutoff(magnitude) {
-                    break;
-                }
-                self.resample(ds);
-                self.track();
-            }
-            self.widen(magnitude);
-            // Clearance raises the silt the flood carries. How far it
-            // spreads from the bank is set by how fast it settles, which
-            // clearance leaves alone.
-            let supply = self.supply();
-            self.migration_rate();
-            let p = &self.params;
-            let flood = Flood {
-                half: 0.5 * p.width,
-                amount: magnitude * p.overbank * supply,
-                length: p.levee_length * p.width,
-                stage: p.levee_height,
-                scour: magnitude * p.scour_reach * p.width,
-                young: p.vegetation_time,
-                boost: &self.boost,
-            };
-            self.erodibility
-                .flood(&self.centerline, &self.widths, &flood);
-            // The flood breaks its levees in the next step, three months
-            // on, so the deposit and the breach do not share a step.
-            self.breach = Some(magnitude);
-            self.fill_lakes(magnitude);
+        // Scroll bars come with high water, as a Poisson process,
+        // approximated per step.
+        let p = &self.params;
+        if p.scroll_time > 0.0 && self.events.uniform() < p.dt / p.scroll_time {
             self.add_scrolls();
         }
+        self.shift_streams();
         self.erodibility.sweep(&self.centerline);
         self.time += self.params.dt;
         self.steps += 1;
@@ -1314,6 +1147,15 @@ impl Sim {
             y0 as usize,
             y1 as usize,
         );
+        let band = self.steps % DEPOSIT_EVERY;
+        let (y0, y1) = (
+            band * rows / DEPOSIT_EVERY,
+            (band + 1) * rows / DEPOSIT_EVERY,
+        );
+        self.lay_overbank(y0 as usize, y1 as usize);
+        if band == 0 {
+            self.fill_lakes(DEPOSIT_EVERY as f64 * self.params.dt);
+        }
         self.feed_tributaries();
         let phase = self.steps % land::SURVEY_STEPS;
         if phase == 0 {
@@ -1330,7 +1172,6 @@ impl Sim {
         );
         self.recruit_wood();
         self.found_mill();
-        self.age_splays();
         self.rework_oxbows();
         // Clearance fills lakes faster with the fine sediment it washes in.
         let supply = self.supply();
@@ -1339,9 +1180,8 @@ impl Sim {
             supply * self.params.dt / self.params.oxbow_lifetime.max(1e-9),
         );
         // A lake fills at least as far as the silt on its bed, read every
-        // step: the channel changes it between floods by sweeping some of
-        // its cells, and applying that only at the next flood would change
-        // every lake at once.
+        // step, as the overbank silt raises the bed and the channel sweeps
+        // some of its cells.
         let settle = (self.params.dt / SETTLE_TIME).min(1.0);
         let field = &self.erodibility;
         for o in self.oxbows.iter_mut().filter(|o| o.is_lake()) {
@@ -1378,6 +1218,32 @@ impl Sim {
             0.0
         };
         1.0 + (p.clearance_supply - 1.0) * smoothstep(t)
+    }
+
+    /// Lay the overbank silt of [`DEPOSIT_EVERY`] steps over the rows from
+    /// `y0` up to `y1`, one band of the grid, so each cell gains it once a
+    /// cycle of bands. Clearance raises the silt the river carries. How far
+    /// it spreads from the bank is set by how fast it settles, which
+    /// clearance leaves alone.
+    fn lay_overbank(&mut self, y0: usize, y1: usize) {
+        let supply = self.supply();
+        let p = &self.params;
+        // A cutoff this step leaves the factors of the old points, which
+        // the next step's migration replaces.
+        let boost: &[f64] = if self.boost.len() == self.centerline.len() {
+            &self.boost
+        } else {
+            &[]
+        };
+        let f = Overbank {
+            half: 0.5 * p.width,
+            amount: DEPOSIT_EVERY as f64 * p.dt * p.overbank_rate * supply,
+            length: p.levee_length * p.width,
+            stage: p.levee_height,
+            boost,
+        };
+        self.erodibility
+            .lay_overbank(&self.centerline, &self.widths, &f, y0, y1);
     }
 
     /// Bring the jams and mills up to date with the centreline's points.
@@ -1462,25 +1328,6 @@ impl Sim {
         }
     }
 
-    /// Resistance a point bar puts up against a chute along `a`–`b`: the
-    /// mean along the chord of its vegetation's growth over
-    /// `vegetation_time`, up to 2, plus its overbank deposit over
-    /// `levee_height`. Bare bar sand puts up none.
-    fn chute_resistance(&self, a: P, b: P) -> f64 {
-        let p = &self.params;
-        let field = &self.erodibility;
-        let samples = ((geom::dist(a, b) / field.cell).ceil() as usize).max(1);
-        let veg = p.vegetation_time.max(1e-9);
-        let stage = p.levee_height.max(1e-9);
-        let total: f64 = (0..=samples)
-            .map(|k| {
-                let c = geom::lerp(a, b, k as f64 / samples as f64);
-                (field.growth_at(c) / veg).min(2.0) + field.deposit_at(c).max(0.0) / stage
-            })
-            .sum();
-        total / (samples + 1) as f64
-    }
-
     /// Resample the centreline to spacing close to `ds`.
     fn resample(&mut self, ds: f64) {
         geom::resample_with(
@@ -1525,23 +1372,6 @@ impl Sim {
         let bank = [q[0] + side * nrm[0], q[1] + side * nrm[1]];
         edge_taper(bank, self.bounds, p.edge_margin * p.width, floor)
             * self.erodibility.at(bank, ground)
-    }
-
-    /// Widen each bend by a flood of magnitude `u`, in proportion to its
-    /// migration rate and the erodibility of its outer bank.
-    fn widen(&mut self, u: f64) {
-        let (k, n) = (self.params.flood_widening * u, self.centerline.len());
-        if k <= 0.0 || self.params.width_time <= 0.0 || n < 3 {
-            return;
-        }
-        self.migration_rate();
-        let ground = self.ground();
-        for i in 1..n - 1 {
-            let r = self.rate[i];
-            let e =
-                self.bank_erodibility(i, right_normal(&self.centerline, i), r.signum(), &ground);
-            self.widths[i] = (self.widths[i] + k * e * r.abs()).clamp(MIN_WIDTH, MAX_WIDTH);
-        }
     }
 
     /// Howard–Knutson migration rate at each point, in dimensionless units
@@ -1877,82 +1707,6 @@ impl Sim {
         false
     }
 
-    /// One cut during a flood of magnitude `u` in [0, 1): a neck breach or a
-    /// chute across a point bar. Among the pairs that qualify, the one with
-    /// the largest ratio of arc length to chord is cut, provided the chord
-    /// does not cross the channel. Returns whether a cut was made.
-    fn flood_cutoff(&mut self, u: f64) -> bool {
-        let p = &self.params;
-        let w = p.width;
-        // Neck width breached between banks of the reference width; it
-        // scales with the mean local width of each pair.
-        let neck = (p.cutoff_dist + u * (p.breach_dist - p.cutoff_dist).max(0.0)) * w;
-        let min_ratio = if p.chute_ratio > 0.0 && u > 0.0 {
-            p.chute_ratio / u
-        } else {
-            f64::INFINITY
-        };
-        let widest = neck * self.max_width();
-        let reach = if min_ratio.is_finite() {
-            widest.max(CHUTE_CHORD * w)
-        } else {
-            widest
-        };
-        let k_sep = p.cutoff_min_sep;
-        let n = self.centerline.len();
-        if n < k_sep + 2 || reach <= 0.0 {
-            return false;
-        }
-        let ds = geom::length(&self.centerline) / (n - 1) as f64;
-        let g = self.build_grid(reach);
-        let reach2 = reach * reach;
-        let (pts, widths) = (&self.centerline, &self.widths);
-
-        // Best pair from each upstream point, as (ratio, i, j, whether the
-        // banks meet).
-        let mut found: Vec<(f64, usize, usize, bool)> = Vec::new();
-        for i in 0..n {
-            let mut best: Option<(f64, usize, bool)> = None;
-            self.for_neighbours_after(pts[i], g, i + k_sep, |j| {
-                let d2 = geom::dist2(pts[i], pts[j]);
-                if d2 >= reach2 {
-                    return;
-                }
-                let ratio = (j - i) as f64 * ds / d2.sqrt().max(1e-9);
-                let local = 0.5 * neck * (widths[i] + widths[j]);
-                let neck = d2 < local * local;
-                if (neck || ratio >= min_ratio) && best.is_none_or(|(r, _, _)| ratio > r) {
-                    best = Some((ratio, j, neck));
-                }
-            });
-            if let Some((ratio, j, neck)) = best {
-                found.push((ratio, i, j, neck));
-            }
-        }
-        found.sort_by(|a, b| b.0.total_cmp(&a.0));
-
-        let veg = self.params.chute_vegetation;
-        for &(ratio, i, j, neck) in &found {
-            let (a, b) = (pts[i], pts[j]);
-            if self.near_recent(a) || self.near_recent(b) {
-                continue;
-            }
-            // A chute must cross a bar that vegetation has not bound.
-            if !neck && veg > 0.0 && ratio < min_ratio * (1.0 + veg * self.chute_resistance(a, b)) {
-                continue;
-            }
-            let crosses = (0..n - 1)
-                .filter(|&k| k + 1 < i || k > j || (k > i && k + 1 < j))
-                .any(|k| segments_cross(a, b, pts[k], pts[k + 1]));
-            if !crosses {
-                self.apply_cut(i, j);
-                self.flood_cutoffs += 1;
-                return true;
-            }
-        }
-        false
-    }
-
     /// Take up one open oxbow lake whose banks meet the channel's at two
     /// places, A upstream and B downstream, where the route through the lake
     /// is shorter than the channel from A to B by more than `capture_ratio`.
@@ -2281,11 +2035,11 @@ impl Sim {
         self.oxbows = kept;
     }
 
-    /// Fill each lake by the bedload one flood of magnitude `u` carries
-    /// through an entrance near the channel, by [`Params::bedload_fill`].
-    /// The silt the flood lays on its bed is read in [`Sim::step`]. Both
-    /// settle into the fill over `SETTLE_TIME`.
-    fn fill_lakes(&mut self, u: f64) {
+    /// Fill each lake by the bedload carried over time `dt` through an
+    /// entrance near the channel, by [`Params::bedload_rate`]. The silt
+    /// laid on its bed is read in [`Sim::step`]. Both settle into the fill
+    /// over `SETTLE_TIME`.
+    fn fill_lakes(&mut self, dt: f64) {
         let supply = self.supply();
         let p = &self.params;
         let (half, length) = (0.5 * p.width, p.levee_length * p.width);
@@ -2299,8 +2053,8 @@ impl Sim {
                     .map(|&c| geom::dist2(o.points[0], c))
                     .fold(f64::INFINITY, f64::min);
                 inflow = supply
-                    * u
-                    * p.bedload_fill
+                    * dt
+                    * p.bedload_rate
                     * o.entry
                     * (-(gap.sqrt() - half * o.widths[0]).max(0.0) / length).exp();
             }
@@ -2309,7 +2063,7 @@ impl Sim {
     }
 
     /// Leave a scroll bar along the inner bank of each run of points whose
-    /// bank is migrating, as a flood does on the point bar it builds.
+    /// bank is migrating, as high water does on the point bar it builds.
     fn add_scrolls(&mut self) {
         if self.params.scroll_lifetime <= 0.0 {
             return;
@@ -2445,7 +2199,6 @@ mod tests {
         // No wood or mills, whose jams and weirs would bend the sine.
         let params = Params {
             cutoff_dist: 0.0,
-            flood_rate: 0.0,
             jitter: 0.0,
             heterogeneity: 0.0,
             wood_rate: 0.0,
@@ -2605,58 +2358,30 @@ mod tests {
     }
 
     #[test]
-    fn floods_cut_off_earlier_and_never_self_intersect() {
+    fn cutoffs_never_self_intersect() {
         // Loose point bars, overbank deposits and jams of wood change the
-        // planform, and deposits come only with floods, so all three are off
-        // here to isolate the cutoffs. Sinuosity is reported but not
-        // compared: with bank reads by the rate's sign, floods no longer
-        // lower it on every seed.
+        // planform, so one run of each pair has them off to isolate the
+        // cutoffs, and the other runs the defaults.
         let isolated = Params {
             bar_factor: 1.0,
-            overbank: 0.0,
+            overbank_rate: 0.0,
             wood_rate: 0.0,
             ..Params::default()
-        };
-        let calm = Params {
-            flood_rate: 0.0,
-            ..isolated.clone()
-        };
-        let stormy = Params {
-            flood_rate: 0.1,
-            chute_ratio: 3.0,
-            ..isolated
         };
         // The four runs are independent, so each gets its own thread.
         std::thread::scope(|s| {
             let runs: Vec<_> = [3, 11]
                 .into_iter()
-                .map(|seed| {
-                    let (calm, stormy) = (calm.clone(), stormy.clone());
-                    (
-                        seed,
-                        s.spawn(move || late_sinuosity(calm, seed)),
-                        s.spawn(move || late_sinuosity(stormy, seed)),
-                    )
-                })
+                .flat_map(|seed| [(seed, isolated.clone()), (seed, Params::default())])
+                .map(|(seed, params)| (seed, s.spawn(move || late_sinuosity(params, seed))))
                 .collect();
-            for (seed, calm, stormy) in runs {
-                let (s_calm, l_calm, calm_sim) = join(calm);
-                let (s_storm, l_storm, sim) = join(stormy);
+            for (seed, run) in runs {
+                let (sinuosity, loops, sim) = join(run);
                 eprintln!(
-                    "seed {seed}: sinuosity {s_calm:.2} calm, {s_storm:.2} with {} floods and {} flood cutoffs of {}; \
-                     loops cut at {l_calm:.1} widths calm, {l_storm:.1} with floods",
-                    sim.floods, sim.flood_cutoffs, sim.cutoffs
+                    "seed {seed}: sinuosity {sinuosity:.2}, {} cutoffs, loops cut at {loops:.1} widths",
+                    sim.cutoffs
                 );
-                assert_eq!(calm_sim.flood_cutoffs, 0);
-                assert!(
-                    sim.flood_cutoffs >= 3,
-                    "only {} flood cutoffs",
-                    sim.flood_cutoffs
-                );
-                assert!(
-                    l_storm < 0.9 * l_calm,
-                    "floods should cut loops off shorter"
-                );
+                assert!(sim.cutoffs >= 3, "only {} cutoffs", sim.cutoffs);
             }
         });
     }
@@ -2728,8 +2453,10 @@ mod tests {
 
     #[test]
     fn lakes_near_the_channel_fill_first() {
+        // Silt and bedload at 50 times their default rates.
         let mut sim = sine_sim(0.0, 40.0);
-        sim.params.flood_rate = 1.0;
+        sim.params.overbank_rate = 0.15;
+        sim.params.bedload_rate = 0.1;
         let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
         // Straight lakes beside the channel, near and far, and one whose
         // entrance lies on the channel at a small diversion angle.
@@ -2756,7 +2483,7 @@ mod tests {
         let fills = |sim: &Sim| sim.oxbows.iter().map(|o| o.fill).collect::<Vec<_>>();
         sim.step_n(1000);
         let f = fills(&sim);
-        eprintln!("fills after {} floods: {f:?}", sim.floods);
+        eprintln!("fills: {f:?}");
         let quiet = sim.time / sim.params.oxbow_lifetime;
         assert!(
             (f[1] - quiet).abs() < 0.05,
@@ -2771,9 +2498,10 @@ mod tests {
     }
 
     #[test]
-    fn floods_leave_scroll_bars_inside_migrating_bends() {
+    fn scroll_bars_lie_inside_migrating_bends() {
         let mut sim = sine_sim(2.0, 30.0);
-        sim.params.flood_rate = 0.0;
+        sim.params.scroll_time = 0.0;
+        sim.params.overbank_rate = 0.0;
         sim.step_n(50);
         sim.add_scrolls();
         assert!(!sim.scrolls.is_empty());
@@ -2937,7 +2665,7 @@ mod tests {
     #[test]
     fn bends_widen_into_soft_banks_and_narrow_into_clay() {
         let mut sim = sine_sim(2.0, 30.0);
-        sim.params.flood_rate = 0.0;
+        sim.params.overbank_rate = 0.0;
         sim.step_n(300);
         let (fast, slow) = width_by_rate(&mut sim);
         eprintln!("soft banks: width {fast:.2} where migrating fastest, {slow:.2} slowest");
@@ -2948,7 +2676,7 @@ mod tests {
 
         // Old clay plugs everywhere erode slower than the bar advances.
         let mut sim = sine_sim(2.0, 30.0);
-        sim.params.flood_rate = 0.0;
+        sim.params.overbank_rate = 0.0;
         sim.erodibility.cut_at.fill(-1e9);
         sim.step_n(300);
         let (fast, slow) = width_by_rate(&mut sim);
@@ -3064,7 +2792,7 @@ mod tests {
     }
 
     #[test]
-    fn clearance_raises_the_supply_and_the_silt_floods_lay() {
+    fn clearance_raises_the_supply_and_the_silt_laid_overbank() {
         let mut sim = sine_sim(0.0, 40.0);
         let p = sim.params.clone();
         sim.time = p.clearance_start - 1.0;
@@ -3073,12 +2801,11 @@ mod tests {
         assert!((sim.supply() - 0.5 * (1.0 + p.clearance_supply)).abs() < 1e-9);
         sim.time = p.clearance_start + p.clearance_time + 1.0;
         assert_eq!(sim.supply(), p.clearance_supply);
-        // The same flood, before and after clearance.
+        // One cycle of bands of overbank silt, before and after clearance.
         let run = |time: f64| {
             let mut sim = sine_sim(0.0, 40.0);
-            (sim.params.flood_rate, sim.params.crevasse_drop, sim.time) =
-                (1.0 / sim.params.dt, 0.0, time);
-            sim.step();
+            sim.time = time;
+            sim.step_n(DEPOSIT_EVERY as usize);
             let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
             [1.5, 5.0].map(|y| sim.erodibility.deposit_at([100.0 * w, mid + y * w]))
         };
@@ -3093,45 +2820,8 @@ mod tests {
         );
     }
 
-    /// A narrow bend: up from the line, across 4 widths, and back down.
-    fn narrow_bend() -> Sim {
-        let mut sim = sine_sim(0.0, 40.0);
-        sim.params.cutoff_dist = 1.0;
-        let (w, mid) = (sim.params.width, sim.bounds[1] / 2.0);
-        let at = |x: f64, y: f64| [x * w, mid + y * w];
-        let mut pts: Vec<P> = (0..=20).map(|k| at(100.0 + 0.5 * k as f64, 0.0)).collect();
-        pts.extend((1..=20).map(|k| at(110.0, 0.5 * k as f64)));
-        pts.extend((1..=8).map(|k| at(110.0 + 0.5 * k as f64, 10.0)));
-        pts.extend((1..=20).map(|k| at(114.0, 10.0 - 0.5 * k as f64)));
-        pts.extend((1..=20).map(|k| at(114.0 + 0.5 * k as f64, 0.0)));
-        sim.centerline = pts;
-        sim.widths = vec![1.0; sim.centerline.len()];
-        sim.line_version += 1;
-        sim
-    }
-
     #[test]
-    fn a_chute_crosses_bare_bar_but_not_vegetated() {
-        let mut bare = narrow_bend();
-        let (w, mid) = (bare.params.width, bare.bounds[1] / 2.0);
-        let bar: Vec<P> = (0..=16)
-            .flat_map(|i| {
-                (0..=40).map(move |j| [(110.0 + 0.25 * i as f64) * w, mid + 0.25 * j as f64 * w])
-            })
-            .collect();
-        bare.erodibility.sweep(&bar);
-        let (a, b) = ([110.5 * w, mid + 5.0 * w], [113.5 * w, mid + 5.0 * w]);
-        assert_eq!(bare.chute_resistance(a, b), 0.0, "fresh bar sand");
-        assert!(bare.flood_cutoff(0.99), "a chute crosses the bare bar");
-        let mut wooded = narrow_bend();
-        assert_eq!(wooded.chute_resistance(a, b), 2.0, "old floodplain forest");
-        assert!(!wooded.flood_cutoff(0.99), "the forest holds the bar");
-        wooded.params.chute_vegetation = 0.0;
-        assert!(wooded.flood_cutoff(0.99), "unless vegetation is ignored");
-    }
-
-    #[test]
-    fn a_jam_pushes_the_channel_off_its_bank_until_a_flood_flushes_it() {
+    fn a_jam_pushes_the_channel_off_its_bank() {
         let mut sim = sine_sim(0.0, 40.0);
         let (w, i) = (sim.params.width, sim.centerline.len() / 2);
         let (q, nrm) = (sim.centerline[i], right_normal(&sim.centerline, i));
@@ -3163,8 +2853,6 @@ mod tests {
             .find(|c| (c[0] - 50.0 * w).abs() < 0.3 * w)
             .unwrap();
         assert!((far[1] - q[1]).abs() < 1e-6, "and stays put away from it");
-        sim.flush_jams(1.0);
-        assert!(sim.jams.is_empty(), "the largest flood flushes every jam");
     }
 
     #[test]
@@ -3291,8 +2979,6 @@ mod tests {
             .map(|&c| dist(c, weir))
             .fold(f64::INFINITY, f64::min);
         assert!(near < 0.25 * w, "the weir holds its point: {near}");
-        sim.flood_mills(1.0);
-        assert!(!sim.mills[0].working(), "the greatest flood sweeps it away");
     }
 
     /// A working mill on a growing sine, with its leat on the side `side`

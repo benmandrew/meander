@@ -2,14 +2,13 @@
 //! ground: a weir across the channel and a leat along the bank that
 //! carries water to the wheel and back. The weir's masonry holds the banks
 //! beside it, and the pond it holds back slows the reach above it, widens
-//! it, and drops more silt on the banks in a flood. A mill is left as a
-//! ruin when the channel cuts away from its weir or breaks into its leat,
-//! or a great flood sweeps the weir away.
+//! it, and drops more silt on its banks. A mill is left as a ruin when the
+//! channel cuts away from its weir or breaks into its leat.
 
 use crate::geom::{self, P, right_normal};
 use crate::{
-    LEAT_DOWN, LEAT_OFFSET, LEAT_UP, MILL_FLOOD, MILL_RUIN, MILL_SNAP, MILL_STRAIGHT, POND_SILT,
-    POND_WIDEN, Sim, WEIR_HOLD, land, smoothstep,
+    LEAT_DOWN, LEAT_OFFSET, LEAT_UP, MILL_RUIN, MILL_SNAP, MILL_STRAIGHT, POND_SILT, POND_WIDEN,
+    Sim, WEIR_HOLD, land, smoothstep,
 };
 
 /// Distance over which a leat leaves the bank at either end, in channel
@@ -96,22 +95,6 @@ impl Sim {
             let (a, b) = (unit(k), unit(k + 2));
             a[0] * b[0] + a[1] * b[1] < 0.5
         })
-    }
-
-    /// Let a flood of magnitude `u` above [`MILL_FLOOD`] sweep away each
-    /// weir with a chance that rises to 1 at magnitude 1.
-    pub(crate) fn flood_mills(&mut self, u: f64) {
-        if u <= MILL_FLOOD {
-            return;
-        }
-        let chance = (u - MILL_FLOOD) / (1.0 - MILL_FLOOD);
-        let time = self.time;
-        for m in self.mills.iter_mut().filter(|m| m.working()) {
-            if self.events.uniform() < chance {
-                m.ruined_at = time;
-                self.mill_version += 1;
-            }
-        }
     }
 
     /// With chance `mill_rate` per unit time, try to found a mill at a
@@ -245,7 +228,7 @@ impl Sim {
     /// Apply the working weirs to this step's migration: hold the points
     /// within [`WEIR_HOLD`] widths of each, freeing them over as far
     /// again, and slow the reach above it,
-    /// widen it and raise the silt a flood lays there, each falling to
+    /// widen it and raise the overbank silt laid there, each falling to
     /// nothing at `pond_length`.
     pub(crate) fn pond_weirs(&mut self) {
         let n = self.rate.len();
