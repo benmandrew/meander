@@ -1259,7 +1259,7 @@ impl Sim {
         if self.steps.is_multiple_of(CHECK_CROSSING) && geom::self_intersects(pts) {
             return Err("centreline crosses itself".into());
         }
-        if self.steps > 0 && (self.steps - 1) % land::SURVEY_STEPS == 2 * land::BANDS as u64 {
+        if self.steps % land::SURVEY_STEPS == 2 * land::BANDS as u64 {
             let across = (self.land.buildings.iter())
                 .filter(|b| self.land.across_stream(b, self.params.width))
                 .count();
@@ -2712,7 +2712,7 @@ mod tests {
         for _ in 0..8000 {
             sim.step();
             // Right after a survey's weathering, with the streams as it saw them.
-            if (sim.steps - 1) % land::SURVEY_STEPS != 2 * land::BANDS as u64 {
+            if sim.steps % land::SURVEY_STEPS != 2 * land::BANDS as u64 {
                 continue;
             }
             let across = sim
