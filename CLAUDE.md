@@ -10,7 +10,7 @@ Read `docs/architecture.md` before changing a process or a renderer layer, and k
 
 Tools come from the Nix flake (`direnv allow` or `nix develop`).
 
-- `make build`, `make serve` (http://localhost:8000), `make smoke`, `make test`.
+- `make build`, `make serve` (http://localhost:8000), `make smoke`, `make test`, `make fuzz` (random seeds against `Sim::check`; see `docs/development.md`).
 - One test: `cargo test --release -p meander-core <test_name>`. Always use `--release`.
 - Tuning: `cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]`, with env overrides such as `ALPHA=0.8`. It prints step-time percentiles.
 - The pre-commit hook checks only staged changes.

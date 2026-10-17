@@ -725,6 +725,14 @@ fn edge_taper(p: P, bounds: P, margin: f64, floor: (f64, f64)) -> f64 {
     ramp(p[0]) * ramp(bounds[0] - p[0]) * ramp(p[1] - y0) * ramp(y1 - p[1])
 }
 
+/// Hidden reaches the page runs upstream and downstream of its window, in
+/// channel widths. See [`Sim::reset_view`].
+pub const UPSTREAM: f64 = 60.0;
+pub const DOWNSTREAM: f64 = 20.0;
+
+/// Steps between [`Sim::check`]'s tests for the centreline crossing itself.
+pub const CHECK_CROSSING: u64 = 10;
+
 /// Mixed into the seed for the stream of floodplain events.
 const EVENTS_SEED: u64 = 0x5eed_f10d;
 /// Mixed into the seed for the stream of tributary course draws.
@@ -1076,6 +1084,20 @@ impl Sim {
         sim
     }
 
+    /// Restart as the page runs the river, for a visible window `view_w` by
+    /// `view_h` world units starting at `UPSTREAM` widths. Hidden reaches
+    /// let meanders develop before they come into view and keep the pinned
+    /// outlet out of sight, and the valley is pinched at the window edges so
+    /// no bend straddles them. Returns the window's left edge.
+    pub fn reset_view(&mut self, view_w: f64, view_h: f64, seed: u64, noise: f64) -> f64 {
+        let w = self.params.width;
+        let x = UPSTREAM * w;
+        self.bounds = [(UPSTREAM + DOWNSTREAM) * w + view_w, view_h];
+        self.pinches = vec![x, x + view_w];
+        self.reset(seed, noise);
+        x
+    }
+
     /// Restart from a straight line across the domain with lateral noise of
     /// amplitude `noise` channel widths.
     pub fn reset(&mut self, seed: u64, noise: f64) {
@@ -1191,6 +1213,61 @@ impl Sim {
     /// Target point spacing Δs, in world units.
     pub fn ds(&self) -> f64 {
         SPACING * self.params.width
+    }
+
+    /// Check the invariants the model keeps, for the seed fuzzer: a finite
+    /// centreline inside the domain that does not cross itself, local
+    /// widths within their bounds, whole oxbows, and, right after a
+    /// survey's weathering, no building across a stream. The crossing test
+    /// is quadratic in the points, so it runs every [`CHECK_CROSSING`]
+    /// steps.
+    pub fn check(&self) -> Result<(), String> {
+        let [w, h] = self.bounds;
+        let pts = &self.centerline;
+        if pts.len() < 2 {
+            return Err(format!("centreline has {} points", pts.len()));
+        }
+        let outside = |p: &P| !(p[0] >= 0.0 && p[0] <= w && p[1] >= 0.0 && p[1] <= h);
+        if let Some(i) = pts.iter().position(outside) {
+            return Err(format!(
+                "centreline point {i} at {:?} is outside the domain",
+                pts[i]
+            ));
+        }
+        if self.widths.len() != pts.len() {
+            return Err(format!(
+                "{} widths for {} points",
+                self.widths.len(),
+                pts.len()
+            ));
+        }
+        if let Some(i) = self
+            .widths
+            .iter()
+            .position(|b| !(MIN_WIDTH..=MAX_WIDTH).contains(b))
+        {
+            return Err(format!("local width {} at point {i}", self.widths[i]));
+        }
+        for (k, o) in self.oxbows.iter().enumerate() {
+            let whole = o.points.len() == o.widths.len()
+                && !o.points.iter().any(outside)
+                && (0.0..=1.0).contains(&o.fill);
+            if !whole {
+                return Err(format!("oxbow {k} is malformed"));
+            }
+        }
+        if self.steps.is_multiple_of(CHECK_CROSSING) && geom::self_intersects(pts) {
+            return Err("centreline crosses itself".into());
+        }
+        if self.steps > 0 && (self.steps - 1) % land::SURVEY_STEPS == 2 * land::BANDS as u64 {
+            let across = (self.land.buildings.iter())
+                .filter(|b| self.land.across_stream(b, self.params.width))
+                .count();
+            if across > 0 {
+                return Err(format!("{across} buildings across a stream"));
+            }
+        }
+        Ok(())
     }
 
     /// Arc length over straight-line distance between the endpoints.

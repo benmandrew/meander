@@ -1,8 +1,7 @@
 //! wasm-bindgen wrapper around `meander-core`.
 //!
-//! The simulated river is longer than the visible window: hidden reaches
-//! upstream and downstream let meanders develop before they come into view
-//! and keep the pinned outlet out of sight.
+//! The simulated river is longer than the visible window; see
+//! `Sim::reset_view`.
 //!
 //! Geometry is exposed as pointers into WASM memory so JS can read it
 //! without copying. Call `sync` after stepping, then rebuild every typed
@@ -11,10 +10,6 @@
 use meander_core::farm::RUIN_TIME;
 use meander_core::{FAN_MAX_DEPTH, MILL_RUIN, Params, Sim};
 use wasm_bindgen::prelude::*;
-
-/// Hidden reach lengths, in channel widths.
-const UPSTREAM: f64 = 60.0;
-const DOWNSTREAM: f64 = 20.0;
 
 #[wasm_bindgen]
 pub struct River {
@@ -96,12 +91,7 @@ impl River {
     /// Restart from a noisy straight line, for a visible window of the given
     /// size, and run `warmup` time units so the river opens developed.
     pub fn reset(&mut self, view_w: f64, view_h: f64, seed: u32, noise: f64, warmup: f64) {
-        let w = self.sim.params.width;
-        self.view_x = UPSTREAM * w;
-        self.sim.bounds = [(UPSTREAM + DOWNSTREAM) * w + view_w, view_h];
-        // Pinch the valley at the window edges so no bend straddles them.
-        self.sim.pinches = vec![self.view_x, self.view_x + view_w];
-        self.sim.reset(seed as u64, noise);
+        self.view_x = self.sim.reset_view(view_w, view_h, seed as u64, noise);
         self.advance(warmup);
     }
 

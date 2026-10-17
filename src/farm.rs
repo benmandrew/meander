@@ -217,7 +217,6 @@ impl Land {
     }
 
     /// Whether building `b` stands across a stream.
-    #[cfg(test)]
     pub(crate) fn across_stream(&self, b: &Building, w: f64) -> bool {
         on_stream(&self.streams, b.rect(w), 0.0)
     }
