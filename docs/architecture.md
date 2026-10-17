@@ -30,6 +30,10 @@ Holdings are the *geodesic Voronoi cells* of farmsteads, with the channel and ox
 
 Each reorganisation changes a farmstead by one building, towards a plan set by the seat's risk against `SEAT_RISK`. A building past `FLEE_RISK` or off the holding is abandoned first, and ruins fade over `RUIN_TIME` (150 years). Buildings keep `CLEAR` of tributaries, whose courses `Sim` hands over when they change. Each survey removes buildings the water has reached. A division makes a hamlet with chance `hamlet_chance`. The farmsteads draw from their own *pseudo-random number generator* (PRNG) stream and spend none of the holdings' search budget, so with `hamlet_chance` 0 the holdings and the river run exactly as with `farmsteads` off.
 
+### Tracks and fords (`tracks.rs`)
+
+Tracks join the farmsteads and cross the channel only at fords, since no bridge would stand for long. One search goes out from every farmstead at once, `TRACK_BUDGET` (128) cells a step, costed by flood risk and by `FORD_COST` for each width of channel waded. Its parts meet in 8 bands of rows, one a step. The cheapest meetings are laid first, as a *greedy spanner*: a lane goes in only if the network already laid makes the trip more than `DETOUR` (2) times as long. Ground on the last network costs `TRACK_KEEP` (half), so ways stay in use. A network takes about 340 steps (85 years). The fords are found again on the tracks after every survey of the channel, so they follow the water. Tracks read the land and change nothing else.
+
 ### Floodplain processes
 
 - Clearance: `Sim::supply()` rises from 1 to `clearance_supply` from `clearance_start` (1,500 years) over `clearance_time` (1,000 years). It multiplies overbank silt, lake filling and fan growth.
@@ -59,8 +63,8 @@ The channel is a filled outline at the local width. Only points within `CHANNEL_
 
 ### Floodplain
 
-Fields are strips along each holding's long axis. They redraw after a reorganisation, at most every `FIELD_REFRESH`, and write the page only when done. Contours fade them in from `grazing_time` to `vegetation_time`, so they follow the channel onto new bars. Forest growth is contoured into shrub and forest and sizes the tree crowns, a `TREE_STRIP` at a time; a crop mask clears crowns from fields. A finished forest redraw drops any crown redraw under way, which would use stale growth. Farmsteads lie under the crowns and redraw on `building_version`, at least every 50 years. The parish boundary is drawn once, as a dash-dot line over the crowns and under the water.
+Fields are strips along each holding's long axis. They redraw after a reorganisation, at most every `FIELD_REFRESH`, and write the page only when done. Contours fade them in from `grazing_time` to `vegetation_time`, so they follow the channel onto new bars. Forest growth is contoured into shrub and forest and sizes the tree crowns, a `TREE_STRIP` at a time; a crop mask clears crowns from fields. A finished forest redraw drops any crown redraw under way, which would use stale growth. Farmsteads lie under the crowns and redraw on `building_version`, at least every 50 years. Tracks lie under the farmsteads and redraw when they change; a cell that several tracks share is drawn once. The parish boundary is drawn once, as a dash-dot line over the crowns and under the water.
 
 ### Valley walls, streams, jams and mills
 
-The walls are drawn from `wall_foot` and `wall_combes` without the pinches, which only keep bends off the window edges. They redraw after a slump, at most every 50 years, in budgeted stages, and the page and the wall lines the field mask reads change only in the last stage. Tributaries redraw when a course changes. Leats lie under the water, and jams and mills over it. A working weir follows the channel, and its leat redraws each frame to the bank.
+The walls are drawn from `wall_foot` and `wall_combes` without the pinches, which only keep bends off the window edges. They redraw after a slump, at most every 50 years, in budgeted stages, and the page and the wall lines the field mask reads change only in the last stage. Tributaries redraw when a course changes. Leats lie under the water, and fords, jams and mills over it. A working weir follows the channel, and its leat redraws each frame to the bank.

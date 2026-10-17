@@ -202,14 +202,16 @@ pub struct Land {
     pub(crate) open: Vec<bool>,
     /// Cost of crossing each cell per unit length before flood risk, from
     /// the erodibility noise; see `ROUGHNESS`.
-    rough: Vec<f32>,
+    pub(crate) rough: Vec<f32>,
     /// Side of the parish boundary each cell lies on, or empty before it is
     /// set; see [`Land::set_boundary`].
     side: Vec<bool>,
     /// Distance of each cell from the water, in cells, during a survey.
     pub(crate) dist: Vec<f32>,
-    /// Cells under the channel when the current survey began, in order.
+    /// Cells under the channel when the current survey began, in order,
+    /// and whether each cell is one of them.
     channel: Vec<u32>,
+    under: Vec<bool>,
     /// Open cells no holding had when last surveyed or freed since.
     free: Vec<u32>,
     tasks: VecDeque<Task>,
@@ -254,6 +256,7 @@ impl Land {
             side: Vec::new(),
             dist: vec![f32::INFINITY; n],
             channel: Vec::new(),
+            under: vec![false; n],
             free: Vec::new(),
             tasks: VecDeque::new(),
             searching: false,
@@ -271,6 +274,11 @@ impl Land {
         let x = ((p[0] / self.cell).max(0.0) as usize).min(self.cols - 1);
         let y = ((p[1] / self.cell).max(0.0) as usize).min(self.rows - 1);
         y * self.cols + x
+    }
+
+    /// Whether cell `i` lay under the channel when the last survey began.
+    pub(crate) fn in_channel(&self, i: usize) -> bool {
+        self.under[i]
     }
 
     pub(crate) fn centre(&self, i: usize) -> P {
@@ -399,6 +407,9 @@ impl Land {
     /// diagonally at worst, which the searches do not cross.
     fn read_channel(&mut self, line: &[P], widths: &[f64], s: &Settings) {
         let (cols, rows, c) = (self.cols, self.rows, self.cell);
+        for &i in &self.channel {
+            self.under[i as usize] = false;
+        }
         self.channel.clear();
         for (p, &b) in line.iter().zip(widths) {
             let r = 0.5 * b * s.width;
@@ -419,6 +430,9 @@ impl Land {
         }
         self.channel.sort_unstable();
         self.channel.dedup();
+        for &i in &self.channel {
+            self.under[i as usize] = true;
+        }
     }
 
     fn forward(&mut self, field: &Erodibility, s: &Settings, y0: usize, y1: usize) {

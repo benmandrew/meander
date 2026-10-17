@@ -477,6 +477,35 @@ impl River {
             .flat_map(|m| m.leat.iter().flat_map(|p| [p[0] as f32, p[1] as f32]))
             .collect()
     }
+    /// Every track's points from one farmstead to another, back to back, as
+    /// flat x, y pairs, at the centres of the cells it crosses; see
+    /// `track_lengths`.
+    pub fn track_points(&self) -> Vec<f32> {
+        (self.sim.tracks.tracks.iter().flatten())
+            .flat_map(|p| [p[0] as f32, p[1] as f32])
+            .collect()
+    }
+    /// The number of points of each track in `track_points`.
+    pub fn track_lengths(&self) -> Vec<u32> {
+        (self.sim.tracks.tracks.iter())
+            .map(|t| t.len() as u32)
+            .collect()
+    }
+    /// Changes whenever the tracks are laid out again.
+    pub fn track_version(&self) -> f64 {
+        self.sim.tracks.version as f64
+    }
+    /// The fords, four values each: the x and y of the dry ground on one
+    /// bank, then on the other.
+    pub fn fords(&self) -> Vec<f32> {
+        (self.sim.tracks.fords.iter())
+            .flat_map(|[a, b]| [a[0], a[1], b[0], b[1]].map(|v| v as f32))
+            .collect()
+    }
+    /// Changes whenever a ford moves, comes or goes.
+    pub fn ford_version(&self) -> f64 {
+        self.sim.tracks.ford_version as f64
+    }
     /// The parish boundary as flat x, y pairs: the centreline as it ran
     /// when the boundary was set, or empty before then.
     pub fn boundary(&self) -> Vec<f32> {

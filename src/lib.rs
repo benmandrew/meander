@@ -12,6 +12,7 @@ pub mod ips;
 pub mod land;
 pub mod mills;
 pub mod rng;
+pub mod tracks;
 pub mod tributary;
 pub mod walls;
 pub mod wood;
@@ -21,6 +22,7 @@ use geom::{P, curvature, dist, resample, right_normal};
 use land::Land;
 pub use mills::Mill;
 use rng::Rng;
+use tracks::Tracks;
 pub use tributary::Tributary;
 use walls::Walls;
 pub use wood::Jam;
@@ -595,6 +597,8 @@ pub struct Sim {
     pub tributaries: Vec<Tributary>,
     /// Mills, working and ruined.
     pub mills: Vec<Mill>,
+    /// Tracks between the farmsteads, and their fords.
+    pub tracks: Tracks,
     /// The parish boundary: the centreline as it ran at [`BOUNDARY_TIME`],
     /// which stays where it was set as the channel moves on. Empty until
     /// then.
@@ -992,6 +996,7 @@ impl Sim {
             tributaries: Vec::new(),
             mills: Vec::new(),
             boundary: Vec::new(),
+            tracks: Tracks::default(),
             mill_version: 0,
             land_mills: u64::MAX,
             land_streams: u64::MAX,
@@ -1067,6 +1072,7 @@ impl Sim {
         self.jams.clear();
         self.mills.clear();
         self.boundary.clear();
+        self.tracks.clear();
         self.mill_version += 1;
         self.wall_version += 1;
         self.place_tributaries();
@@ -1231,6 +1237,7 @@ impl Sim {
             &s,
             phase,
         );
+        (self.tracks).tick(&self.land, &self.erodibility, self.params.width, phase == 0);
         self.recruit_wood();
         self.found_mill();
         self.rework_oxbows();
@@ -2520,6 +2527,59 @@ mod tests {
         assert!(on.land.buildings.len() > on.land.count());
         assert_eq!(off.centerline, on.centerline);
         assert_eq!(off.land.owner, on.land.owner);
+    }
+
+    #[test]
+    fn tracks_join_the_farmsteads_and_ford_the_river() {
+        let mut sim = Sim::new(Params::default(), [900.0, 480.0], 2, 0.5);
+        for _ in 0..2000 {
+            sim.step();
+        }
+        let (tracks, w) = (&sim.tracks, sim.params.width);
+        assert!(
+            tracks.tracks.len() >= sim.land.count() / 2,
+            "{} tracks",
+            tracks.tracks.len()
+        );
+        // Every track joins one network: union its two ends.
+        let key = |p: P| ((p[0] / w).round() as i64, (p[1] / w).round() as i64);
+        let mut parent = std::collections::BTreeMap::new();
+        fn root(
+            parent: &mut std::collections::BTreeMap<(i64, i64), (i64, i64)>,
+            k: (i64, i64),
+        ) -> (i64, i64) {
+            let up = *parent.entry(k).or_insert(k);
+            if up == k {
+                k
+            } else {
+                let r = root(parent, up);
+                parent.insert(k, r);
+                r
+            }
+        }
+        for t in &tracks.tracks {
+            let (a, b) = (
+                root(&mut parent, key(t[0])),
+                root(&mut parent, key(t[t.len() - 1])),
+            );
+            parent.insert(a, b);
+        }
+        let first = root(&mut parent, key(tracks.tracks[0][0]));
+        for t in &tracks.tracks {
+            assert_eq!(root(&mut parent, key(t[0])), first, "one network");
+        }
+        // The river splits the valley, so the network fords it, from dry
+        // ground straight across.
+        assert!(!tracks.fords.is_empty());
+        for &[a, b] in &tracks.fords {
+            let (i, j) = (sim.land.index(a), sim.land.index(b));
+            assert!(!sim.land.in_channel(i) && !sim.land.in_channel(j));
+            assert!(
+                dist(a, b) < 4.0 * w,
+                "a ford {} widths long",
+                dist(a, b) / w
+            );
+        }
     }
 
     #[test]

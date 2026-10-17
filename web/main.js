@@ -240,6 +240,19 @@ const PLATFORM = [150, 140, 108];
 const MOUND_RIM = 0.3;
 const YARD_RIM = 0.35;
 const BUILDING_REFRESH = 20;
+// Tracks: an earth surface `TRACK_WIDTH` wide on a darker verge
+// `TRACK_VERGE` wide, simplified to within `TRACK_SIMPLIFY` widths and
+// redrawn at most every `TRACK_REFRESH`.
+const TRACK = [206, 186, 138];
+const VERGE = [118, 106, 74];
+const TRACK_WIDTH = 0.3;
+const TRACK_VERGE = 0.5;
+const TRACK_SIMPLIFY = 0.35;
+const TRACK_REFRESH = 20;
+// A ford: a band of broken, shallow water `FORD_WIDTH` wide across the
+// channel, with stepping stones of bar sand along it.
+const FORD_WATER = [150, 188, 196];
+const FORD_WIDTH = 0.7;
 // The parish boundary: a dash-dot line, as on an estate map, simplified to
 // within `BOUNDARY_SIMPLIFY` widths and drawn `BOUNDARY_WIDTH` wide.
 const BOUNDARY = [86, 70, 92];
@@ -1419,6 +1432,12 @@ class SvgRenderer {
     // and marsh, and under the trees, so crowns overhang the buildings:
     // yards, then mounds, the platforms of ruins, and the roofs with their
     // ridges.
+    // Tracks lie over the fields, levees and marsh, and under the
+    // farmsteads they lead to and the trees that overhang them.
+    const tracks = el('g', round, ground);
+    this.verges = el('path', { stroke: `rgb(${VERGE})`, 'stroke-opacity': 0.4 }, tracks);
+    this.tracks = el('path', { stroke: `rgb(${TRACK})`, 'stroke-opacity': 0.85 }, tracks);
+    this.tracksAt = null;
     const farms = el('g', { 'stroke-linejoin': 'round' }, ground);
     this.yards = el('path', { fill: `rgb(${YARD_EARTH})`, 'fill-opacity': 0.55 }, farms);
     this.mounds = el('path', { fill: `rgb(${MOUND})`, 'fill-opacity': 0.5 }, farms);
@@ -1461,6 +1480,9 @@ class SvgRenderer {
     this.depth = [...POOL_COLOURS, SHALLOW, BAR].map((c) => ({ g: el('g', { fill: `rgb(${c})` }, svg), paths: [] }));
     // Over the water: the darker ponds above working weirs, the weirs and
     // the white water below them, the logs of the jams, and the mill houses.
+    this.fordWater = el('path', { fill: 'none', stroke: `rgb(${FORD_WATER})`, 'stroke-opacity': 0.6 }, svg);
+    this.fordStones = el('path', { fill: 'none', stroke: `rgb(${BAR})`, 'stroke-opacity': 0.8, 'stroke-linecap': 'round' }, svg);
+    this.fordsAt = null;
     this.pondLayer = el('g', { ...line, stroke: `rgb(${CLEAR})`, 'stroke-opacity': 0.2, 'stroke-linecap': 'butt' }, svg);
     this.weirLayer = el('g', { fill: 'none' }, svg);
     this.logs = el('path', { ...round, stroke: `rgb(${LOG})`, 'stroke-opacity': 0.9 }, svg);
@@ -1506,6 +1528,8 @@ class SvgRenderer {
     this.coarseAt = null;
     this.millsAt = null;
     this.buildingsAt = null;
+    this.tracksAt = null;
+    this.fordsAt = null;
     this.boundaryAt = null;
     set(this.boundary, 'd', '');
     this.wallsAt = { key: river.wall_version(), t: river.time() };
@@ -1908,6 +1932,7 @@ class SvgRenderer {
     // The floodplain features come as copies, which can grow memory too.
     const [jams, mills, leats] = [river.jams(), river.mills(), river.mill_leats()];
     const [tribs, courses] = [river.tributaries(), river.tributary_courses()];
+    const fords = this.fordsAt === river.ford_version() ? null : river.fords();
 
     river.sync();
     // Views must be rebuilt after every step: memory growth detaches them.
@@ -2039,6 +2064,7 @@ class SvgRenderer {
     this.drawStreams(tribs, courses, w);
     this.drawMills(river, mills, leats, line, widths, w);
     this.drawJams(jams, w);
+    if (fords) this.drawFords(river, fords, w);
   }
 
   // Each tributary runs down its combe to the apex of its fan, then along
@@ -2246,6 +2272,67 @@ class SvgRenderer {
     }
   }
 
+  // The tracks over the window. Tracks share their ends near the
+  // farmsteads, where one search reached the cells of both, so each cell is
+  // drawn once: a track is cut into runs of cells not drawn already, each
+  // run starting from the cell where it leaves a track drawn before, and
+  // each run is simplified and rounded on its own. The runs then meet at
+  // the cell centres they share.
+  drawTracks(river, w) {
+    this.tracksAt = { key: river.track_version(), t: river.time() };
+    const [pts, lengths] = [river.track_points(), river.track_lengths()];
+    const [x0, vw] = this.window;
+    const [lo, hi] = [x0 - 2 * w, x0 + vw + 2 * w];
+    const drawn = new Set();
+    let d = '';
+    const flush = (run) => {
+      if (run.length < 4) return;
+      let inside = false;
+      for (let k = 0; k < run.length && !inside; k += 2) inside = run[k] >= lo && run[k] <= hi;
+      if (inside) d += pointsData(chaikin(chaikin(simplify(run, TRACK_SIMPLIFY * w), false), false));
+    };
+    let start = 0;
+    for (const len of lengths) {
+      let run = [];
+      for (let k = start; k < start + len; k++) {
+        const [x, y] = [pts[2 * k], pts[2 * k + 1]];
+        const key = `${x} ${y}`;
+        if (drawn.has(key)) {
+          if (run.length) {
+            run.push(x, y);
+            flush(run);
+          }
+          run = [x, y];
+          continue;
+        }
+        drawn.add(key);
+        run.push(x, y);
+      }
+      flush(run);
+      start += len;
+    }
+    set(this.tracks, 'd', d);
+    set(this.verges, 'd', d);
+    set(this.tracks, 'stroke-width', dp1(TRACK_WIDTH * w));
+    set(this.verges, 'stroke-width', dp1(TRACK_VERGE * w));
+  }
+
+  // Each ford: a band of shallow water across the channel from bank to
+  // bank, with stepping stones along it.
+  drawFords(river, fords, w) {
+    this.fordsAt = river.ford_version();
+    let d = '';
+    for (let k = 0; k < fords.length; k += 4) {
+      const [ax, ay, bx, by] = fords.subarray(k, k + 4);
+      d += `M${dp1(ax)} ${dp1(ay)}L${dp1(bx)} ${dp1(by)}`;
+    }
+    set(this.fordWater, 'd', d);
+    set(this.fordStones, 'd', d);
+    set(this.fordWater, 'stroke-width', dp1(FORD_WIDTH * w));
+    set(this.fordStones, 'stroke-width', dp1(0.18 * w));
+    set(this.fordStones, 'stroke-dasharray', `${dp1(0.01 * w)} ${dp1(0.3 * w)}`);
+  }
+
   // The parish boundary, once, when the core sets it on the channel's course.
   drawBoundary(river, w) {
     this.boundaryAt = { key: null, t: river.time() };
@@ -2339,6 +2426,11 @@ class SvgRenderer {
         shown: this.buildingsAt?.t,
         due: () => isDue(this.buildingsAt, river.building_version(), t, BUILDING_REFRESH),
         run: () => this.drawBuildings(river, w),
+      },
+      {
+        shown: this.tracksAt?.t,
+        due: () => isDue(this.tracksAt, river.track_version(), t, TRACK_REFRESH, true),
+        run: () => this.drawTracks(river, w),
       },
       {
         shown: this.boundaryAt?.t,

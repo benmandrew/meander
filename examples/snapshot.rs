@@ -217,7 +217,7 @@ fn main() {
                 .fold(0.0f64, f64::max)
         };
         println!(
-            "        supply {:4.2}  jams {:2}  captures {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {} ({} into lakes)",
+            "        supply {:4.2}  jams {:2}  captures {:3}  mills {:2} working of {:2}  scrolls {:3}  wall retreat {:4.2}/{:4.2}  slumps {:3}  tributaries {} ({} into lakes)  tracks {} fords {} (versions {} {})",
             sim.supply(),
             sim.jams.len(),
             sim.captures,
@@ -229,6 +229,10 @@ fn main() {
             sim.wall_version - 1,
             sim.tributaries.len(),
             sim.tributaries.iter().filter(|t| t.lake).count(),
+            sim.tracks.tracks.len(),
+            sim.tracks.fords.len(),
+            sim.tracks.version,
+            sim.tracks.ford_version,
         );
         std::fs::write(
             format!("{out}/step{:06}.svg", sim.steps),
