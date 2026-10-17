@@ -1,9 +1,13 @@
 #!/bin/sh
-# Reject a commit whose staged Rust is unformatted or has clippy warnings.
-# The checks run on a copy of the index, so unstaged edits do not count.
+# Reject a commit whose staged Rust is unformatted or has clippy warnings,
+# or whose staged page fails the browser smoke test. The checks run on a
+# copy of the index, so unstaged edits do not count.
 set -e
 
-git diff --cached --quiet -- '*.rs' '*Cargo.toml' Cargo.lock && exit 0
+rust=1 web=1
+git diff --cached --quiet -- '*.rs' '*Cargo.toml' Cargo.lock && rust=0
+git diff --cached --quiet -- web && web=0
+[ $rust = 0 ] && [ $web = 0 ] && exit 0
 
 root=$(git rev-parse --show-toplevel)
 # A fixed path, so cargo's artefacts for it carry over between commits.
@@ -13,5 +17,9 @@ git checkout-index --all --prefix="$tree/"
 
 cd "$tree"
 export CARGO_TARGET_DIR="$root/target"
-cargo fmt --all --check
-cargo clippy --workspace --all-targets --quiet -- -D warnings
+if [ $rust = 1 ]; then
+  cargo fmt --all --check
+  cargo clippy --workspace --all-targets --quiet -- -D warnings
+fi
+make --quiet build >/dev/null 2>&1 || make build
+python3 test/smoke.py

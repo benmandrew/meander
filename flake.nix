@@ -112,7 +112,8 @@
             pkgs.wasm-pack
             pkgs.binaryen
             pkgs.gnumake
-            pkgs.python3
+            # Playwright drives the installed Chrome for `make smoke`.
+            (pkgs.python3.withPackages (ps: [ ps.playwright ]))
           ];
           shellHook = ''
             git config core.hooksPath .githooks
