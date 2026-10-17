@@ -477,6 +477,17 @@ impl River {
             .flat_map(|m| m.leat.iter().flat_map(|p| [p[0] as f32, p[1] as f32]))
             .collect()
     }
+    /// The parish boundary as flat x, y pairs: the centreline as it ran
+    /// when the boundary was set, or empty before then.
+    pub fn boundary(&self) -> Vec<f32> {
+        (self.sim.boundary.iter())
+            .flat_map(|p| [p[0] as f32, p[1] as f32])
+            .collect()
+    }
+    /// Whether the parish boundary has been set.
+    pub fn has_boundary(&self) -> bool {
+        !self.sim.boundary.is_empty()
+    }
     /// Changes whenever a mill is founded or falls into ruin.
     pub fn mill_version(&self) -> f64 {
         self.sim.mill_version as f64

@@ -88,6 +88,13 @@ const ABSORB: f64 = 0.3;
 /// Least distance between the first farmsteads, as a multiple of the side
 /// of a square holding of `holding_area`.
 const FOUNDING_GAP: f64 = 0.8;
+/// Extra cost of crossing the parish boundary, in channel widths: half the
+/// side of a square holding of the default `holding_area`. Holdings
+/// keep to their own parish where one on the other side can reach the
+/// ground, so field boundaries settle on the parish boundary. Ground the
+/// river has moved to the far side of it, out of reach of its own
+/// parish's holdings, is still taken from across it.
+const BOUNDARY_COST: f32 = 8.0;
 /// Cosine of the angle through which a holding's long axis must turn
 /// before its fields are laid out again.
 const AXIS_KEEP: f64 = 0.9;
@@ -196,6 +203,9 @@ pub struct Land {
     /// Cost of crossing each cell per unit length before flood risk, from
     /// the erodibility noise; see `ROUGHNESS`.
     rough: Vec<f32>,
+    /// Side of the parish boundary each cell lies on, or empty before it is
+    /// set; see [`Land::set_boundary`].
+    side: Vec<bool>,
     /// Distance of each cell from the water, in cells, during a survey.
     pub(crate) dist: Vec<f32>,
     /// Cells under the channel when the current survey began, in order.
@@ -241,6 +251,7 @@ impl Land {
                 .iter()
                 .map(|&v| (1.0 + ROUGHNESS * (2.0 * v - 1.0)).max(0.2))
                 .collect(),
+            side: Vec::new(),
             dist: vec![f32::INFINITY; n],
             channel: Vec::new(),
             free: Vec::new(),
@@ -272,6 +283,43 @@ impl Land {
     /// Number of live holdings.
     pub fn count(&self) -> usize {
         self.holdings.iter().flatten().count()
+    }
+
+    /// Set the parish boundary on `line`, which runs from the domain's
+    /// upstream edge to its downstream edge, `width` wide; its ends are
+    /// carried on straight to the edges. A cell's side is the parity of the
+    /// boundary's crossings of its column above it.
+    pub fn set_boundary(&mut self, line: &[P], width: f64) {
+        let (cols, c) = (self.cols, self.cell);
+        let (Some(&first), Some(&last)) = (line.first(), line.last()) else {
+            return;
+        };
+        let ends = [[-1.0, first[1]], first];
+        let tail = [last, [width + 1.0, last[1]]];
+        let segments = line.windows(2).chain([&ends[..], &tail[..]]);
+        let mut cross = vec![Vec::new(); cols];
+        for seg in segments {
+            let (a, b) = (seg[0], seg[1]);
+            let lo = ((a[0].min(b[0]) / c - 0.5).ceil().max(0.0)) as usize;
+            let hi = ((a[0].max(b[0]) / c - 0.5).ceil().max(0.0) as usize).min(cols);
+            for (x, ys) in cross.iter_mut().enumerate().take(hi).skip(lo) {
+                let cx = (x as f64 + 0.5) * c;
+                let t = (cx - a[0]) / (b[0] - a[0]);
+                ys.push(a[1] + t * (b[1] - a[1]));
+            }
+        }
+        self.side = vec![false; cols * self.rows];
+        for (x, ys) in cross.iter_mut().enumerate() {
+            ys.sort_by(f64::total_cmp);
+            let mut k = 0;
+            for y in 0..self.rows {
+                let cy = (y as f64 + 0.5) * c;
+                while k < ys.len() && ys[k] < cy {
+                    k += 1;
+                }
+                self.side[y * cols + x] = k % 2 == 1;
+            }
+        }
     }
 
     /// Run a whole survey and all the work it leads to at once, founding
@@ -612,7 +660,11 @@ impl Land {
         let mut n = 0;
         let mut add = |ok: bool, j: usize, len: f32| {
             if ok {
-                out[n] = (j, len * (self.rough[j] + RISK_COST * self.risk[j]));
+                let parish = match self.side.get(j) {
+                    Some(&side) if side != self.side[i] => BOUNDARY_COST,
+                    _ => 0.0,
+                };
+                out[n] = (j, len * (self.rough[j] + RISK_COST * self.risk[j]) + parish);
                 n += 1;
             }
         };
@@ -1032,6 +1084,45 @@ mod tests {
 
     fn seat_y(land: &Land, o: u32) -> f64 {
         land.holdings[o as usize].as_ref().unwrap().seat[1]
+    }
+
+    #[test]
+    fn holdings_keep_to_their_side_of_the_parish_boundary() {
+        let (field, line, widths, walls) = valley(30.0);
+        // An old course that weaves across the channel, so holdings stand
+        // on both sides of it on each bank.
+        let curve = |x: f64| 30.0 + 20.0 * (x * std::f64::consts::TAU / 80.0).sin();
+        let parish: Vec<P> = (0..=240)
+            .map(|k| [k as f64 * 0.5, curve(k as f64 * 0.5)])
+            .collect();
+        let straddling = |bounded: bool| {
+            let mut land = Land::new(&field, 1);
+            if bounded {
+                land.set_boundary(&parish, 120.0);
+                for i in 0..land.owner.len() {
+                    let [x, y] = land.centre(i);
+                    if (y - curve(x)).abs() > 1.0 {
+                        assert_eq!(land.side[i], y > curve(x), "cell at ({x}, {y})");
+                    }
+                }
+            }
+            land.update(&field, &line, &widths, &walls, &settings(0.0));
+            // Cells held across the boundary from their holding's farmstead.
+            let mut across = 0;
+            for (i, &o) in land.owner.iter().enumerate() {
+                let [x, y] = land.centre(i);
+                if o != NONE && (y - curve(x)).abs() > 1.0 {
+                    let seat = land.holdings[o as usize].as_ref().unwrap().seat;
+                    across += usize::from((y > curve(x)) != (seat[1] > curve(seat[0])));
+                }
+            }
+            across
+        };
+        let (free, bounded) = (straddling(false), straddling(true));
+        assert!(
+            2 * bounded < free,
+            "{bounded} cells held across the boundary, against {free} without it"
+        );
     }
 
     #[test]

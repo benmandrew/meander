@@ -24,7 +24,7 @@ A cutoff stamps an *oxbow* lake. It fills over `oxbow_lifetime` to a clay plug, 
 
 ### Landholdings (`land.rs`)
 
-Holdings are the *geodesic Voronoi cells* of farmsteads, with the channel and oxbows as barriers and flood risk as the cost of crossing a cell. Risk falls with distance from water, and on high deposit by up to `RIDGE_RELIEF`. Holdings take up ground once grassed for `grazing_time` (50 years). One at a time, every `reorganise_time` (150 years) on average, a holding moves a threatened seat, is absorbed below 0.3 `holding_area`, takes cheaper cells, or divides above twice `holding_area`. Holdings change the river only through their mills.
+Holdings are the *geodesic Voronoi cells* of farmsteads, with the channel and oxbows as barriers and flood risk as the cost of crossing a cell. Risk falls with distance from water, and on high deposit by up to `RIDGE_RELIEF`. Holdings take up ground once grassed for `grazing_time` (50 years). One at a time, every `reorganise_time` (150 years) on average, a holding moves a threatened seat, is absorbed below 0.3 `holding_area`, takes cheaper cells, or divides above twice `holding_area`. At `BOUNDARY_TIME` (1,000 years) the centreline is kept as a *parish boundary*, which stays put as the channel moves on. Crossing it costs a holding `BOUNDARY_COST` (8 widths) more, so fields settle on it wherever a holding on its far side can reach the ground. Holdings change the river only through their mills.
 
 ### Farmsteads (`farm.rs`)
 
@@ -59,7 +59,7 @@ The channel is a filled outline at the local width. Only points within `CHANNEL_
 
 ### Floodplain
 
-Fields are strips along each holding's long axis. They redraw after a reorganisation, at most every `FIELD_REFRESH`, and write the page only when done. Contours fade them in from `grazing_time` to `vegetation_time`, so they follow the channel onto new bars. Forest growth is contoured into shrub and forest and sizes the tree crowns, a `TREE_STRIP` at a time; a crop mask clears crowns from fields. A finished forest redraw drops any crown redraw under way, which would use stale growth. Farmsteads lie under the crowns and redraw on `building_version`, at least every 50 years.
+Fields are strips along each holding's long axis. They redraw after a reorganisation, at most every `FIELD_REFRESH`, and write the page only when done. Contours fade them in from `grazing_time` to `vegetation_time`, so they follow the channel onto new bars. Forest growth is contoured into shrub and forest and sizes the tree crowns, a `TREE_STRIP` at a time; a crop mask clears crowns from fields. A finished forest redraw drops any crown redraw under way, which would use stale growth. Farmsteads lie under the crowns and redraw on `building_version`, at least every 50 years. The parish boundary is drawn once, as a dash-dot line over the crowns and under the water.
 
 ### Valley walls, streams, jams and mills
 

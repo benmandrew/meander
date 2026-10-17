@@ -3,7 +3,7 @@
 Six changes, in this order, one commit each. Measure each against seeds 1–12 at 24,000 steps (`UP=60 DOWN=20`), with `make test` after any change to the dynamics.
 
 - [x] Rebalance the mills. Over seeds 1–12, mills lowered mean sinuosity after step 6,000 from 1.555 to 1.439, the largest effect of any process. Half came from the backwater: with `weir_backwater` at 0 it was 1.480. `weir_backwater` is now 0.25, and a weir is outflanked at a turn of 45° (`OUTFLANK_COS`), not 60°, which also removes the corner the weir drew. Sinuosity with mills is now 1.498, with 1.9 mills working on average against 2.3. Step time is unchanged.
-- [ ] An old boundary on a past course. The centreline at `BOUNDARY_TIME` is kept as a parish boundary, drawn as a dash-dot line, and holdings do not cross it.
+- [x] An old boundary on a past course. The centreline at `BOUNDARY_TIME` (1,000 years) is kept as a parish boundary and drawn as a dash-dot line. A hard barrier would leave bars that form beyond it unfarmed, since the river cuts them off from their own parish's holdings, so crossing it costs `BOUNDARY_COST` (8 widths) instead. On a test valley this cut the cells held across a boundary from their farmstead from 2,606 to 976.
 - [ ] Tracks between farmsteads, with temporary fords where they cross the channel. No bridges: the channel moves too far.
 - [ ] Chute cutoffs, as a steady process across point bars.
 - [ ] Wet ground: low ground away from the channel drawn as wet meadow and reed.

@@ -240,6 +240,12 @@ const PLATFORM = [150, 140, 108];
 const MOUND_RIM = 0.3;
 const YARD_RIM = 0.35;
 const BUILDING_REFRESH = 20;
+// The parish boundary: a dash-dot line, as on an estate map, simplified to
+// within `BOUNDARY_SIMPLIFY` widths and drawn `BOUNDARY_WIDTH` wide.
+const BOUNDARY = [86, 70, 92];
+const BOUNDARY_WIDTH = 0.16;
+const BOUNDARY_DASH = [1.4, 0.45, 0.2, 0.45];
+const BOUNDARY_SIMPLIFY = 0.15;
 // The channel's edge: a thin line of bank on both sides, `BANK_EDGE` times
 // the local width from the centreline, and the wet sand of the point bar
 // on the inside of a bend, up to `BAR_RIM` widths more at a bend of radius
@@ -1431,6 +1437,10 @@ class SvgRenderer {
       el('g', { fill: `rgb(${TREE_LIGHT})`, 'fill-opacity': 0.4 }, this.treeLayer),
     ];
     this.treeStrips = [];
+    // The parish boundary lies over the trees, as a map draws it, and under
+    // the water, which hides it where the channel still runs on it.
+    this.boundary = el('path', { ...round, stroke: `rgb(${BOUNDARY})`, 'stroke-opacity': 0.75 }, ground);
+    this.boundaryAt = null;
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
     // Both are filled outlines at the local width, which a stroke cannot vary.
@@ -1496,6 +1506,8 @@ class SvgRenderer {
     this.coarseAt = null;
     this.millsAt = null;
     this.buildingsAt = null;
+    this.boundaryAt = null;
+    set(this.boundary, 'd', '');
     this.wallsAt = { key: river.wall_version(), t: river.time() };
     this.wallJob = null;
     this.drawPebbles(river.get_param('width'), seed);
@@ -2234,6 +2246,15 @@ class SvgRenderer {
     }
   }
 
+  // The parish boundary, once, when the core sets it on the channel's course.
+  drawBoundary(river, w) {
+    this.boundaryAt = { key: null, t: river.time() };
+    const pts = chaikin(simplify(Array.from(river.boundary()), BOUNDARY_SIMPLIFY * w), false);
+    set(this.boundary, 'd', pointsData(pts));
+    set(this.boundary, 'stroke-width', dp1(BOUNDARY_WIDTH * w));
+    set(this.boundary, 'stroke-dasharray', BOUNDARY_DASH.map((v) => dp1(v * w)).join(' '));
+  }
+
   // A pebble pattern for the coarse ground, scaled to the channel width.
   drawPebbles(w, seed) {
     const rand = random(seed ^ 0x9eb1);
@@ -2318,6 +2339,11 @@ class SvgRenderer {
         shown: this.buildingsAt?.t,
         due: () => isDue(this.buildingsAt, river.building_version(), t, BUILDING_REFRESH),
         run: () => this.drawBuildings(river, w),
+      },
+      {
+        shown: this.boundaryAt?.t,
+        due: () => !this.boundaryAt && river.has_boundary(),
+        run: () => this.drawBoundary(river, w),
       },
       {
         shown: this.wallsAt?.t,

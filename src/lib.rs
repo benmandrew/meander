@@ -595,6 +595,10 @@ pub struct Sim {
     pub tributaries: Vec<Tributary>,
     /// Mills, working and ruined.
     pub mills: Vec<Mill>,
+    /// The parish boundary: the centreline as it ran at [`BOUNDARY_TIME`],
+    /// which stays where it was set as the channel moves on. Empty until
+    /// then.
+    pub boundary: Vec<P>,
     /// Counts changes to `mills`.
     pub mill_version: u64,
     /// The `mill_version` the holdings last read the working mills at.
@@ -900,6 +904,11 @@ const LEAT_OFFSET: f64 = 1.5;
 /// Time an abandoned mill stands as a ruin before it is dropped.
 pub const MILL_RUIN: f64 = 200.0;
 
+/// Time the parish boundary is set on the channel's course: 1,000 years,
+/// as English parish boundaries were fixed in the tenth to twelfth
+/// centuries and kept where the rivers they followed then ran.
+pub const BOUNDARY_TIME: f64 = 400.0;
+
 /// Oxbow pieces with fewer points than this are dropped.
 const MIN_OXBOW_POINTS: usize = 3;
 
@@ -982,6 +991,7 @@ impl Sim {
             jams: Vec::new(),
             tributaries: Vec::new(),
             mills: Vec::new(),
+            boundary: Vec::new(),
             mill_version: 0,
             land_mills: u64::MAX,
             land_streams: u64::MAX,
@@ -1056,6 +1066,7 @@ impl Sim {
         self.captures = 0;
         self.jams.clear();
         self.mills.clear();
+        self.boundary.clear();
         self.mill_version += 1;
         self.wall_version += 1;
         self.place_tributaries();
@@ -1191,6 +1202,10 @@ impl Sim {
             self.fill_lakes(DEPOSIT_EVERY as f64 * self.params.dt);
         }
         self.feed_tributaries();
+        if self.boundary.is_empty() && self.time >= BOUNDARY_TIME {
+            self.boundary = self.centerline.clone();
+            self.land.set_boundary(&self.boundary, self.bounds[0]);
+        }
         let phase = self.steps % land::SURVEY_STEPS;
         if phase == 0 {
             self.read_valley();
