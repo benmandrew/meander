@@ -420,15 +420,31 @@ const RIFFLE_CROSSING = 0.5;
 const RIFFLE_RADIUS = 8;
 const RIFFLE_RAMP = 0.25;
 const SHALLOW = [96, 154, 182];
+// The inner bank of a bend shoals onto its point bar, in the riffles'
+// shallow water reaching `SHOAL` of the width out from the bank at a bend
+// of radius `BAR_RADIUS` widths or tighter. With the riffles, the shallow
+// water crosses from the inner bank of each bend to the inner bank of the
+// next.
+const SHOAL = 0.25;
+// Pools and shoals are drawn `THIN_BAND` widths narrower, so they end where
+// they would be too thin to see and are not drawn along the reaches
+// between bends.
+const THIN_BAND = 0.03;
 // Where the channel is wider than `MID_BAR_FROM` widths, a sand bar splits
-// the flow, growing to `MID_BAR` of the width across at `MID_BAR_FULL`.
+// the flow, growing to `MID_BAR` of the width across at `MID_BAR_FULL`. Its
+// head is blunt, and its tail narrows downstream by a width across for
+// every `MID_BAR_TAIL` widths along. In a bend of radius `BAR_RADIUS`
+// widths or tighter it lies `MID_BAR_SHIFT` of the width towards the inner
+// bank, clear of the pool. It rises from shallow water reaching
+// `MID_BAR_HALO` times its half-width from its middle, through wet sand
+// `MID_BAR_RIM` widths wide, to dry sand.
 const MID_BAR_FROM = 1.5;
 const MID_BAR_FULL = 1.8;
 const MID_BAR = 0.4;
-// Riffles and mid-channel bars follow the smoothed bends and widths, which
-// change slowly, so each redraws once every `DEPTH_EVERY` draws, the two in
-// different draws.
-const DEPTH_EVERY = 3;
+const MID_BAR_TAIL = 3;
+const MID_BAR_SHIFT = 0.15;
+const MID_BAR_HALO = 1.6;
+const MID_BAR_RIM = 0.08;
 // Fresh point-bar sand, and the grassed-over colour old bars fade towards.
 const BAR = [233, 222, 186];
 const OLD_BAR = [200, 202, 156];
@@ -781,29 +797,37 @@ function bandRuns(pts, frame, a, b, [from, to]) {
   return runs;
 }
 
-// Pools, riffles and mid-channel bars, as lists of path data: one list per
-// pool level, then riffles, then bars, or null for riffles or bars not
-// asked for. `bend` is the smoothed signed curvature, `widths` the local
-// width in world units, `w` the reference width. Only the points `shown`
-// are drawn, though the bends and widths are read along the whole river.
-function channelDepth(pts, widths, frame, bend, w, shown, riffles, bars) {
+// Pools, shoals, riffles and mid-channel bars, as lists of path data: one
+// list per pool level, the shoals, the riffles, then the bars' shallows,
+// wet sand and dry sand. All are redrawn with the banks, since any that
+// redrew less often visibly lagged them. `bend` is the smoothed signed
+// curvature, `widths` the local width in world units, `w` the reference
+// width. Only the points `shown` are drawn, though the bends and widths are
+// read along the whole river.
+function channelDepth(pts, widths, frame, bend, w, shown) {
   const n = bend.length;
   const lag = Math.round(POOL_LAG / SPACING);
-  const pools = POOL_LEVELS.map((level) => {
-    const a = new Float64Array(n), b = new Float64Array(n);
-    for (let i = 0; i < n; i++) {
-      // The bank on the outside of the bend upstream, and the pool's
-      // reach in from it.
-      const k = bend[Math.max(0, i - lag)], half = 0.5 * widths[i];
-      const out = k > 0 ? -1 : 1;
-      const reach = level * widths[i] * smoothstep(Math.abs(k) * w * BAR_RADIUS);
-      a[i] = out * half;
-      b[i] = out * Math.max(0, half - reach);
+  // A band in from the bank on side `side(i)` of the left normal, `reach(i)`
+  // less `THIN_BAND` widths wide, over the points `bandRuns` reads.
+  const [from, to] = [Math.max(0, shown[0] - 1), Math.min(n, shown[1] + 1)];
+  const fromBank = (side, reach) => {
+    const a = scratch('bankA', n), b = scratch('bankB', n);
+    for (let i = from; i < to; i++) {
+      const half = 0.5 * widths[i], s = side(i);
+      a[i] = s * half;
+      b[i] = s * Math.max(0, half - Math.max(0, reach(i) - THIN_BAND * w));
     }
     return bandRuns(pts, frame, a, b, shown);
-  });
-  return [...pools, riffles ? riffleRuns(pts, widths, frame, bend, w, shown) : null,
-    bars ? midBarRuns(pts, widths, frame, w, shown) : null];
+  };
+  const tight = (k) => smoothstep(Math.abs(k) * w * BAR_RADIUS);
+  // Pools against the bank on the outside of the bend upstream.
+  const pools = POOL_LEVELS.map((level) => fromBank(
+    (i) => (bend[Math.max(0, i - lag)] > 0 ? -1 : 1),
+    (i) => level * widths[i] * tight(bend[Math.max(0, i - lag)])));
+  const shoals = fromBank(
+    (i) => (bend[i] > 0 ? 1 : -1),
+    (i) => SHOAL * widths[i] * tight(bend[i]));
+  return [...pools, shoals, riffleRuns(pts, widths, frame, bend, w, shown), ...midBarRuns(pts, widths, frame, bend, w, shown)];
 }
 
 // Riffles over the points `shown`, as `channelDepth` draws them.
@@ -811,13 +835,20 @@ function riffleRuns(pts, widths, frame, bend, w, shown) {
   const n = bend.length;
   // Strength of the riffle at each point: the weaker of the strongest
   // bends of opposite sign upstream and downstream, ramped about
-  // `RIFFLE_RADIUS`, where the curvature here is small beside it.
+  // `RIFFLE_RADIUS`, where the curvature here is small beside it. Only
+  // over the points the smoothing below carries into the points `shown`.
   const look = Math.round(RIFFLE_LOOK / SPACING), tight = 1 / (RIFFLE_RADIUS * w);
-  const strength = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    let [upL, upR, downL, downR] = [0, 0, 0, 0];
-    for (let j = Math.max(0, i - look); j <= i; j++) [upL, upR] = [Math.max(upL, bend[j]), Math.max(upR, -bend[j])];
-    for (let j = i; j < Math.min(n, i + look + 1); j++) [downL, downR] = [Math.max(downL, bend[j]), Math.max(downR, -bend[j])];
+  const strength = scratch('strength', n).fill(0);
+  for (let i = Math.max(0, shown[0] - 6); i < Math.min(n, shown[1] + 6); i++) {
+    let upL = 0, upR = 0, downL = 0, downR = 0;
+    for (let j = Math.max(0, i - look); j <= i; j++) {
+      if (bend[j] > upL) upL = bend[j];
+      else if (-bend[j] > upR) upR = -bend[j];
+    }
+    for (let j = i; j < Math.min(n, i + look + 1); j++) {
+      if (bend[j] > downL) downL = bend[j];
+      else if (-bend[j] > downR) downR = -bend[j];
+    }
     const bends = Math.max(Math.min(upL, downR), Math.min(upR, downL));
     if (bends <= 0) continue;
     const grow = smoothstep((bends / tight - 1 + RIFFLE_RAMP) / (2 * RIFFLE_RAMP));
@@ -825,25 +856,52 @@ function riffleRuns(pts, widths, frame, bend, w, shown) {
   }
   // Smoothed along the river, so each riffle tapers to round ends.
   const riffle = smoothed(strength, 'riffle');
-  const ra = new Float64Array(n), rb = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    const h = 0.5 * RIFFLE_WIDTH * widths[i] * riffle[i];
-    [ra[i], rb[i]] = [h, -h];
+  const ra = scratch('riffleA', n), rb = scratch('riffleB', n);
+  for (let i = Math.max(0, shown[0] - 1); i < Math.min(n, shown[1] + 1); i++) {
+    ra[i] = 0.5 * RIFFLE_WIDTH * widths[i] * riffle[i];
+    rb[i] = -ra[i];
   }
   return bandRuns(pts, frame, ra, rb, shown);
 }
 
 // Mid-channel bars over the points `shown`, on the width smoothed so they
-// grow and shrink slowly.
-function midBarRuns(pts, widths, frame, w, shown) {
+// grow and shrink slowly: their shallows, wet sand and dry sand.
+function midBarRuns(pts, widths, frame, bend, w, shown) {
   const n = widths.length;
   const wide = smoothed(widths, 'wide');
-  const ba = new Float64Array(n), bb = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
+  // The points that reach the points `shown`: a tail of up to 5 points,
+  // the smoothing's 4 and the 1 `bandRuns` reads beyond them.
+  const [lo, hi] = [Math.max(0, shown[0] - 10), Math.min(n, shown[1] + 5)];
+  if (!wide.subarray(lo, hi).some((x) => x > MID_BAR_FROM * w)) return [[], [], []];
+  // Half-width of the bar, its tail narrowing downstream from its widest.
+  const drop = SPACING * w / (2 * MID_BAR_TAIL), grown = scratch('barHalf', n).fill(0, 0, lo);
+  for (let i = lo; i < hi; i++) {
     const h = 0.5 * MID_BAR * wide[i] * smoothstep((wide[i] / w - MID_BAR_FROM) / (MID_BAR_FULL - MID_BAR_FROM));
-    [ba[i], bb[i]] = [h, -h];
+    grown[i] = Math.max(h, i > 0 ? grown[i - 1] - drop : 0);
   }
-  return bandRuns(pts, frame, ba, bb, shown);
+  const half = smoothed(grown, 'barSmooth');
+  // Middle of the bar, towards the inner bank of a bend and inside the
+  // channel.
+  const mid = scratch('barMid', n);
+  for (let i = lo; i < hi; i++) {
+    const room = Math.max(0, 0.45 * widths[i] - half[i]);
+    const shift = Math.sign(bend[i]) * MID_BAR_SHIFT * widths[i] * smoothstep(Math.abs(bend[i]) * w * BAR_RADIUS);
+    mid[i] = Math.max(-room, Math.min(room, shift));
+  }
+  const reaches = [
+    (i) => Math.min(MID_BAR_HALO * half[i], 0.5 * widths[i] - Math.abs(mid[i])),
+    (i) => half[i],
+    (i) => Math.max(0, half[i] - MID_BAR_RIM * w),
+  ];
+  return reaches.map((reach) => {
+    const a = scratch('barA', n), b = scratch('barB', n);
+    for (let i = lo; i < hi; i++) {
+      const r = reach(i);
+      a[i] = mid[i] + r;
+      b[i] = mid[i] - r;
+    }
+    return bandRuns(pts, frame, a, b, shown);
+  });
 }
 
 // Path data for points [start, end) of a flat x, y array.
@@ -1919,8 +1977,8 @@ class SvgRenderer {
     this.weedLayer = el('g', { fill: `rgb(${WEED})`, 'fill-opacity': WEED_OPACITY }, svg);
     this.lilyLayer = el('g', { fill: `rgb(${LILY})` }, svg);
     this.water = el('g', { fill: `rgb(${WATER})` }, svg);
-    // Pools, riffles and mid-channel bars, over the channel's water.
-    this.depth = [...POOL_COLOURS, SHALLOW, BAR].map((c) => ({ g: el('g', { fill: `rgb(${c})` }, svg), paths: [] }));
+    // Pools, shoals, riffles and mid-channel bars, over the channel's water.
+    this.depth = [...POOL_COLOURS, SHALLOW, SHALLOW, SHALLOW, WET_SAND, BAR].map((c) => ({ g: el('g', { fill: `rgb(${c})` }, svg), paths: [] }));
     // Over the water: the darker ponds above working weirs, the weirs and
     // the white water below them, the logs of the jams, and the mill houses.
     this.fordWater = el('path', { fill: 'none', stroke: `rgb(${FORD_WATER})`, 'stroke-opacity': 0.6 }, svg);
@@ -1998,7 +2056,6 @@ class SvgRenderer {
     // The first draw after a reset draws the floodplain and the channel
     // whole.
     this.fresh = true;
-    this.draws = 0;
     this.scrollAt = null;
     this.fieldsAt = null;
     this.fieldJob = null;
@@ -2749,12 +2806,7 @@ class SvgRenderer {
     resize(this.waterRuns, waterRuns.length, this.water);
     bankRuns.forEach((d, k) => set(this.bankRuns[k], 'd', d));
     waterRuns.forEach((d, k) => set(this.waterRuns[k], 'd', d));
-    // Both riffles and bars on the first draw after a reset, and on a
-    // paused river, which draws once as it stands.
-    const due = this.draws++ % DEPTH_EVERY, whole = this.draws === 1 || at === Infinity;
-    const depth = channelDepth(line, widths, frame, bend, w, shown, whole || due === 0, whole || due === 1);
-    depth.forEach((runs, m) => {
-      if (!runs) return;
+    channelDepth(line, widths, frame, bend, w, shown).forEach((runs, m) => {
       const { g, paths } = this.depth[m];
       resize(paths, runs.length, g);
       runs.forEach((d, k) => set(paths[k], 'd', d));
