@@ -33,6 +33,12 @@ const YEARS_PER_UNIT = 2.5;
 // the set speed instead of drawing the floodplain centuries late.
 const MAX_LAG = 10;
 
+// The river steps for at most `STEP_BUDGET` ms a frame, and simulated time
+// the budget cannot cover is dropped, so a machine too slow for the set
+// speed runs the river slower in even frames. Without it each long frame
+// owes more steps to the next.
+const STEP_BUDGET = 8;
+
 // The panel shows the JS time of the last `FRAME_WINDOW` frames, about 10 s,
 // refreshed every `STATS_EVERY` ms.
 const FRAME_WINDOW = 600;
@@ -44,7 +50,8 @@ const STATS_EVERY = 250;
 // nothing, to carry on with drawing work spread over frames, and returns
 // whether it did any, and
 // settle(river, memory, state), which finishes that work at once when the
-// river stops, and behind(river), the simulated time that work has waited.
+// river stops, before a last draw, and behind(river), the simulated time
+// that work has waited.
 // `display` holds the renderer's own settings.
 export async function startApp({ view, renderer, display }) {
   // The overlay reads "Loading…" from the page itself until the warm-up
@@ -188,17 +195,20 @@ export async function startApp({ view, renderer, display }) {
     // A held frame is not owed later, so the river does not lurch on.
     if (running && renderer.behind(river) <= MAX_LAG) {
       owed += local.speed * elapsed;
-      const n = Math.floor(owed / dt);
-      if (n > 0) {
-        owed -= dt * river.advance(n * dt);
+      const t0 = performance.now();
+      while (owed >= dt && performance.now() - t0 < STEP_BUDGET) {
+        owed -= dt * river.advance(dt);
         dirty = true;
       }
+      owed = Math.min(owed, dt);
     }
     // One long frame while the river stands still does not show as stutter,
     // and the last changes then land together instead of over a second.
+    // The draw that follows brings the rest of the view up to date.
     if (settle) {
       settle = false;
       renderer.settle(river, wasm.memory, state);
+      dirty = true;
     }
     // Draw only when something has changed, so a paused or slow river costs
     // nothing between steps beyond the channel and drawing work spread over

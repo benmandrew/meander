@@ -440,6 +440,10 @@ const CURVE_TURN = 0.05;
 // a thousand units of simulated time, so its outline is rebuilt every few
 // units, not every step, and moves less than a pixel at each rebuild.
 const LAKE_STEP = 1e-3;
+// Milliseconds a draw for lake rebuilds. At high speeds every lake's fill
+// passes a `LAKE_STEP` between draws; lakes beyond the budget wait for a
+// later draw.
+const LAKE_BUDGET = 2;
 
 // Whether a layer last drawn at `last`, a `{ key, t }`, is due again: once
 // `key` has changed or `every` of simulated time has passed, or with
@@ -1805,6 +1809,10 @@ class SvgRenderer {
     this.bankRuns = [];
     this.waterRuns = [];
     this.lakes = [];
+    // The lake the next draw rebuilds first, the first left waiting by the
+    // last, and whether the next draw rebuilds every lake.
+    this.nextLake = 0;
+    this.settling = false;
     this.scars = [];
     this.bands = [];
     // Centrelines kept since the last forest redraw, each with its time,
@@ -2365,7 +2373,14 @@ class SvgRenderer {
     }
     const most = river.get_param('clearance_supply');
     const plumes = PLUME_OPACITY * (PLUME_BASE + (1 - PLUME_BASE) * clamp01((river.supply() - 1) / (most - 1 || 1)));
-    for (let k = 0; k < n; k++) {
+    // Lakes rebuild in turn within `LAKE_BUDGET`, except one the channel
+    // has reshaped, which rebuilds at once.
+    const [lakesFrom, budget] = [performance.now(), this.settling ? Infinity : LAKE_BUDGET];
+    const first = n ? this.nextLake % n : 0;
+    let waiting = -1;
+    this.settling = false;
+    for (let q = 0; q < n; q++) {
+      const k = (first + q) % n;
       const age = oxFill[k];
       const scar = this.scars[k], lake = this.lakes[k];
       // The channel splits an oxbow into pieces of its original polyline,
@@ -2416,48 +2431,53 @@ class SvgRenderer {
       const [from, to] = [plug - oxAlong[k], oxLen[k] - plug - oxAlong[k]];
       const end = REED_END * (outer - open) * 0.5 * wm;
       const [wFrom, wTo] = [from > 0 ? from + end : from, to < len ? to - end : to];
-      // The head of a delta on this piece, by the arc length of the nearest
-      // point within a width of the old channel of its centreline.
-      let mouth = null;
-      for (const [mx, my] of mouths) {
-        let [best, at] = [wm * wm, -1];
-        for (let i = i0; i < i1; i++) {
-          const d2 = (oxPts[2 * i] - mx) ** 2 + (oxPts[2 * i + 1] - my) ** 2;
-          if (d2 < best) [best, at] = [d2, i];
+      const reshaped = !lake.inputs?.startsWith(`${shape} `);
+      if (!reshaped && performance.now() - lakesFrom > budget) {
+        if (waiting < 0) waiting = k;
+      } else {
+        // The head of a delta on this piece, by the arc length of the nearest
+        // point within a width of the old channel of its centreline.
+        let mouth = null;
+        for (const [mx, my] of mouths) {
+          let [best, at] = [wm * wm, -1];
+          for (let i = i0; i < i1; i++) {
+            const d2 = (oxPts[2 * i] - mx) ** 2 + (oxPts[2 * i + 1] - my) ** 2;
+            if (d2 < best) [best, at] = [d2, i];
+          }
+          if (at >= 0) mouth = { x: mx, y: my, at: pieceLength(oxPts, i0, at + 1) };
         }
-        if (at >= 0) mouth = { x: mx, y: my, at: pieceLength(oxPts, i0, at + 1) };
-      }
-      // The silt and the channel change without reshaping the oxbow.
-      let silt = 0;
-      for (let i = i0; i < i1; i++) silt += oxSilt[i];
-      const { dry, key } = alongside(oxPts, oxWidth, i0, i1, line, widths, channel, w);
-      const delta = mouth ? Math.round(mouth.at / (0.1 * w)) : '';
-      const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief} ${key} ${delta}`;
-      if (lake.inputs !== inputs) {
-        lake.inputs = inputs;
-        const bed = lakeBed(oxPts, oxHeight, oxSilt, oxWidth, i0, i1, level, local.oxbowRelief, dry, w);
-        const half = 0.5 * w;
-        // Open water over arc lengths [u, v], keeping the water's own ends.
-        const [a, b] = [Math.max(0, wFrom), Math.min(len, wTo)];
-        const section = (u, v, opts = {}) => (Math.min(b, v) > Math.max(a, u)
-          ? lakeData(bed, u <= a ? wFrom : u, v >= b ? wTo : v, half, age, { below, ...opts }) : '');
-        set(lake.reed, 'd', lakeData(bed, from, to, half, age));
-        set(lake.water, 'd', section(a, b));
-        DEPTH_BANDS.forEach((band, m) => set(lake.deep[m], 'd',
-          section(a, b, { below: below + band, skew: DEEP_SKEW, room: band })));
-        // A plume fades along the lake from each end of its water.
-        const reach = PLUME_LENGTH * w;
-        [[a, 1], [b, -1]].forEach(([at, dir], m) => {
-          set(lake.plumes[m], 'd', dir > 0 ? section(a, a + reach) : section(b - reach, b));
-          if (!bed) return;
-          const [p, q] = [bedAt(bed, at), bedAt(bed, at + dir * reach)];
-          for (const [name, v] of [['x1', p.x], ['y1', p.y], ['x2', q.x], ['y2', q.y]]) set(lake.grads[m], name, dp1(v));
-        });
-        const r = DELTA_PLUME * w;
-        set(lake.plumes[2], 'd', mouth ? section(mouth.at - r, mouth.at + r) : '');
-        if (mouth) for (const [name, v] of [['cx', mouth.x], ['cy', mouth.y], ['r', r]]) set(lake.grads[2], name, dp1(v));
-        set(lake.lilies, 'd', lilyData(bed, wFrom, wTo, half, below, age, oxAlong[k], oxLen[k], w));
-        set(lake.weed, 'd', weedData(bed, wFrom, wTo, half, below, age, oxAlong[k], oxLen[k], w));
+        // The silt and the channel change without reshaping the oxbow.
+        let silt = 0;
+        for (let i = i0; i < i1; i++) silt += oxSilt[i];
+        const { dry, key } = alongside(oxPts, oxWidth, i0, i1, line, widths, channel, w);
+        const delta = mouth ? Math.round(mouth.at / (0.1 * w)) : '';
+        const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief} ${key} ${delta}`;
+        if (lake.inputs !== inputs) {
+          lake.inputs = inputs;
+          const bed = lakeBed(oxPts, oxHeight, oxSilt, oxWidth, i0, i1, level, local.oxbowRelief, dry, w);
+          const half = 0.5 * w;
+          // Open water over arc lengths [u, v], keeping the water's own ends.
+          const [a, b] = [Math.max(0, wFrom), Math.min(len, wTo)];
+          const section = (u, v, opts = {}) => (Math.min(b, v) > Math.max(a, u)
+            ? lakeData(bed, u <= a ? wFrom : u, v >= b ? wTo : v, half, age, { below, ...opts }) : '');
+          set(lake.reed, 'd', lakeData(bed, from, to, half, age));
+          set(lake.water, 'd', section(a, b));
+          DEPTH_BANDS.forEach((band, m) => set(lake.deep[m], 'd',
+            section(a, b, { below: below + band, skew: DEEP_SKEW, room: band })));
+          // A plume fades along the lake from each end of its water.
+          const reach = PLUME_LENGTH * w;
+          [[a, 1], [b, -1]].forEach(([at, dir], m) => {
+            set(lake.plumes[m], 'd', dir > 0 ? section(a, a + reach) : section(b - reach, b));
+            if (!bed) return;
+            const [p, q] = [bedAt(bed, at), bedAt(bed, at + dir * reach)];
+            for (const [name, v] of [['x1', p.x], ['y1', p.y], ['x2', q.x], ['y2', q.y]]) set(lake.grads[m], name, dp1(v));
+          });
+          const r = DELTA_PLUME * w;
+          set(lake.plumes[2], 'd', mouth ? section(mouth.at - r, mouth.at + r) : '');
+          if (mouth) for (const [name, v] of [['cx', mouth.x], ['cy', mouth.y], ['r', r]]) set(lake.grads[2], name, dp1(v));
+          set(lake.lilies, 'd', lilyData(bed, wFrom, wTo, half, below, age, oxAlong[k], oxLen[k], w));
+          set(lake.weed, 'd', weedData(bed, wFrom, wTo, half, below, age, oxAlong[k], oxLen[k], w));
+        }
       }
       const opacity = clamp01(5 * (1 - age)).toFixed(2);
       const clearing = smoothstep(age / CLEARING);
@@ -2472,6 +2492,7 @@ class SvgRenderer {
       const plume = (plumes * clearing).toFixed(2);
       for (const e of lake.plumes) set(e, 'fill-opacity', plume);
     }
+    this.nextLake = Math.max(0, waiting);
 
     this.drawStreams(tribs, courses, w);
     this.drawMills(river, mills, leats, line, widths, w);
@@ -3142,8 +3163,10 @@ class SvgRenderer {
 
   // Bring the floodplain up to date in one call, when the river stops. A
   // pass finishes the redraws under way, which can leave their layers due
-  // again, so it repeats until a pass finds nothing to do.
+  // again, so it repeats until a pass finds nothing to do. The next draw
+  // rebuilds every lake that waits.
   settle(river, memory, { local }) {
+    this.settling = true;
     for (let k = 0; k < 3 && this.drawFloodplain(river, memory, local, Infinity); k++);
   }
 
