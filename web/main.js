@@ -319,6 +319,9 @@ const WALLING = [118, 106, 88];
 const HOUSE = [1.1, 0.7];
 // Points of a leat below its weir: `LEAT_DOWN` (3 widths) in the core.
 const LEAT_TAIL = 6;
+// Farthest a leat runs from its weir along the channel, in widths: the
+// core's `LEAT_UP`.
+const MILL_REACH = 7;
 // Farmsteads: each building a roof at the core's footprint for its kind,
 // in channel widths along and across the ridge, in the order of `Kind`:
 // house, outshut, barn, byre, shed, cottage, field barn. Houses and
@@ -1070,7 +1073,8 @@ function circleData(x, y, r) {
 
 // Outline of a soil patch: an oval with radii `rx`, `ry` at a random angle,
 // its radius jittered at a few vertices and smoothed with a closed
-// Catmull–Rom spline written as cubic Béziers.
+// Catmull–Rom spline written as cubic Béziers. Returns the path data and
+// the box [x0, y0, x1, y1] of the control points, which holds the curve.
 function blobData(rand, cx, cy, rx, ry) {
   const n = 7 + Math.floor(4 * rand());
   const turn = Math.PI * rand();
@@ -1083,13 +1087,18 @@ function blobData(rand, cx, cy, rx, ry) {
     pts.push([cx + c * x - s * y, cy + s * x + c * y]);
   }
   const f = (v) => v.toFixed(1);
-  let d = `M${f(pts[0][0])} ${f(pts[0][1])}`;
+  const box = [Infinity, Infinity, -Infinity, -Infinity];
+  const point = (x, y) => {
+    [box[0], box[1], box[2], box[3]] = [Math.min(box[0], x), Math.min(box[1], y), Math.max(box[2], x), Math.max(box[3], y)];
+    return `${f(x)} ${f(y)}`;
+  };
+  let d = `M${point(pts[0][0], pts[0][1])}`;
   for (let k = 0; k < n; k++) {
     const [p0, p1, p2, p3] = [-1, 0, 1, 2].map((j) => pts[(k + j + n) % n]);
-    d += `C${f(p1[0] + (p2[0] - p0[0]) / 6)} ${f(p1[1] + (p2[1] - p0[1]) / 6)} `
-      + `${f(p2[0] - (p3[0] - p1[0]) / 6)} ${f(p2[1] - (p3[1] - p1[1]) / 6)} ${f(p2[0])} ${f(p2[1])}`;
+    d += `C${point(p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6)} `
+      + `${point(p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6)} ${point(p2[0], p2[1])}`;
   }
-  return d + 'Z';
+  return { d: d + 'Z', box };
 }
 
 // Bed of an oxbow lake along points [start, end) of a flat x, y array, as
@@ -2423,8 +2432,12 @@ class SvgRenderer {
         if (!type) continue;
         const r = (rMin + (rMax - rMin) * rand()) * w;
         const aspect = 0.45 + 0.55 * rand();
+        // Made before the test, so the draws stay in step and the patches
+        // in the window keep their places.
+        const { d, box } = blobData(rand, cx, cy, r, r * aspect);
+        if (box[2] <= x0 || box[0] >= x0 + vw || box[3] <= 0 || box[1] >= h) continue;
         el('path', {
-          d: blobData(rand, cx, cy, r, r * aspect),
+          d,
           fill: `rgb(${SOIL[type]})`,
           'fill-opacity': (0.4 + 0.25 * rand()).toFixed(2),
         }, this.soilLayer);
@@ -2550,12 +2563,24 @@ class SvgRenderer {
     // has reshaped, which rebuilds at once.
     const [lakesFrom, budget] = [performance.now(), this.settling ? Infinity : LAKE_BUDGET];
     const first = n ? this.nextLake % n : 0;
+    const [x0, vw] = this.window;
+    const [lo, hi] = [x0 - 2 * w, x0 + vw + 2 * w];
     let waiting = -1;
     this.settling = false;
     for (let q = 0; q < n; q++) {
       const k = (first + q) % n;
       const age = oxFill[k];
       const scar = this.scars[k], lake = this.lakes[k];
+      // An oxbow wholly in the hidden reaches is left blank, and drawn
+      // afresh should its elements come to a lake in the window.
+      let seen = false;
+      for (let i = oxOff[k]; i < oxOff[k + 1] && !seen; i++) seen = oxPts[2 * i] >= lo && oxPts[2 * i] <= hi;
+      if (!seen) {
+        for (const e of [scar.damp, scar.wet, scar.tufts, ...lake.paths]) set(e, 'd', '');
+        scar.shape = null;
+        lake.inputs = null;
+        continue;
+      }
       // The channel splits an oxbow into pieces of its original polyline,
       // so a piece's ends and length identify its shape.
       const [s0, s1] = [2 * oxOff[k], 2 * oxOff[k + 1]];
@@ -2744,10 +2769,19 @@ class SvgRenderer {
   // then.
   drawStreams(tribs, courses, w) {
     const n = tribs.length / 9;
+    const [x0, vw] = this.window;
+    const [lo, hi] = [x0 - 2 * w, x0 + vw + 2 * w];
     resize(this.streams, n, this.streamLayer);
     for (let k = 0; k < n; k++) {
       const [side, mx, my, start, len, version, scale, depth] = tribs.subarray(9 * k, 9 * k + 8);
       const path = this.streams[k];
+      let seen = mx >= lo && mx <= hi;
+      for (let i = start; i < start + len && !seen; i++) seen = courses[2 * i] >= lo && courses[2 * i] <= hi;
+      if (!seen) {
+        set(path, 'd', '');
+        path.key = null;
+        continue;
+      }
       const key = `${version} ${w}`;
       if (path.key === key) continue;
       path.key = key;
@@ -2782,9 +2816,11 @@ class SvgRenderer {
   // the water, seeded by the jam, so its logs keep their places and the
   // last ones go first as it breaks up.
   drawJams(jams, w) {
+    const [x0, vw] = this.window;
     let d = '';
     for (let k = 0; k < jams.length; k += 8) {
       const [x, y, dx, dy, ix, iy, strength, until] = jams.subarray(k, k + 8);
+      if (x < x0 - 2 * w || x > x0 + vw + 2 * w) continue;
       const rand = random(Math.round(1000 * until) ^ 0x10c5);
       const logs = Math.round(1 + 3 * strength);
       for (let m = 0; m < logs; m++) {
@@ -2809,13 +2845,20 @@ class SvgRenderer {
     const version = river.mill_version(), n = mills.length / 11;
     if (this.millsAt !== version || this.millShapes.length !== n) {
       this.millsAt = version;
-      for (const shape of this.millShapes) for (const e of shape.parts) e.remove();
-      this.millShapes = Array.from({ length: n }, (_, k) => this.millShape(mills.subarray(11 * k, 11 * k + 11), leats, w));
+      for (const shape of this.millShapes) for (const e of shape?.parts ?? []) e.remove();
+      // A mill whose leat and pond cannot reach the window has no shape.
+      const [x0, vw] = this.window;
+      const reach = (Math.max(MILL_REACH, river.get_param('pond_length')) + 2) * w;
+      this.millShapes = Array.from({ length: n }, (_, k) => {
+        const m = mills.subarray(11 * k, 11 * k + 11);
+        return m[0] < x0 - reach || m[0] > x0 + vw + reach ? null : this.millShape(m, leats, w);
+      });
     }
     const pond = Math.round(river.get_param('pond_length') / SPACING), last = line.length / 2 - 1;
     for (let k = 0; k < n; k++) {
       const [x, y, ax, ay, working, ruin, at, width, , start, count] = mills.subarray(11 * k, 11 * k + 11);
       const shape = this.millShapes[k];
+      if (!shape) continue;
       if (working) set(shape.water, 'd', leatData(leats, start, count));
       const opacity = (1 - smoothstep(ruin)).toFixed(2);
       for (const e of shape.parts) set(e, 'opacity', opacity);
@@ -3113,9 +3156,12 @@ class SvgRenderer {
   // bank, with stepping stones along it.
   drawFords(river, fords, w) {
     this.fordsAt = river.ford_version();
+    const [x0, vw] = this.window;
+    const [lo, hi] = [x0 - 2 * w, x0 + vw + 2 * w];
     let d = '';
     for (let k = 0; k < fords.length; k += 4) {
       const [ax, ay, bx, by] = fords.subarray(k, k + 4);
+      if (Math.max(ax, bx) < lo || Math.min(ax, bx) > hi) continue;
       d += `M${dp1(ax)} ${dp1(ay)}L${dp1(bx)} ${dp1(by)}`;
     }
     set(this.fordWater, 'd', d);
@@ -3128,7 +3174,9 @@ class SvgRenderer {
   // The parish boundary, once, when the core sets it on the channel's course.
   drawBoundary(river, w) {
     this.boundaryAt = { key: null, t: river.time() };
-    const pts = chaikin(simplify(Array.from(river.boundary()), BOUNDARY_SIMPLIFY * w), false);
+    const [x0, vw] = this.window, line = river.boundary();
+    const [start, end] = span(line, x0 - 2 * w, x0 + vw + 2 * w);
+    const pts = chaikin(simplify(Array.from(line.subarray(2 * start, 2 * end)), BOUNDARY_SIMPLIFY * w), false);
     set(this.boundary, 'd', pointsData(pts));
     set(this.boundary, 'stroke-width', dp1(BOUNDARY_WIDTH * w));
     set(this.boundary, 'stroke-dasharray', BOUNDARY_DASH.map((v) => dp1(v * w)).join(' '));

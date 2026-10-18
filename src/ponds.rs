@@ -102,14 +102,18 @@ impl Land {
     }
 
     /// Whether `p` lies on an oxbow's plug firm enough to dig, which the
-    /// channel did not cover when the survey began.
+    /// channel did not cover when the survey began, in the columns the
+    /// holdings can take.
     fn diggable(&self, field: &Erodibility, p: P) -> bool {
         let (width, height) = (self.cols as f64 * self.cell, self.rows as f64 * self.cell);
         if p[0] < 0.0 || p[1] < 0.0 || p[0] >= width || p[1] >= height {
             return false;
         }
         let i = self.index(p);
-        field.cut_at[i].is_finite() && field.deposit[i] >= PLUG_FIRM && !self.in_channel(i)
+        field.cut_at[i].is_finite()
+            && field.deposit[i] >= PLUG_FIRM
+            && !self.in_channel(i)
+            && self.within(i)
     }
 
     /// Dig a chain of fishponds for holding `h`, if it keeps none and a

@@ -240,11 +240,12 @@ impl Tracks {
     /// Cost of stepping from cell `i` to its neighbour `j`, `len` widths
     /// away, or `None` if a track cannot. A diagonal step needs both cells
     /// beside it dry, so no track slips across the channel where its cells
-    /// meet at a corner.
+    /// meet at a corner. No track leaves the columns the holdings can take,
+    /// so the search stops at the edges of the window.
     fn step(&self, land: &Land, field: &Erodibility, i: usize, j: usize, len: f32) -> Option<f32> {
         let open_water = |k: usize| field.cut_at[k].is_finite() && field.deposit[k] < LAKE_OPEN;
         let wet = |k: usize| land.in_channel(k) || open_water(k);
-        if open_water(j) {
+        if open_water(j) || !land.within(j) {
             return None;
         }
         let cols = land.cols;

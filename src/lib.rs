@@ -582,6 +582,11 @@ pub struct Sim {
     pub bounds: P,
     /// Positions along x where the valley narrows to `pinch_width`.
     pub pinches: Vec<f64>,
+    /// Span along x of the window the page shows, unbounded unless
+    /// [`Sim::reset_view`] sets it. The holdings, and with them the
+    /// farmsteads, churches, fishponds, tracks and mills, keep within
+    /// [`WINDOW_MARGIN`] of it, since nothing beyond it is drawn.
+    pub window: P,
     /// The valley walls, drawn from the seed at each reset.
     pub walls: Walls,
     pub centerline: Vec<P>,
@@ -732,6 +737,9 @@ fn edge_taper(p: P, bounds: P, margin: f64, floor: (f64, f64)) -> f64 {
 /// channel widths. See [`Sim::reset_view`].
 pub const UPSTREAM: f64 = 60.0;
 pub const DOWNSTREAM: f64 = 20.0;
+/// Distance beyond each edge of [`Sim::window`], in channel widths, to
+/// which the holdings reach, so the fields run on past the edge.
+pub const WINDOW_MARGIN: f64 = 2.0;
 
 /// Steps between [`Sim::check`]'s tests for the centreline crossing itself.
 pub const CHECK_CROSSING: u64 = 10;
@@ -1033,6 +1041,7 @@ impl Sim {
             params,
             bounds,
             pinches: Vec::new(),
+            window: [f64::NEG_INFINITY, f64::INFINITY],
             walls: Walls::default(),
             centerline: Vec::new(),
             widths: Vec::new(),
@@ -1097,6 +1106,7 @@ impl Sim {
         let x = UPSTREAM * w;
         self.bounds = [(UPSTREAM + DOWNSTREAM) * w + view_w, view_h];
         self.pinches = vec![x, x + view_w];
+        self.window = [x, x + view_w];
         self.reset(seed, noise);
         x
     }
@@ -1151,6 +1161,9 @@ impl Sim {
         self.wall_version += 1;
         self.place_tributaries();
         self.land = Land::new(&self.erodibility, seed);
+        let margin = WINDOW_MARGIN * w;
+        self.land
+            .confine(self.window[0] - margin, self.window[1] + margin, w);
         self.land_streams = u64::MAX;
         self.read_valley();
         let s = self.land_settings();
@@ -2959,6 +2972,47 @@ mod tests {
                 .collect();
             runs.into_iter().for_each(join);
         });
+    }
+
+    #[test]
+    fn works_keep_to_the_window() {
+        let mut sim = Sim::new(Params::default(), [1.0, 1.0], 0, 0.5);
+        let view = 640.0;
+        let x = sim.reset_view(view, 480.0, 3, 0.5);
+        // 6,000 years: past the parish boundary and the first churches.
+        sim.step_n(24_000);
+        let (w, cell) = (sim.params.width, sim.land.cell);
+        let (lo, hi) = (
+            x - WINDOW_MARGIN * w - cell,
+            x + view + WINDOW_MARGIN * w + cell,
+        );
+        let inside = |p: P, pad: f64| p[0] >= lo - pad && p[0] <= hi + pad;
+        let land = &sim.land;
+        assert!(land.count() > 0 && !sim.tracks.tracks.is_empty());
+        for (i, &o) in land.owner.iter().enumerate() {
+            assert!(
+                o == land::NONE || inside(land.centre(i), 0.0),
+                "held cell at {:?}",
+                land.centre(i)
+            );
+        }
+        for b in &land.buildings {
+            assert!(inside(b.pos, 0.0), "{:?} at {:?}", b.kind, b.pos);
+        }
+        for p in &land.ponds {
+            assert!(inside(p.pos, 0.0), "pond at {:?}", p.pos);
+        }
+        for &p in sim.tracks.tracks.iter().flatten() {
+            assert!(inside(p, 0.0), "track at {p:?}");
+        }
+        // A leat needs most of its ground held, not all of it.
+        for m in &sim.mills {
+            assert!(
+                inside(m.weir, (LEAT_UP + LEAT_DOWN) * w),
+                "mill at {:?}",
+                m.weir
+            );
+        }
     }
 
     #[test]

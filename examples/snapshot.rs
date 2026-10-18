@@ -191,6 +191,8 @@ fn main() {
     let view_w = 840.0;
     let mut sim = Sim::new(params, [up + view_w + down, 480.0], seed, 0.5);
     sim.pinches = vec![up, up + view_w];
+    sim.window = [up, up + view_w];
+    sim.reset(seed, 0.5);
     // Time each lake took to fill, by its birth time and length.
     let mut lake_lives: Vec<((u64, u64), f64)> = Vec::new();
     let t0 = std::time::Instant::now();

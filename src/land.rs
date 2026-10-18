@@ -43,6 +43,11 @@ pub const SURVEY_STEPS: u64 = 40;
 pub(crate) const BANDS: usize = 19;
 /// Most cells a search settles in one step.
 pub const BUDGET: usize = 128;
+/// Distance, in channel widths, beyond the columns the holdings can take
+/// to which the survey reads the water, so flood risk near their edges
+/// counts the channel just beyond. The valley narrows to `pinch_width`
+/// at the edges of the page's window, so the channel is never far.
+const SURVEY_PAD: f64 = 8.0;
 
 /// Distance from the water, in channel widths, at which flood risk falls
 /// to a half.
@@ -228,8 +233,14 @@ pub struct Land {
     pub(crate) streams: Vec<Reach>,
     /// Simulated time of the work under way.
     pub(crate) now: f64,
-    /// Cells a holding can take: off the water, and grassed over.
+    /// Cells a holding can take: off the water, grassed over, and in
+    /// `span`.
     pub(crate) open: Vec<bool>,
+    /// Columns, from the first to one past the last, that holdings can
+    /// take ground in, and that the survey reads, which reach
+    /// [`SURVEY_PAD`] beyond them; see [`Land::confine`].
+    span: [usize; 2],
+    surveyed: [usize; 2],
     /// Cost of crossing each cell per unit length before flood risk, from
     /// the erodibility noise; see `ROUGHNESS`.
     pub(crate) rough: Vec<f32>,
@@ -285,6 +296,8 @@ impl Land {
             streams: Vec::new(),
             now: 0.0,
             open: vec![false; n],
+            span: [0, field.cols],
+            surveyed: [0, field.cols],
             rough: field
                 .noise
                 .iter()
@@ -306,6 +319,24 @@ impl Land {
             works_rng: Rng::new(seed ^ 0x5EC7_0C4E),
             founded: false,
         }
+    }
+
+    /// Keep the holdings to the columns between `x0` and `x1`, so the
+    /// farmsteads, tracks and works on them do too, and the survey to
+    /// within [`SURVEY_PAD`] of them, for channel width `width`.
+    pub fn confine(&mut self, x0: f64, x1: f64, width: f64) {
+        let col = |x: f64| (x.max(0.0) as usize).min(self.cols);
+        let pad = SURVEY_PAD * width;
+        self.span = [col(x0 / self.cell), col((x1 / self.cell).ceil())];
+        self.surveyed = [
+            col((x0 - pad) / self.cell),
+            col(((x1 + pad) / self.cell).ceil()),
+        ];
+    }
+
+    /// Whether cell `i` lies in the columns holdings can take.
+    pub(crate) fn within(&self, i: usize) -> bool {
+        (self.span[0]..self.span[1]).contains(&(i % self.cols))
     }
 
     pub(crate) fn index(&self, p: P) -> usize {
@@ -499,11 +530,16 @@ impl Land {
         let cols = self.cols;
         let bound = s.grazing_time as f32;
         let (lo, hi) = (y0 * cols, y1 * cols);
-        for i in lo..hi {
-            let water = field.cut_at[i].is_finite();
-            self.open[i] = !water && field.growth[i] >= bound;
-            self.dist[i] = if water { 0.0 } else { f32::INFINITY };
+        let ([x0, x1], span) = (self.surveyed, self.span[0]..self.span[1]);
+        for y in y0..y1 {
+            for i in y * cols + x0..y * cols + x1 {
+                let water = field.cut_at[i].is_finite();
+                self.open[i] = !water && field.growth[i] >= bound && span.contains(&(i % cols));
+                self.dist[i] = if water { 0.0 } else { f32::INFINITY };
+            }
         }
+        // Cells outside the survey's columns are never read, so the
+        // channel's may be marked there too.
         let a = self.channel.partition_point(|&i| (i as usize) < lo);
         let b = self.channel.partition_point(|&i| (i as usize) < hi);
         for &i in &self.channel[a..b] {
@@ -512,18 +548,18 @@ impl Land {
         }
         let (d, diag) = (&mut self.dist, std::f32::consts::SQRT_2);
         for y in y0..y1 {
-            for x in 0..cols {
+            for x in x0..x1 {
                 let i = y * cols + x;
                 let mut v = d[i];
-                if x > 0 {
+                if x > x0 {
                     v = v.min(d[i - 1] + 1.0);
                 }
                 if y > 0 {
                     v = v.min(d[i - cols] + 1.0);
-                    if x > 0 {
+                    if x > x0 {
                         v = v.min(d[i - cols - 1] + diag);
                     }
-                    if x + 1 < cols {
+                    if x + 1 < x1 {
                         v = v.min(d[i - cols + 1] + diag);
                     }
                 }
@@ -548,21 +584,22 @@ impl Land {
         );
         let (clear, stage) = (c / (RIDGE_CLEAR * s.width), s.levee_height);
         let (near, far) = (WET_NEAR * s.width / c, (WET_FAR - WET_NEAR) * s.width / c);
+        let [x0, x1] = self.surveyed;
         for y in (y0..y1).rev() {
             let wy = (y as f64 + 0.5) * c;
-            for x in (0..cols).rev() {
+            for x in (x0..x1).rev() {
                 let i = y * cols + x;
                 let d = &mut self.dist;
                 let mut v = d[i];
-                if x + 1 < cols {
+                if x + 1 < x1 {
                     v = v.min(d[i + 1] + 1.0);
                 }
                 if y + 1 < rows {
                     v = v.min(d[i + cols] + 1.0);
-                    if x + 1 < cols {
+                    if x + 1 < x1 {
                         v = v.min(d[i + cols + 1] + diag);
                     }
-                    if x > 0 {
+                    if x > x0 {
                         v = v.min(d[i + cols - 1] + diag);
                     }
                 }
@@ -977,11 +1014,14 @@ impl Land {
         let want = (open as f64 / cells).round().max(1.0) as usize;
         let gap = FOUNDING_GAP * side * s.width;
         let mut seats: Vec<P> = Vec::new();
+        let [x0, x1] = self.span;
+        let across = (x1 - x0).max(1);
         for _ in 0..30 * want {
             if seats.len() >= want {
                 break;
             }
-            let i = (self.rng.uniform() * self.owner.len() as f64) as usize;
+            let k = (self.rng.uniform() * (across * self.rows) as f64) as usize;
+            let i = (k / across) * self.cols + x0 + k % across;
             if !self.open[i] || self.risk[i] > SEAT_RISK {
                 continue;
             }
