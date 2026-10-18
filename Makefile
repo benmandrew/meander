@@ -1,4 +1,4 @@
-.PHONY: build test smoke serve fuzz
+.PHONY: build test smoke serve fuzz video
 
 build: web/favicon.ico
 	wasm-pack build wasm --release --target web --out-dir ../web/pkg
@@ -22,6 +22,11 @@ fuzz:
 
 smoke: build
 	python3 test/smoke.py
+
+# Record the river to video/meander.mp4 and video/meander.webp; see
+# test/record.py for the settings.
+video: build
+	python3 test/record.py video
 
 serve: build
 	python3 serve.py 8000

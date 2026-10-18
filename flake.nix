@@ -121,6 +121,9 @@
             pkgs.imagemagick
             # Playwright drives the installed Chrome for `make smoke`.
             (pkgs.python3.withPackages (ps: [ ps.playwright ]))
+            # Encode `make video`'s MP4 and pack its animated WebP.
+            pkgs.ffmpeg
+            pkgs.libwebp
           ];
           shellHook = ''
             git config core.hooksPath .githooks
