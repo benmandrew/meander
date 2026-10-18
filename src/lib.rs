@@ -3547,6 +3547,7 @@ mod tests {
             across: [0.0, 1.0],
             leat: Vec::new(),
             course: Vec::new(),
+            feet: Vec::new(),
             born: 0.0,
             ruined_at: f64::INFINITY,
             at: i,
@@ -3584,6 +3585,7 @@ mod tests {
             across,
             leat: Vec::new(),
             course,
+            feet: Vec::new(),
             born: 0.0,
             ruined_at: f64::INFINITY,
             at: i,
@@ -3604,13 +3606,15 @@ mod tests {
             m.working() && m.course == course,
             "the course stays where it was dug"
         );
-        let up = sim.reach_points(LEAT_UP);
-        for (end, k) in [
-            (m.leat[0], m.at - up),
-            (m.leat[m.leat.len() - 1], m.at - up + m.leat.len() - 1),
-        ] {
-            let gap = dist(end, sim.centerline[k]) - 0.5 * sim.widths[k] * w;
-            assert!(gap.abs() < 0.05 * w, "the leat meets the bank: {gap}");
+        for end in [m.leat[0], m.leat[m.leat.len() - 1]] {
+            let gap = (0..sim.centerline.len() - 1)
+                .map(|k| {
+                    let (a, b) = (sim.centerline[k], sim.centerline[k + 1]);
+                    let bank = 0.5 * sim.widths[k].min(sim.widths[k + 1]) * w;
+                    geom::seg_dist2(end, a, b).sqrt() - bank
+                })
+                .fold(f64::INFINITY, f64::min);
+            assert!(gap.abs() < 0.05 * w, "the leat meets the bank: {}", gap / w);
         }
         assert!(
             dist(m.leat[0], intake) > 0.5 * w,

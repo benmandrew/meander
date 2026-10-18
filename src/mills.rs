@@ -17,6 +17,16 @@ const LEAT_RAMP: f64 = 2.0;
 /// Share of a leat's length that must run on a holding's ground; its ends
 /// may cross the bar at the bank.
 const LEAT_OWNED: f64 = 0.75;
+/// Centreline points on either side of a leat point's last foot searched
+/// for its new one.
+const FOOT_SEARCH: usize = 3;
+/// Share of the way a working leat's points move each step along the
+/// bank to where it now puts them. A sharp bend is drawn in a few points,
+/// which resampling shifts each step, so the bank at it can swing by half
+/// a width; eased, the leat's end goes nine tenths of the way in 8 steps,
+/// 2 years. Across the bank they move the whole way, so the ends keep to
+/// it.
+const LEAT_EASE: f64 = 0.25;
 
 /// A mill, its weir and its leat.
 #[derive(Clone, Debug)]
@@ -32,6 +42,10 @@ pub struct Mill {
     /// the bank as it ran when the mill was founded. It stays where it was
     /// dug while the channel migrates.
     pub course: Vec<P>,
+    /// The centreline segment nearest each course point, as an offset in
+    /// points from [`Mill::at`]. Kept from step to step, so a point's bank
+    /// stays on its own reach where a bend brings another one as near.
+    pub feet: Vec<isize>,
     pub born: f64,
     /// Time the mill fell into ruin, or infinity while it works.
     pub ruined_at: f64,
@@ -144,6 +158,7 @@ impl Sim {
             across: [side * nrm[0], side * nrm[1]],
             leat: Vec::new(),
             course: self.course(i - up, i + down, side),
+            feet: Vec::new(),
             born: self.time,
             ruined_at: f64::INFINITY,
             at: i,
@@ -182,35 +197,104 @@ impl Sim {
     /// widths above the weir to [`LEAT_DOWN`] below. Over a mill's
     /// centuries the reach above the weir migrates, and the miller digs the
     /// intake on to meet it. The leat is left as it was when the weir is
-    /// too near either end of the channel to reach both banks. Returns
-    /// whether the bank has reached the course where it runs at full
-    /// offset, so the river has broken into the leat.
+    /// too near either end of the channel to reach both banks. Once laid,
+    /// it moves [`LEAT_EASE`] of the way along the bank to its new line
+    /// each call. Returns whether the bank has reached the course where it
+    /// runs at full offset, so the river has broken into the leat.
     pub(crate) fn rejoin(&self, m: &mut Mill) -> bool {
         let (w, n, len) = (self.params.width, self.centerline.len(), m.course.len());
         let up = self.reach_points(LEAT_UP);
         if len <= up || m.at < up || m.at - up + len > n {
             return false;
         }
-        let a = m.at - up;
+        if m.feet.len() != len {
+            m.feet = (0..len).map(|j| j as isize - up as isize).collect();
+        }
         let nrm = right_normal(&self.centerline, m.at);
         let side = (m.across[0] * nrm[0] + m.across[1] * nrm[1]).signum();
         let ramp = self.reach_points(LEAT_RAMP).max(1) as f64;
         let mut breached = false;
-        m.leat.clear();
-        m.leat.extend(m.course.iter().enumerate().map(|(j, &c)| {
-            let k = a + j;
-            let (q, nrm) = (self.centerline[k], right_normal(&self.centerline, k));
-            let off = side * 0.5 * self.widths[k] * w;
+        let ease = if m.leat.len() == len { LEAT_EASE } else { 1.0 };
+        m.leat.resize(len, [0.0; 2]);
+        for (j, &c) in m.course.iter().enumerate() {
+            let k = (m.at as isize + m.feet[j]).max(0) as usize;
+            let (seg, q, nrm, width) = self.foot(c, k);
+            m.feet[j] = seg as isize - m.at as isize;
+            let off = side * 0.5 * width * w;
             let bank = [q[0] + off * nrm[0], q[1] + off * nrm[1]];
             let t = smoothstep(j.min(len - 1 - j) as f64 / ramp);
             breached |=
                 t >= 1.0 && side * ((c[0] - bank[0]) * nrm[0] + (c[1] - bank[1]) * nrm[1]) < 0.0;
-            [
+            let to = [
                 bank[0] + t * (c[0] - bank[0]),
                 bank[1] + t * (c[1] - bank[1]),
-            ]
-        }));
+            ];
+            let p = &mut m.leat[j];
+            let d = [to[0] - p[0], to[1] - p[1]];
+            let across = d[0] * nrm[0] + d[1] * nrm[1];
+            let along = [d[0] - across * nrm[0], d[1] - across * nrm[1]];
+            *p = [
+                p[0] + across * nrm[0] + ease * along[0],
+                p[1] + across * nrm[1] + ease * along[1],
+            ];
+        }
         breached
+    }
+
+    /// The segment of the centreline within [`FOOT_SEARCH`] points of
+    /// point `k` nearest `c`, the point on it nearest `c`, and the right
+    /// normal and width there, each interpolated between the segment's
+    /// ends. Resampling slides the points along the line each step, so a
+    /// bank laid at a point's index would jump along the bank by up to a
+    /// spacing; the nearest point moves only with the channel. The search
+    /// runs on the line smoothed over two points on either side, since a
+    /// kink in it would swing the foot of a course point a few widths off
+    /// along the bank, and its normal with it. The leat lies under the
+    /// water, so an end a little inside the bank is hidden.
+    fn foot(&self, c: P, k: usize) -> (usize, P, P, f64) {
+        let pts = &self.centerline;
+        let last = pts.len().saturating_sub(5).max(3);
+        let lo = k.saturating_sub(FOOT_SEARCH).clamp(3, last);
+        let hi = (k + FOOT_SEARCH).clamp(lo, last);
+        // Binomial weights 1, 4, 6, 4, 1 over points i − 2 to i + 2, for
+        // points lo − 1 to hi + 2.
+        let mut sm = [[0.0; 2]; 2 * FOOT_SEARCH + 4];
+        for (j, s) in sm.iter_mut().enumerate().take(hi - lo + 4) {
+            let i = lo - 1 + j;
+            for d in 0..2 {
+                s[d] = (pts[i - 2][d]
+                    + 4.0 * (pts[i - 1][d] + pts[i + 1][d])
+                    + 6.0 * pts[i][d]
+                    + pts[i + 2][d])
+                    / 16.0;
+            }
+        }
+        let (mut best, mut seg, mut at) = (f64::INFINITY, lo, 0.0);
+        for i in lo..=hi {
+            let (p, q) = (sm[i - lo + 1], sm[i - lo + 2]);
+            let d = [q[0] - p[0], q[1] - p[1]];
+            let len2 = d[0] * d[0] + d[1] * d[1];
+            let u = if len2 > 0.0 {
+                (((c[0] - p[0]) * d[0] + (c[1] - p[1]) * d[1]) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let e = geom::dist2(c, [p[0] + u * d[0], p[1] + u * d[1]]);
+            if e < best {
+                (best, seg, at) = (e, i, u);
+            }
+        }
+        let j = seg - lo + 1;
+        let (p, q) = (sm[j], sm[j + 1]);
+        let (n0, n1) = (right_normal(&sm, j), right_normal(&sm, j + 1));
+        let nrm = [n0[0] + at * (n1[0] - n0[0]), n0[1] + at * (n1[1] - n0[1])];
+        let l = (nrm[0] * nrm[0] + nrm[1] * nrm[1]).sqrt().max(1e-12);
+        (
+            seg,
+            [p[0] + at * (q[0] - p[0]), p[1] + at * (q[1] - p[1])],
+            [nrm[0] / l, nrm[1] / l],
+            self.widths[seg] + at * (self.widths[seg + 1] - self.widths[seg]),
+        )
     }
 
     /// Put the point at each working weir back on it. Resampling cuts the
