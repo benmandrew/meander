@@ -20,6 +20,62 @@ const CLEARING = 0.01;
 // Water colour of a lake near the end of its life, turbid and weedy.
 const MURKY = [80, 120, 116];
 const REEDS = 'rgb(104, 126, 84)';
+// Reed swamp fills a lake's shallows: on a level bed, a fringe
+// `REED_FRINGE[0]` of the old channel's half-width wide when cut off,
+// widening by `REED_FRINGE[1]` over the fill. Where the bed slopes along the
+// lake the fringe reaches further. At a plugged end the open water stops
+// `REED_END` fringes short, as the reeds grow out over the plug.
+const REED_FRINGE = [0.2, 0.3];
+const REED_END = 2;
+// Deep water: the open water is tinted `SHALLOW_TINT` of the way to
+// `SHALLOWS` once it clears, under nested bands `DEPTH_BANDS` deeper than
+// its edge, in the depth units of `lakeBed`, each `DEEP` at `DEEP_OPACITY`.
+// They fade
+// by `DEEP_MURK` of that as the lake turns murky, and lie towards the old
+// outer bank by `DEEP_SKEW` of the room they have (see `lakeData`).
+const SHALLOWS = [110, 160, 176];
+const SHALLOW_TINT = 0.3;
+const DEEP = [16, 50, 78];
+const DEEP_OPACITY = 0.3;
+const DEEP_MURK = 0.7;
+const DEPTH_BANDS = [0.12, 0.3];
+const DEEP_SKEW = 0.7;
+// Silt plumes: floods bring silty water in at each end of a lake, and a
+// tributary at the head of its delta. A plume fades over `PLUME_LENGTH`
+// widths from an end, or within `DELTA_PLUME` widths of a delta's head, from
+// `PLUME` at up to `PLUME_OPACITY`. Under wooded upland it is `PLUME_BASE`
+// of that, rising to all of it as clearance raises the supply of sediment
+// to `clearance_supply`.
+const PLUME = [150, 140, 100];
+const PLUME_OPACITY = 0.6;
+const PLUME_BASE = 0.35;
+const PLUME_LENGTH = 4;
+const DELTA_PLUME = 2.5;
+// Water lilies (see `lilyData`): pads up to `LILY_SIZE` widths in radius, in
+// clusters reaching `LILY_REACH` widths, over open water up to `LILY_DEPTH`
+// deep, in each `LILY_STEP` widths of the oxbow. In a lake left to fill on
+// its own, they open from `LILY_START` of the fill, about 750 years after
+// the cutoff, until about 2,100 years.
+const LILY = [104, 134, 76];
+const LILY_SIZE = 0.14;
+const LILY_REACH = 0.4;
+const LILY_DEPTH = 0.25;
+const LILY_STEP = 0.8;
+const LILY_START = 0.25;
+const LILY_SPREAD = 0.45;
+// Duckweed (see `weedData`): mats `WEED_STEP` widths apart that start from
+// `WEED_START` of the fill, about 2,150 years after the cutoff of a lake left
+// to fill on its own, and cover the water by about 2,800 years.
+const WEED = [156, 172, 84];
+const WEED_OPACITY = 0.75;
+const WEED_STEP = 3;
+const WEED_START = 0.72;
+const WEED_SPREAD = 0.1;
+const WEED_GROW = 0.12;
+// Points either side over which a lake's bend is smoothed, and its gain in
+// widths (see `lakeBed`): a bend of radius 2.5 widths has a bend of 1.
+const BEND_SPAN = 3;
+const BEND_GAIN = 2.5;
 const MARSH = 'rgb(118, 134, 96)';
 // Oxbow scars: damp ground across the old channel, a wetter core where the
 // lake last stood, and marsh tufts on the core, each with its opacity.
@@ -949,27 +1005,26 @@ function blobData(rand, cx, cy, rx, ry) {
   return d + 'Z';
 }
 
-// Outline of an oxbow lake along points [start, end) of a flat x, y array,
-// covering arc lengths [from, to] along them. The bed is a parabola across
-// the old channel, so the lake's half-width is `half` × √depth, capped at
-// `half` by the old banks. The depth is `level` less the bed's rise, which
-// is `relief` × 4 × (height − 0.5) for the land heights in `heights`, plus
-// the overbank silt in `silts` above its mean over the lake's interior points;
-// the mean is part of the fill that sets `level`. Each point's depth moves
-// by its fraction in `dry`, if given, towards `level` above the water.
-// Where the bed rises above the water the lake
-// splits into pools, one subpath each, and the parabola gives each pool a
-// round tip there. A plugged end is a round cap when young, lengthening by
-// `PLUG_TIP` times the half-width with `age` in [0, 1]. An end cut by the
-// channel stays a round cap, hidden under the water.
-function lakeData(pts, heights, silts, widths, start, end, from, to, half, level, relief, age, dry) {
+// Bed of an oxbow lake along points [start, end) of a flat x, y array, as
+// `lakeData` and the features on the lake read it. The bed is a parabola
+// across the old channel, so the water's half-width where it is `d` deep
+// is √d times half the old channel's width in `widths`, capped there by the
+// old banks. The depth is `level` less the bed's rise, which is `relief` ×
+// 4 × (height − 0.5) for the land heights in `heights`, plus the overbank
+// silt in `silts` above its mean over the lake's interior points; the mean
+// is part of the fill that sets `level`. Each point's depth moves by its
+// fraction in `dry`, if given, towards `level` above the water. `bend` is
+// the old channel's curvature, positive where it turns to the left of its
+// tangent, smoothed over `BEND_SPAN` points either side and scaled by
+// `BEND_GAIN` times the reference width `w` into [−1, 1]. Null if the lake
+// has no water.
+function lakeBed(pts, heights, silts, widths, start, end, level, relief, dry, w) {
   const m = end - start;
-  if (m < 2 || level <= 0) return '';
+  if (m < 2 || level <= 0) return null;
   let mean = 0;
   for (let k = 0; k < m; k++) mean += widths[start + k] / m;
-  const wide = half * mean;
-  const s = new Float64Array(m), tx = new Float64Array(m), ty = new Float64Array(m);
-  const depth = new Float64Array(m);
+  const { s, tx, ty } = arcFrame(pts, start, end);
+  const depth = new Float64Array(m), turn = new Float64Array(m), bend = new Float64Array(m);
   let silt = 0;
   for (let k = 1; k < m - 1; k++) silt += silts[start + k] / Math.max(1, m - 2);
   // The end points lie under the channel at a cut, swept clear of silt.
@@ -978,20 +1033,65 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
     const wet = level - 4 * relief * (heights[start + k] - 0.5) - extra;
     depth[k] = wet - (dry ? dry[k] * (wet + level) : 0);
   }
-  for (let k = 1; k < m; k++) {
-    const i = 2 * (start + k);
-    s[k] = s[k - 1] + Math.hypot(pts[i] - pts[i - 2], pts[i + 1] - pts[i - 1]);
+  // The sine of the turn between the tangents either side, over the arc
+  // between them.
+  for (let k = 1; k < m - 1; k++) {
+    turn[k] = (tx[k - 1] * ty[k + 1] - ty[k - 1] * tx[k + 1]) / (s[k + 1] - s[k - 1] || 1);
   }
+  for (let k = 0; k < m; k++) {
+    const [j0, j1] = [Math.max(1, k - BEND_SPAN), Math.min(m - 2, k + BEND_SPAN)];
+    let sum = 0;
+    for (let j = j0; j <= j1; j++) sum += turn[j];
+    const c = BEND_GAIN * w * sum / Math.max(1, j1 - j0 + 1);
+    bend[k] = c < -1 ? -1 : c > 1 ? 1 : c;
+  }
+  return { pts, widths, start, m, s, tx, ty, depth, bend, mean };
+}
+
+// Point and unit normal, to the left of the tangent, at arc length `at`
+// along a lake's bed, and the bed's depth and bend there.
+function bedAt(bed, at) {
+  const { pts, start, m, s, tx, ty, depth, bend } = bed;
+  // The last segment starting at or before `at`, by bisection.
+  let [j, hi] = [0, m - 2];
+  while (j < hi) {
+    const mid = (j + hi + 1) >> 1;
+    if (s[mid] <= at) j = mid;
+    else hi = mid - 1;
+  }
+  const f = clamp01((at - s[j]) / (s[j + 1] - s[j] || 1)), i = 2 * (start + j);
+  const nx = -(ty[j] + (ty[j + 1] - ty[j]) * f), ny = tx[j] + (tx[j + 1] - tx[j]) * f;
+  const l = Math.hypot(nx, ny) || 1;
+  return {
+    x: pts[i] + (pts[i + 2] - pts[i]) * f,
+    y: pts[i + 1] + (pts[i + 3] - pts[i + 1]) * f,
+    nx: nx / l,
+    ny: ny / l,
+    width: bed.widths[start + j] + (bed.widths[start + j + 1] - bed.widths[start + j]) * f,
+    depth: depth[j] + (depth[j + 1] - depth[j]) * f,
+    bend: bend[j] + (bend[j + 1] - bend[j]) * f,
+  };
+}
+
+// Outline of an oxbow lake on its bed (see `lakeBed`) where the water is
+// deeper than `below`, covering arc lengths [from, to] along it. Its
+// half-width is `half` × √(depth − `below`) times the old channel's width,
+// capped at `half` times that width by the old banks. With `skew`, the
+// outline moves towards the outer bank of the old bend by `skew` × the
+// bend of the room between it and the outline `room` shallower, as the
+// channel scoured its bed deepest against the outer bank.
+// Where the bed rises above the water the lake splits into pools, one
+// subpath each, and the parabola gives each pool a round tip there. A
+// plugged end is a round cap when young, lengthening by `PLUG_TIP` times
+// the half-width with `age` in [0, 1]. An end cut by the channel stays a
+// round cap, hidden under the water.
+function lakeData(bed, from, to, half, age, { below = 0, skew = 0, room = 0 } = {}) {
+  if (!bed) return '';
+  const { pts, widths, start, m, s, tx, ty, bend, mean } = bed;
+  const wide = half * mean;
+  const depth = below ? bed.depth.map((d) => d - below) : bed.depth;
   const [a, b] = [Math.max(0, from), Math.min(s[m - 1], to)];
   if (b <= a) return '';
-  // Unit tangents at the points, by central differences.
-  for (let k = 0; k < m; k++) {
-    const p = 2 * (start + Math.max(0, k - 1)), q = 2 * (start + Math.min(m - 1, k + 1));
-    const dx = pts[q] - pts[p], dy = pts[q + 1] - pts[p + 1];
-    const l = Math.hypot(dx, dy) || 1;
-    tx[k] = dx / l;
-    ty[k] = dy / l;
-  }
   // Segment and fraction along it at arc length `at`, walking forwards from
   // segment `j`.
   const locate = (at, j) => {
@@ -1060,11 +1160,18 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
       let f;
       [j, f] = locate(at, j);
       const i = 2 * (start + j);
-      const x = pts[i] + (pts[i + 2] - pts[i]) * f, y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * f;
+      let x = pts[i] + (pts[i + 2] - pts[i]) * f, y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * f;
       const nx = -(ty[j] + (ty[j + 1] - ty[j]) * f), ny = tx[j] + (tx[j + 1] - tx[j]) * f;
-      const h = thin * shape * width(j, f, depthAt(j, f)) / (Math.hypot(nx, ny) || 1);
-      left.push((x + nx * h).toFixed(1) + ' ' + (y + ny * h).toFixed(1));
-      right.push((x - nx * h).toFixed(1) + ' ' + (y - ny * h).toFixed(1));
+      const scale = thin * shape / (Math.hypot(nx, ny) || 1), d = depthAt(j, f);
+      const r = width(j, f, d), h = scale * r;
+      if (skew) {
+        // The outer bank lies on the right of a bend to the left.
+        const o = skew * (bend[j] + (bend[j + 1] - bend[j]) * f) * scale * (width(j, f, d + room) - r);
+        x -= nx * o;
+        y -= ny * o;
+      }
+      left.push(dp1(x + nx * h) + ' ' + dp1(y + ny * h));
+      right.push(dp1(x - nx * h) + ' ' + dp1(y - ny * h));
     };
     // Offset into an end region, and the bank shape there, for step `q`.
     const step = (e, q) => {
@@ -1085,6 +1192,77 @@ function lakeData(pts, heights, silts, widths, start, end, from, to, half, level
     path += 'M' + left.join('L') + 'L' + right.reverse().slice(1, -1).join('L') + 'Z';
   }
   return path;
+}
+
+// Water lilies on a lake's bed over arc lengths [from, to], where the open
+// water is deeper than `below`, half-width `half` times the old channel's
+// width: clusters of round pads on the open water up to `LILY_DEPTH`
+// deeper than that. Two clusters may stand in each `LILY_STEP` widths of
+// the oxbow, more often on the inner bank of the old bend, which
+// the point bar left shallow. Each opens at its own fill between
+// `LILY_START` and `LILY_START` + `LILY_SPREAD` of `age`, and is seeded by
+// its place along the whole oxbow, as the scar's tufts are; this piece
+// starts `along` into an oxbow of length `total`.
+function lilyData(bed, from, to, half, below, age, along, total, w) {
+  if (!bed || age < LILY_START) return '';
+  const len = bed.s[bed.m - 1], step = LILY_STEP * w, seed = Math.round(total);
+  const [a, b] = [Math.max(0, from) + w, Math.min(len, to) - w];
+  let d = '';
+  for (let j = Math.floor((along + a) / step); j * step < along + b; j++) {
+    for (const side of [0, 1]) {
+      const h = (n) => hash01(seed, j, side, n);
+      if (age < LILY_START + LILY_SPREAD * h(1)) continue;
+      const at = (j + h(2)) * step - along;
+      if (at < a || at > b) continue;
+      // Pools on either side must reach the cluster, or it would hang over
+      // the reeds at a pool's tip.
+      if (bedAt(bed, at - w).depth <= below || bedAt(bed, at + w).depth <= below) continue;
+      const p = bedAt(bed, at);
+      if (p.depth <= below) continue;
+      // Across the bed to the depth the cluster floats over: the depth at
+      // fraction `x` of the half-width is the depth on the centreline less
+      // x².
+      const x = Math.sqrt(Math.max(0, p.depth - below - LILY_DEPTH * h(3)));
+      if (x >= 1) continue;
+      const inner = Math.sign(p.bend) || 1;
+      const sign = h(4) < 0.5 + 0.35 * Math.abs(p.bend) ? inner : -inner;
+      // Drawn in from the depth it floats over by the cluster's reach, so
+      // its pads stay over the water.
+      const off = sign * Math.max(0, x * half * p.width - LILY_REACH * w);
+      const [cx, cy] = [p.x + p.nx * off, p.y + p.ny * off];
+      const pads = 2 + Math.floor(4 * h(5));
+      for (let q = 0; q < pads; q++) {
+        const r = LILY_SIZE * w * (0.6 + 0.4 * h(10 + q));
+        const t = 2 * Math.PI * h(20 + q), o = (q ? 0.2 : 0) * w * (0.5 + h(30 + q));
+        d += circleData(cx + o * Math.cos(t), cy + o * Math.sin(t), r);
+      }
+    }
+  }
+  return d;
+}
+
+// Duckweed on a lake's bed over arc lengths [from, to], where the open
+// water is deeper than `below`, half-width `half` times the old channel's
+// width: mats across the open water, one centred in each `WEED_STEP`
+// widths of the oxbow, that start at their own fill between `WEED_START`
+// and `WEED_START` + `WEED_SPREAD` and lengthen over `WEED_GROW` of it
+// until they meet. Seeded as `lilyData` is.
+function weedData(bed, from, to, half, below, age, along, total, w) {
+  if (!bed || age < WEED_START) return '';
+  const len = bed.s[bed.m - 1], step = WEED_STEP * w, seed = Math.round(total);
+  const [a, b] = [Math.max(0, from), Math.min(len, to)];
+  let d = '';
+  for (let j = Math.floor((along + a) / step) - 1; (j - 1) * step < along + b; j++) {
+    const h = (n) => hash01(seed, j, 7, n);
+    const grown = smoothstep((age - WEED_START - WEED_SPREAD * h(1)) / WEED_GROW);
+    if (grown <= 0) continue;
+    const at = (j + 0.5 + 0.3 * (h(2) - 0.5)) * step - along, reach = 0.65 * step * grown;
+    const [u, v] = [Math.max(a, at - reach), Math.min(b, at + reach)];
+    // A mat's ends that are not the lake's own are round caps inside the
+    // water, which goes on beyond them.
+    if (v > u) d += lakeData(bed, u === a ? from : u, v === b ? to : v, half, age, { below });
+  }
+  return d;
 }
 
 // Arc lengths of points [start, end) of a flat x, y array from the first,
@@ -1590,8 +1768,8 @@ class SvgRenderer {
     // The bank lies under the lakes, so a lake that meets the channel joins
     // its water with no strip of bank between them.
     // Both are filled outlines at the local width, which a stroke cannot vary.
-    // Every lake's reed fringe lies under the water of all of them, so lakes
-    // that meet join as one body of water.
+    // Every lake's reeds lie under the water of all of them, so lakes that
+    // meet join as one body of water.
     // Tributary streams lie under the bank, so the channel hides where they
     // meet it. Mill leats lie over it, since their ends run along the water's
     // edge, which the bank would cover; the channel's water still hides
@@ -1600,8 +1778,16 @@ class SvgRenderer {
     this.streams = [];
     this.bank = el('g', { fill: `rgb(${WET_SAND})` }, svg);
     this.leatLayer = el('g', round, svg);
-    this.reedLayer = el('g', { fill: 'none', 'stroke-linejoin': 'round', stroke: REEDS }, svg);
+    this.defs = el('defs', {}, svg);
+    this.plumeIds = 0;
+    this.reedLayer = el('g', { fill: REEDS }, svg);
     this.lakeLayer = el('g', {}, svg);
+    // Over the water of all lakes, as the reeds lie under it: the deeper
+    // water, the plumes, the duckweed and the lilies.
+    this.deepLayers = DEPTH_BANDS.map(() => el('g', { fill: `rgb(${DEEP})` }, svg));
+    this.plumeLayer = el('g', {}, svg);
+    this.weedLayer = el('g', { fill: `rgb(${WEED})`, 'fill-opacity': WEED_OPACITY }, svg);
+    this.lilyLayer = el('g', { fill: `rgb(${LILY})` }, svg);
     this.water = el('g', { fill: `rgb(${WATER})` }, svg);
     // Pools, riffles and mid-channel bars, over the channel's water.
     this.depth = [...POOL_COLOURS, SHALLOW, BAR].map((c) => ({ g: el('g', { fill: `rgb(${c})` }, svg), paths: [] }));
@@ -1619,7 +1805,6 @@ class SvgRenderer {
     this.bankRuns = [];
     this.waterRuns = [];
     this.lakes = [];
-    this.reeds = [];
     this.scars = [];
     this.bands = [];
     // Centrelines kept since the last forest redraw, each with its time,
@@ -2075,6 +2260,31 @@ class SvgRenderer {
     });
   }
 
+  // One lake's paths, one in each lake layer, and the gradients of its
+  // plumes: from each end of its water, and around a delta's head.
+  newLake() {
+    const grads = ['linearGradient', 'linearGradient', 'radialGradient'].map((kind) => {
+      const g = el(kind, { id: `plume${this.plumeIds++}`, gradientUnits: 'userSpaceOnUse' }, this.defs);
+      for (const [offset, opacity] of [[0, 1], [0.4, 0.5], [1, 0]]) {
+        el('stop', { offset, 'stop-color': `rgb(${PLUME})`, 'stop-opacity': opacity }, g);
+      }
+      return g;
+    });
+    const lake = {
+      inputs: null,
+      grads,
+      reed: el('path', {}, this.reedLayer),
+      water: el('path', {}, this.lakeLayer),
+      deep: this.deepLayers.map((g) => el('path', {}, g)),
+      plumes: grads.map((g) => el('path', { fill: `url(#${g.id})` }, this.plumeLayer)),
+      weed: el('path', {}, this.weedLayer),
+      lilies: el('path', {}, this.lilyLayer),
+    };
+    lake.paths = [lake.reed, lake.water, ...lake.deep, ...lake.plumes, lake.weed, lake.lilies];
+    lake.owned = [...lake.paths, ...grads];
+    return lake;
+  }
+
   draw(river, memory, { local }) {
     const w = river.get_param('width');
     // The floodplain layers sync their own data, which can grow memory, so
@@ -2130,8 +2340,11 @@ class SvgRenderer {
     // ends, narrows far more slowly from the banks and turns murky, fading
     // only over the last fifth of its fill, then a marshy scar that fades
     // out. Both plugs and banks advance steadily as it fills, and the water
-    // drains first from where the land is high or the most silt has settled, splitting the lake into pools. The reed fringe grows inwards, so
-    // it does not hide the narrowing.
+    // drains first from where the land is high or the most silt has
+    // settled, splitting the lake into pools. Reeds fill its shallows, and
+    // its deeper water lies towards the old outer bank. Silt plumes come in
+    // at its ends and at deltas, lilies open on its shallows, and duckweed
+    // covers it late in its fill.
     while (this.scars.length < n) {
       const g = el('g', {}, this.scarLayer);
       const [damp, wet, tufts] = SCAR_OPACITY.map(() => el('path', {}, g));
@@ -2141,11 +2354,20 @@ class SvgRenderer {
       this.scars.push({ g, damp, wet, tufts, shape: null });
     }
     while (this.scars.length > n) this.scars.pop().g.remove();
-    resize(this.lakes, n, this.lakeLayer);
-    resize(this.reeds, n, this.reedLayer);
+    while (this.lakes.length < n) this.lakes.push(this.newLake());
+    while (this.lakes.length > n) for (const e of this.lakes.pop().owned) e.remove();
+    // Where tributaries end in lakes, at the heads of their deltas.
+    const mouths = [];
+    for (let j = 0; j < tribs.length; j += 9) {
+      if (!tribs[j + 8] || !tribs[j + 4]) continue;
+      const i = 2 * (tribs[j + 3] + tribs[j + 4] - 1);
+      mouths.push([courses[i], courses[i + 1]]);
+    }
+    const most = river.get_param('clearance_supply');
+    const plumes = PLUME_OPACITY * (PLUME_BASE + (1 - PLUME_BASE) * clamp01((river.supply() - 1) / (most - 1 || 1)));
     for (let k = 0; k < n; k++) {
       const age = oxFill[k];
-      const scar = this.scars[k], lake = this.lakes[k], reed = this.reeds[k];
+      const scar = this.scars[k], lake = this.lakes[k];
       // The channel splits an oxbow into pieces of its original polyline,
       // so a piece's ends and length identify its shape.
       const [s0, s1] = [2 * oxOff[k], 2 * oxOff[k + 1]];
@@ -2175,42 +2397,80 @@ class SvgRenderer {
       set(scar.tufts, 'stroke-opacity', fades[2]);
       if (age >= 1 || sliver) {
         // Elements are matched to oxbows by index, so a lake can come back
-        // to this element when the channel splits or drops an oxbow before
-        // it. Forget its inputs, or it would stay blank.
-        set(lake, 'd', '');
-        set(reed, 'd', '');
+        // to these elements when the channel splits or drops an oxbow
+        // before it. Forget its inputs, or it would stay blank.
+        for (const e of lake.paths) set(e, 'd', '');
         lake.inputs = null;
         continue;
       }
-      const reeds = 0.1 * wm + 0.15 * wm * age;
-      // Half-width where the bed is at its mean height.
-      const hw = 0.5 * wm * (1 - local.oxbowShrink * age) - 0.5 * reeds;
+      const [i0, i1] = [oxOff[k], oxOff[k + 1]];
+      // Fractions of the old channel's half-width on a level bed: the reeds'
+      // outer edge, where the water meets the bank, and the open water's.
+      // The bed is a parabola, so the open water's edge lies `below` deeper.
+      const outer = 1 - local.oxbowShrink * age;
+      const open = Math.max(0, outer - REED_FRINGE[0] - REED_FRINGE[1] * age);
+      const level = outer * outer, below = level - open * open;
       // The plugs advance from the ends of the oxbow as cut off, which a
       // piece split off by the channel may lack.
-      const plug = PLUG * age * oxLen[k];
+      const plug = PLUG * age * oxLen[k], len = pieceLength(oxPts, i0, i1);
       const [from, to] = [plug - oxAlong[k], oxLen[k] - plug - oxAlong[k]];
-      const level = hw > 0 ? (hw / (0.5 * wm)) ** 2 : 0;
-      // The water covers the inner half of the fringe, which is stroked at
-      // twice its width, so the outline lies half a fringe inside `hw`.
-      const inset = hw > 0 ? Math.max(0, 1 - 0.5 * reeds / hw) : 0;
+      const end = REED_END * (outer - open) * 0.5 * wm;
+      const [wFrom, wTo] = [from > 0 ? from + end : from, to < len ? to - end : to];
+      // The head of a delta on this piece, by the arc length of the nearest
+      // point within a width of the old channel of its centreline.
+      let mouth = null;
+      for (const [mx, my] of mouths) {
+        let [best, at] = [wm * wm, -1];
+        for (let i = i0; i < i1; i++) {
+          const d2 = (oxPts[2 * i] - mx) ** 2 + (oxPts[2 * i + 1] - my) ** 2;
+          if (d2 < best) [best, at] = [d2, i];
+        }
+        if (at >= 0) mouth = { x: mx, y: my, at: pieceLength(oxPts, i0, at + 1) };
+      }
       // The silt and the channel change without reshaping the oxbow.
       let silt = 0;
-      for (let i = oxOff[k]; i < oxOff[k + 1]; i++) silt += oxSilt[i];
-      const { dry, key } = alongside(oxPts, oxWidth, oxOff[k], oxOff[k + 1], line, widths, channel, w);
-      const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief} ${key}`;
+      for (let i = i0; i < i1; i++) silt += oxSilt[i];
+      const { dry, key } = alongside(oxPts, oxWidth, i0, i1, line, widths, channel, w);
+      const delta = mouth ? Math.round(mouth.at / (0.1 * w)) : '';
+      const inputs = `${shape} ${Math.round(age / LAKE_STEP)} ${silt} ${w} ${local.oxbowShrink} ${local.oxbowRelief} ${key} ${delta}`;
       if (lake.inputs !== inputs) {
         lake.inputs = inputs;
-        const d = lakeData(oxPts, oxHeight, oxSilt, oxWidth, oxOff[k], oxOff[k + 1], from, to,
-          0.5 * w * inset, level, local.oxbowRelief, age, dry);
-        set(lake, 'd', d);
-        set(reed, 'd', d);
+        const bed = lakeBed(oxPts, oxHeight, oxSilt, oxWidth, i0, i1, level, local.oxbowRelief, dry, w);
+        const half = 0.5 * w;
+        // Open water over arc lengths [u, v], keeping the water's own ends.
+        const [a, b] = [Math.max(0, wFrom), Math.min(len, wTo)];
+        const section = (u, v, opts = {}) => (Math.min(b, v) > Math.max(a, u)
+          ? lakeData(bed, u <= a ? wFrom : u, v >= b ? wTo : v, half, age, { below, ...opts }) : '');
+        set(lake.reed, 'd', lakeData(bed, from, to, half, age));
+        set(lake.water, 'd', section(a, b));
+        DEPTH_BANDS.forEach((band, m) => set(lake.deep[m], 'd',
+          section(a, b, { below: below + band, skew: DEEP_SKEW, room: band })));
+        // A plume fades along the lake from each end of its water.
+        const reach = PLUME_LENGTH * w;
+        [[a, 1], [b, -1]].forEach(([at, dir], m) => {
+          set(lake.plumes[m], 'd', dir > 0 ? section(a, a + reach) : section(b - reach, b));
+          if (!bed) return;
+          const [p, q] = [bedAt(bed, at), bedAt(bed, at + dir * reach)];
+          for (const [name, v] of [['x1', p.x], ['y1', p.y], ['x2', q.x], ['y2', q.y]]) set(lake.grads[m], name, dp1(v));
+        });
+        const r = DELTA_PLUME * w;
+        set(lake.plumes[2], 'd', mouth ? section(mouth.at - r, mouth.at + r) : '');
+        if (mouth) for (const [name, v] of [['cx', mouth.x], ['cy', mouth.y], ['r', r]]) set(lake.grads[2], name, dp1(v));
+        set(lake.lilies, 'd', lilyData(bed, wFrom, wTo, half, below, age, oxAlong[k], oxLen[k], w));
+        set(lake.weed, 'd', weedData(bed, wFrom, wTo, half, below, age, oxAlong[k], oxLen[k], w));
       }
       const opacity = clamp01(5 * (1 - age)).toFixed(2);
-      const clear = mixRgb(WATER, CLEAR, smoothstep(age / CLEARING));
-      set(lake, 'fill', mix(clear, MURKY, smoothstep(1.5 * (age - CLEARING) / (1 - CLEARING))));
-      set(lake, 'opacity', opacity);
-      set(reed, 'opacity', opacity);
-      set(reed, 'stroke-width', (2 * reeds).toFixed(2));
+      const clearing = smoothstep(age / CLEARING);
+      const murk = smoothstep(1.5 * (age - CLEARING) / (1 - CLEARING));
+      const clear = mixRgb(mixRgb(WATER, CLEAR, clearing), SHALLOWS, SHALLOW_TINT * clearing);
+      set(lake.water, 'fill', mix(clear, MURKY, murk));
+      for (const e of lake.paths) set(e, 'opacity', opacity);
+      // The deep water shows once the silt settles, and hides again as the
+      // lake turns murky. The plumes show against the clearer water.
+      const deep = (DEEP_OPACITY * clearing * (1 - DEEP_MURK * murk)).toFixed(2);
+      for (const e of lake.deep) set(e, 'fill-opacity', deep);
+      const plume = (plumes * clearing).toFixed(2);
+      for (const e of lake.plumes) set(e, 'fill-opacity', plume);
     }
 
     this.drawStreams(tribs, courses, w);
@@ -2262,10 +2522,10 @@ class SvgRenderer {
   // leaves it, and when it moves on its fan, so a stream is redrawn only
   // then.
   drawStreams(tribs, courses, w) {
-    const n = tribs.length / 8;
+    const n = tribs.length / 9;
     resize(this.streams, n, this.streamLayer);
     for (let k = 0; k < n; k++) {
-      const [side, mx, my, start, len, version, scale, depth] = tribs.subarray(8 * k, 8 * k + 8);
+      const [side, mx, my, start, len, version, scale, depth] = tribs.subarray(9 * k, 9 * k + 8);
       const path = this.streams[k];
       const key = `${version} ${w}`;
       if (path.key === key) continue;

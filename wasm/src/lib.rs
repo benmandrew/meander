@@ -376,16 +376,16 @@ impl River {
         out
     }
 
-    /// The tributaries, eight values each: the wall they come down (0 the
+    /// The tributaries, nine values each: the wall they come down (0 the
     /// low-y wall, 1 the high-y wall), the fan's apex at the combe mouth,
     /// the start and number of their course's points in
     /// `tributary_courses`, a count that changes with the course, the share
-    /// of the largest tributary's flow they carry, and their combe's depth
-    /// into the wall, in world units.
+    /// of the largest tributary's flow they carry, their combe's depth
+    /// into the wall, in world units, and 1 if they end in a lake.
     pub fn tributaries(&self) -> Vec<f32> {
         let sim = &self.sim;
         let w = sim.params.width;
-        let (mut out, mut start) = (Vec::with_capacity(8 * sim.tributaries.len()), 0);
+        let (mut out, mut start) = (Vec::with_capacity(9 * sim.tributaries.len()), 0);
         for t in &sim.tributaries {
             let len = t.course.len();
             out.extend(
@@ -398,6 +398,7 @@ impl River {
                     t.version as f64,
                     t.scale,
                     t.scale * FAN_MAX_DEPTH * w,
+                    t.lake as u8 as f64,
                 ]
                 .map(|v| v as f32),
             );

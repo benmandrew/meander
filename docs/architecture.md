@@ -59,7 +59,7 @@ A replay restarts the river, runs it to a tick and pauses. The Link's `view=W` i
 
 ### Channel and lakes
 
-The channel is a filled outline at the local width. Only points within `CHANNEL_MARGIN` of the window are drawn, though curvature and widths span the whole river. Pools, riffles and mid-channel bars come from the smoothed curvature and width; the riffles and the bars change slowly, so each redraws one draw in three. Every reed fringe lies under the water of all lakes, so lakes that meet read as one.
+The channel is a filled outline at the local width. Only points within `CHANNEL_MARGIN` of the window are drawn, though curvature and widths span the whole river. Pools, riffles and mid-channel bars come from the smoothed curvature and width; the riffles and the bars change slowly, so each redraws one draw in three. A lake is drawn on its bed, a parabola across the old channel (`lakeBed`). Reeds fill the water shallower than the open water's edge, so they reach furthest over a gently sloping bed and grow out over each plug. Every lake's reeds lie under the water of all lakes, so lakes that meet read as one. Over the water lie two deeper bands, set towards the old outer bank by the bend's curvature; silt plumes that fade along the lake from each end, and around the head of a delta, stronger as clearance raises the supply; water lilies on the shallows from about 750 years after the cutoff; and duckweed mats late in the fill. Lilies and duckweed are seeded by their place along the whole oxbow, as the scar's tufts are. `tributaries` marks a stream that ends in a lake, for its delta's plume.
 
 ### Floodplain
 
