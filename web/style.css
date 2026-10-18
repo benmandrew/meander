@@ -49,7 +49,7 @@ html, body {
   color: var(--panel-fg);
 }
 
-#bars, #ground, #fields, #upper, #view {
+#bars, #band, #ground, #fields, #lower, #swept, #upper, #view {
   position: fixed;
   inset: 0;
   width: 100%;
@@ -58,10 +58,11 @@ html, body {
 }
 
 /* Each its own compositing layer, so redrawing the channel does not repaint
-   them, and the frequent changes to the ground do not repaint the bulky old
-   point bars beneath it. The masked fields have a layer of their own, since
-   Safari renders a mask again on every repaint of its layer. */
-#bars, #ground, #fields, #upper {
+   them. Safari paints SVG on the page's thread and repaints whatever lies
+   under a change in its layer, so the growing bar band and the swept
+   ground, which change several times a second, lie in small layers of their
+   own, apart from the forest, fields and crowns. */
+#bars, #band, #ground, #fields, #lower, #swept, #upper {
   will-change: transform;
 }
 

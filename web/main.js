@@ -1923,10 +1923,10 @@ function resize(list, n, parent) {
 }
 
 class SvgRenderer {
-  constructor(bars, [ground, fields, upper], svg) {
-    this.layers = [bars, ground, fields, upper, svg];
+  constructor(bars, [band, ground, fields, lower, swept, upper], svg) {
     this.bars = bars;
-    this.grounds = [ground, fields, upper];
+    this.grounds = [band, ground, fields, lower, swept, upper];
+    this.layers = [bars, ...this.grounds, svg];
     this.svg = svg;
     for (const s of this.layers) s.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     const round = { fill: 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' };
@@ -1942,10 +1942,10 @@ class SvgRenderer {
     // band over it and bands never build up. Old bands fade towards the
     // background colour and turn transparent, so the soil shows through
     // again as it forms on the old bar. Bands that have stopped growing lie
-    // in the bottom layer; the growing band lies in the ground layer, so
-    // keeping a centreline does not repaint the old ones.
+    // in the bottom layer; the growing band lies in a layer of its own, so
+    // keeping a centreline repaints neither the old ones nor the forest.
     this.oldBars = el('g', line, bars);
-    this.barLayer = el('g', line, ground);
+    this.barLayer = el('g', line, band);
     // Coarse ground lies over the bars and under the vegetation that grows
     // over it. Its pebbles are sized for the channel width at each reset.
     this.pebbles = el('pattern', { id: 'pebbles', patternUnits: 'userSpaceOnUse' }, el('defs', {}, ground));
@@ -1981,8 +1981,9 @@ class SvgRenderer {
     // whole plane with each wood a hole in it.
     this.scarpClip = el('path', { 'clip-rule': 'evenodd', d: OUTSIDE }, el('clipPath', { id: 'unwooded' }, defs));
     this.fieldLayer = el('g', { 'clip-path': 'url(#unwooded)' }, fields);
-    // The rest of the floodplain lies over the fields.
-    ground = upper;
+    // The rest of the floodplain lies over the fields, the swept ground in
+    // a layer of its own between what lies under it and the rest.
+    ground = lower;
     // The fields the fade does not reach, and the first copy of those it
     // reaches throughout, then the copies in each region.
     this.parcels = el('g', {}, this.fieldLayer);
@@ -2042,7 +2043,8 @@ class SvgRenderer {
     // until the next redraw. It lies under the farmsteads, which are
     // redrawn whenever the water takes a building, and under the crowns, so
     // a crown on newly swept ground stands until the next forest redraw.
-    this.sweptLayer = el('g', line, ground);
+    this.sweptLayer = el('g', line, swept);
+    ground = upper;
     // Natural levees: nested translucent silt regions, higher ground inside,
     // over the ground and under the farmsteads and trees, so the silt tints
     // the fields and swept sand but not the roofs and crowns.
@@ -2229,6 +2231,10 @@ class SvgRenderer {
     this.fieldsAt = null;
     this.fieldsStale = false;
     this.fieldJob = null;
+    // The fade's regions and the woods' clip waiting for the next field
+    // redraw to put them on the page.
+    this.fadeNext = null;
+    this.unwoodedNext = null;
     this.cropMask = null;
     this.churchyardsAt = null;
     this.meadow = new Map();
@@ -2270,8 +2276,11 @@ class SvgRenderer {
     const risk = new Float32Array(buf, river.land_risk_ptr(), cols * rows).slice();
     const hold = new Float32Array(buf, river.holdings_ptr(), 6 * river.holding_slots()).slice();
     // The forest's age grid, as its last redraw drew the fade's regions,
-    // which a redraw finishing during this one would change.
+    // which a redraw finishing during this one would change. The regions and
+    // the woods' clip go on the page with the fields drawn for them, so
+    // `#fields` repaints once for both.
     const age = this.treeBlur?.slice();
+    const [fade, unwooded] = [this.fadeNext, this.unwoodedNext];
     const w = river.get_param('width');
     const [c0, c1] = this.windowColumns(cols, cell);
     const W = c1 - c0;
@@ -2496,6 +2505,10 @@ class SvgRenderer {
     for (const path of this.hedges) set(path, 'stroke-width', dp1(HEDGE_WIDTH * w));
     swap(this.furrows, furrows);
     for (const path of this.furrows) set(path, 'stroke-width', dp1(FURROW_WIDTH * w));
+    if (fade) swap(this.fadeRegions, fade);
+    if (unwooded) set(this.scarpClip, 'd', unwooded);
+    if (this.fadeNext === fade) this.fadeNext = null;
+    if (this.unwoodedNext === unwooded) this.unwoodedNext = null;
     // The fields redraw after each forest redraw, mostly over the same
     // cells, and the crowns go stale only when those change.
     const crop = this.cropMask;
@@ -2524,7 +2537,7 @@ class SvgRenderer {
       this.uplandLayer.replaceChildren();
       this.scarpLayer.replaceChildren();
       this.wallLines = null;
-      set(this.scarpClip, 'd', OUTSIDE);
+      this.unwoodedNext = OUTSIDE;
       this.fieldsStale = true;
       return;
     }
@@ -2657,7 +2670,7 @@ class SvgRenderer {
     this.uplandLayer.replaceChildren();
     this.scarpLayer.replaceChildren();
     for (const [layer, attrs] of paths) el('path', attrs, layer);
-    set(this.scarpClip, 'd', clipData);
+    this.unwoodedNext = clipData;
     this.wallLines = { x0, step, n, h, w, sides };
     // Which fields the fade reaches changes with the woods they keep out of.
     this.fieldsStale = true;
@@ -3791,7 +3804,7 @@ class SvgRenderer {
     const trees = yield* this.treeStages(blur, ...treeArgs);
     yield;
     swap(this.forest, forestData);
-    swap(this.fadeRegions, farmData);
+    this.fadeNext = farmData;
     this.setTrees(trees);
     // A crown redraw under way reads `treeBlur`, which changes here.
     this.treeJob = null;
@@ -4167,7 +4180,7 @@ class SvgRenderer {
 }
 
 const svg = document.getElementById('view');
-const grounds = ['ground', 'fields', 'upper'].map((id) => document.getElementById(id));
+const grounds = ['band', 'ground', 'fields', 'lower', 'swept', 'upper'].map((id) => document.getElementById(id));
 const renderer = new SvgRenderer(document.getElementById('bars'), grounds, svg);
 document.getElementById('save').addEventListener('click', () => renderer.save());
 
