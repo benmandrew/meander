@@ -45,7 +45,7 @@ def main():
     handler = functools.partial(Quiet, directory=web)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    url = f"http://127.0.0.1:{server.server_address[1]}/?warmup={WARMUP}"
+    url = f"http://127.0.0.1:{server.server_address[1]}/?warmup={WARMUP}&seed=1"
 
     errors = []
     with sync_playwright() as p:

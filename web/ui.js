@@ -349,8 +349,9 @@ export async function startApp({ view, renderer, display }) {
   };
   $('step').addEventListener('click', step);
   $('reset').addEventListener('click', () => reset());
+  const reseed = () => { $('seed').value = Math.floor(Math.random() * 1e6); };
   $('reseed').addEventListener('click', () => {
-    $('seed').value = Math.floor(Math.random() * 1e6);
+    reseed();
     reset();
   });
   $('seed').addEventListener('change', () => reset());
@@ -395,10 +396,11 @@ export async function startApp({ view, renderer, display }) {
   buildControls();
   // ?warmup=T overrides the warm-up. ?seed=S&tick=N&view=W, from the Link
   // button, replays seed S to tick N in a view W world units wide, which
-  // later resets keep.
+  // later resets keep. Without ?seed the river starts from a random seed.
   const params = new URLSearchParams(location.search);
   if (params.has('warmup')) local.warmup = Number(params.get('warmup'));
   if (params.has('seed')) $('seed').value = Number(params.get('seed')) >>> 0;
+  else reseed();
   if (params.has('view')) local.view = Number(params.get('view'));
   const target = Math.round(Number(params.get('tick') ?? NaN));
   reset(Number.isFinite(target) && target >= 0 ? target : undefined);

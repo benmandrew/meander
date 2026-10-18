@@ -1,6 +1,8 @@
 //! Run the simulation natively, print statistics, and write SVG snapshots.
 //!
 //! cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]
+//!
+//! Without `seed` the run draws one from the clock and prints it.
 
 use meander_core::geom::curvature;
 use meander_core::{Params, Sim};
@@ -165,7 +167,14 @@ fn main() {
         .expect("usage: snapshot <out_dir> [steps] [every] [seed]");
     let steps: usize = args.get(2).map_or(20000, |s| s.parse().unwrap());
     let every: usize = args.get(3).map_or(2000, |s| s.parse().unwrap());
-    let seed: u64 = args.get(4).map_or(1, |s| s.parse().unwrap());
+    let seed: u64 = args.get(4).map_or_else(
+        || {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH);
+            now.map_or(1, |d| (d.as_micros() % 1_000_000) as u64)
+        },
+        |s| s.parse().unwrap(),
+    );
+    println!("seed {seed}");
     std::fs::create_dir_all(out).unwrap();
 
     // Parameter overrides from the environment, e.g. ALPHA=0.8, for tuning.

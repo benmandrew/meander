@@ -18,14 +18,14 @@ CI (`.github/workflows/ci.yml`) runs fmt, clippy and `make test`'s tests in the 
 
 - `make build`: build the WASM package into `web/pkg`, and `web/favicon.ico` from `web/favicon.svg`.
 - `make serve`: build, then serve `web/` at http://localhost:8000 through `serve.py`, which turns caching off (`Cache-Control: no-store`). This is for development only; a deployment must set its own caching headers.
-- `make smoke`: build, then load the page in headless Chrome (`test/smoke.py`, through Playwright) for 20 units of warm-up and 8 s of running. It fails on any page or console error, or if the channel in `#view` stops being redrawn. It drives the installed Google Chrome; set `PLAYWRIGHT_BROWSERS_PATH` to use Playwright's own Chromium instead.
+- `make smoke`: build, then load the page in headless Chrome (`test/smoke.py`, through Playwright) on seed 1 for 20 units of warm-up and 8 s of running. It fails on any page or console error, or if the channel in `#view` stops being redrawn. It drives the installed Google Chrome; set `PLAYWRIGHT_BROWSERS_PATH` to use Playwright's own Chromium instead.
 - `make test`: `cargo test --release -p meander-core`. Tests run long simulations, hence `--release`.
 - `make fuzz`: run the river as the page does for `RUNS` (32) random seeds and window widths, `YEARS` (2,500) each after the warm-up, checking `Sim::check` after every step: a centreline inside the domain that does not cross itself, local widths in bounds, whole oxbows, and no building across a stream. Each failure prints its seed, step and a replay link for `make serve`. `BASE=N` repeats a sweep; the default draws from the clock and is printed. 16 runs take about 20 s on 8 cores.
 
 ## URL parameters
 
-`?warmup=T` overrides the warm-up in simulated time. `?seed=S&tick=N&view=W` (the panel's Link button) replays to step N and pauses. `<html data-idle>` marks when drawing has finished, for screenshots.
+`?warmup=T` overrides the warm-up in simulated time. The page starts from a random seed; `?seed=S` sets it. `?seed=S&tick=N&view=W` (the panel's Link button) replays to step N and pauses. `<html data-idle>` marks when drawing has finished, for screenshots.
 
 ## Snapshots
 
-`cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]` writes snapshots for tuning and prints step-time percentiles. Override any parameter with its upper-case name as an env var (`ALPHA=0.8`); the example reads the names from `Params::NAMES`. `UP` and `DOWN` set the hidden reach lengths in widths.
+`cargo run --release -p meander-core --example snapshot -- <out_dir> [steps] [every] [seed]` writes snapshots for tuning and prints step-time percentiles. Without `seed` it draws one from the clock and prints it on the first line. Override any parameter with its upper-case name as an env var (`ALPHA=0.8`); the example reads the names from `Params::NAMES`. `UP` and `DOWN` set the hidden reach lengths in widths.
