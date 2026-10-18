@@ -608,6 +608,15 @@ impl River {
     pub fn soil(&self, x: f64, y: f64) -> f64 {
         self.sim.erodibility.noise_at([x, y])
     }
+    /// The noise `soil` reads, on the field grid. It is fixed at reset.
+    pub fn soil_ptr(&self) -> *const f32 {
+        self.sim.erodibility.noise.as_ptr()
+    }
+
+    /// The names `get_param` and `set_param` accept.
+    pub fn param_names() -> Vec<String> {
+        Params::NAMES.iter().map(|s| s.to_string()).collect()
+    }
 
     pub fn view_x(&self) -> f64 {
         self.view_x

@@ -2295,8 +2295,8 @@ class SvgRenderer {
 
   draw(river, memory, { local }) {
     const w = river.get_param('width');
-    // The floodplain layers sync their own data, which can grow memory, so
-    // they go before the views below are built.
+    // The floodplain layers sync their own data, which on a `River` can
+    // grow memory, so they go before the views below are built.
     const layers = [
       [this.oldBars, local.showBars], [this.barLayer, local.showBars], [this.sweptLayer, local.showBars],
       [this.leveeLayer, local.showLevees],
@@ -2313,7 +2313,8 @@ class SvgRenderer {
     const fords = this.fordsAt === river.ford_version() ? null : river.fords();
 
     river.sync();
-    // Views must be rebuilt after every step: memory growth detaches them.
+    // Views must be rebuilt after every step: each snapshot brings a new
+    // buffer, as memory growth would.
     const buf = memory.buffer;
     const n = river.oxbow_count();
     const line = new Float32Array(buf, river.line_ptr(), river.line_len());
@@ -3296,10 +3297,8 @@ class SvgRenderer {
   }
 
   // Record the centreline without drawing, during warm-up.
-  capture(river, memory, { local }) {
-    river.sync_line();
-    const line = new Float32Array(memory.buffer, river.line_ptr(), river.line_len());
-    this.record(line, river.time(), river.get_param('width'), local);
+  capture(river, line, t, { local }) {
+    this.record(line, t, river.get_param('width'), local);
   }
 
   // Keep the visible part of the centreline as point-bar sand once it has

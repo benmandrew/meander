@@ -1,7 +1,8 @@
-// Shared page logic: WASM start-up, the control panel, and the animation
-// loop. Each page supplies a renderer and its own display settings.
+// Shared page logic: the worker that steps the river, the control panel,
+// and the animation loop. Each page supplies a renderer and its own display
+// settings.
 
-import init, { River } from './pkg/meander_wasm.js';
+import { RiverView } from './snapshot.js';
 
 // The visible window's height is fixed in world units; its width follows
 // the view's aspect ratio at each reset, unless a replay link fixes it.
@@ -33,11 +34,16 @@ const YEARS_PER_UNIT = 2.5;
 // the set speed instead of drawing the floodplain centuries late.
 const MAX_LAG = 10;
 
-// The river steps for at most `STEP_BUDGET` ms a frame, and simulated time
-// the budget cannot cover is dropped, so a machine too slow for the set
-// speed runs the river slower in even frames. Without it each long frame
-// owes more steps to the next.
+// The worker steps the river (see `worker.js`) while the page draws, one
+// request a frame. A request may take `STEP_SHARE` of the last frame's
+// interval, but at least `STEP_BUDGET` ms, so the worker is kept busy and
+// its reply still comes before the next frame. Simulated time the budget
+// cannot cover is dropped, so a machine too slow for the set speed runs the
+// river slower instead of owing more steps to each request. The warm-up and
+// a replay step in requests of `WARM_BUDGET` ms.
+const STEP_SHARE = 0.8;
 const STEP_BUDGET = 8;
+const WARM_BUDGET = 12;
 
 // The panel shows the JS time of the last `FRAME_WINDOW` frames, about 10 s,
 // refreshed every `STATS_EVERY` ms.
@@ -45,27 +51,51 @@ const FRAME_WINDOW = 600;
 const STATS_EVERY = 250;
 
 // `renderer` provides draw(river, memory, state), reset(river, bounds, seed),
-// capture(river, memory, state), which is called during warm-up in place of
-// drawing, idle(river, memory, state), which is called on frames that draw
-// nothing, to carry on with drawing work spread over frames, and returns
-// whether it did any, and
+// capture(river, line, t, state), which is called with the centreline at
+// time t during warm-up in place of drawing, idle(river, memory, state),
+// which is called on frames that draw nothing, to carry on with drawing
+// work spread over frames, and returns whether it did any, and
 // settle(river, memory, state), which finishes that work at once when the
 // river stops, before a last draw, and behind(river), the simulated time
-// that work has waited.
+// that work has waited. `river` is a `RiverView` of the worker's last reply,
+// and `memory` its buffers.
 // `display` holds the renderer's own settings.
 export async function startApp({ view, renderer, display }) {
-  // The overlay reads "Loading…" from the page itself until the warm-up
-  // takes it over.
-  let wasm;
-  try {
-    wasm = await init();
-  } catch (e) {
-    document.getElementById('overlay').textContent = 'Could not load the simulation.';
-    throw e;
-  }
   const local = { ...SETTINGS, ...display };
   const state = { bounds: [1, 1], local };
-  const river = new River();
+  const river = new RiverView();
+  // The overlay reads "Loading…" from the page itself until the warm-up
+  // takes it over.
+  const failed = (e) => {
+    document.getElementById('overlay').hidden = false;
+    document.getElementById('overlay').textContent = 'Could not load the simulation.';
+    console.error(e);
+  };
+  const worker = new Worker(new URL('./worker.js', import.meta.url), { type: 'module' });
+  worker.onerror = (e) => failed(e.message);
+  // Handlers of the requests under way, by id. A reset drops them, so the
+  // replies to requests made before it are ignored.
+  const pending = new Map();
+  let nextId = 0;
+  function request(msg, handle) {
+    const id = ++nextId;
+    pending.set(id, handle);
+    worker.postMessage({ id, ...msg });
+  }
+  worker.onmessage = ({ data }) => {
+    const handle = pending.get(data.id);
+    if (!handle) return;
+    pending.delete(data.id);
+    if (data.error) return failed(data.error);
+    river.update(data.snap);
+    handle(data);
+    wake();
+  };
+  // Whether the river has come back from its last reset, and its time step.
+  let ready = false;
+  let dt = 0;
+  // Simulated time the stepping request under way asked for, if any.
+  let asked = null;
   let running = true;
   // JS time of recent frames, in ms, as a ring.
   const frameTimes = new Float64Array(FRAME_WINDOW);
@@ -98,7 +128,7 @@ export async function startApp({ view, renderer, display }) {
   }
 
   // Steps from the reset to the end of the warm-up, shown as year 0.
-  const epoch = () => Math.round(local.warmup / river.get_param('dt'));
+  const epoch = () => Math.round(local.warmup / dt);
 
   // Restart the river, and run the warm-up, or replay to step `target` and
   // pause there.
@@ -106,15 +136,35 @@ export async function startApp({ view, renderer, display }) {
     const r = view.getBoundingClientRect();
     state.bounds = [local.view ?? WORLD_H * r.width / r.height, WORLD_H];
     const seed = Number($('seed').value) >>> 0;
-    river.reset(...state.bounds, seed, local.noise, 0);
-    owed = 0;
+    pending.clear();
+    [ready, asked, owed, warming] = [false, null, 0, 0];
     replaying = target !== undefined;
-    warming = warmTotal = replaying ? target : epoch();
     dirty = true;
-    $('overlay').hidden = warming <= 0;
-    if (replaying && warming <= 0) pause();
-    renderer.reset(river, state.bounds, seed);
+    request({ reset: { bounds: state.bounds, seed, noise: local.noise } }, () => {
+      ready = true;
+      dt = river.get_param('dt');
+      renderer.reset(river, state.bounds, seed);
+      warming = warmTotal = replaying ? target : epoch();
+      $('overlay').hidden = warming <= 0;
+      if (replaying && warming <= 0) pause();
+      warm();
+    });
     wake();
+  }
+
+  // Run the rest of the warm-up or replay, recording the centreline every
+  // `CAPTURE_STEPS` steps from the reset.
+  function warm() {
+    if (warming <= 0) return;
+    request({ steps: warming, budget: WARM_BUDGET, capture: CAPTURE_STEPS }, ({ stepped, captures }) => {
+      for (const { t, line } of captures) renderer.capture(river, line, t, state);
+      warming -= stepped;
+      if (warming <= 0 && replaying) pause();
+      $('overlay').hidden = warming <= 0;
+      const done = Math.round(100 * (1 - warming / warmTotal));
+      $('overlay').textContent = replaying ? `Replaying to tick ${warmTotal}… ${done}%` : `Developing river… ${done}%`;
+      warm();
+    });
   }
 
   function buildControls() {
@@ -163,21 +213,9 @@ export async function startApp({ view, renderer, display }) {
     // not return to a huge backlog.
     const elapsed = Math.min(0.1, (now - (lastFrame ?? now)) / 1000);
     lastFrame = now;
-    if (warming > 0) {
-      const t0 = performance.now();
-      const dt = river.get_param('dt');
-      while (warming > 0 && performance.now() - t0 < 12) {
-        const n = Math.min(warming, CAPTURE_STEPS);
-        river.advance(n * dt);
-        warming -= n;
-        renderer.capture(river, wasm.memory, state);
-      }
-      if (warming <= 0 && replaying) pause();
-      $('overlay').hidden = warming <= 0;
-      const done = Math.round(100 * (1 - warming / warmTotal));
-      $('overlay').textContent = replaying ? `Replaying to tick ${warmTotal}… ${done}%` : `Developing river… ${done}%`;
-      return true;
-    }
+    // The worker's replies drive the warm-up; the loop runs on so the page
+    // is not marked idle.
+    if (!ready || warming > 0) return true;
     const t0 = performance.now();
     const busy = update(elapsed);
     frameTimes[frames++ % FRAME_WINDOW] = performance.now() - t0;
@@ -191,23 +229,27 @@ export async function startApp({ view, renderer, display }) {
   // Step the river and draw it, after the warm-up. Returns whether the loop
   // must run another frame.
   function update(elapsed) {
-    const dt = river.get_param('dt');
     // A held frame is not owed later, so the river does not lurch on.
     if (running && renderer.behind(river) <= MAX_LAG) {
       owed += local.speed * elapsed;
-      const t0 = performance.now();
-      while (owed >= dt && performance.now() - t0 < STEP_BUDGET) {
-        owed -= dt * river.advance(dt);
-        dirty = true;
+      const steps = Math.floor(owed / dt);
+      if (asked === null && steps > 0) {
+        asked = steps * dt;
+        const budget = Math.max(STEP_BUDGET, STEP_SHARE * 1000 * elapsed);
+        request({ steps, budget }, ({ stepped }) => {
+          asked = null;
+          owed -= stepped * dt;
+          if (stepped < steps) owed = Math.min(owed, dt);
+          if (stepped > 0) dirty = true;
+        });
       }
-      owed = Math.min(owed, dt);
     }
     // One long frame while the river stands still does not show as stutter,
     // and the last changes then land together instead of over a second.
     // The draw that follows brings the rest of the view up to date.
     if (settle) {
       settle = false;
-      renderer.settle(river, wasm.memory, state);
+      renderer.settle(river, river.memory, state);
       dirty = true;
     }
     // Draw only when something has changed, so a paused or slow river costs
@@ -216,7 +258,7 @@ export async function startApp({ view, renderer, display }) {
     const drew = dirty;
     if (dirty) {
       dirty = false;
-      renderer.draw(river, wasm.memory, state);
+      renderer.draw(river, river.memory, state);
       const years = (river.steps() - epoch()) * dt * YEARS_PER_UNIT;
       const year = `Year ${Math.round(years).toLocaleString('en-GB')}`;
       if ($('year').textContent !== year) $('year').textContent = year;
@@ -226,9 +268,10 @@ export async function startApp({ view, renderer, display }) {
       if ($('tick').value !== tick && document.activeElement !== $('tick')) $('tick').value = tick;
     }
     // A running channel trails the river by a step, so it moves on every
-    // frame; a stopped one shows the river as it stands.
-    const moved = renderer.tween(river, running ? river.time() + owed - dt : Infinity);
-    return drew || renderer.idle(river, wasm.memory, state) || moved || running;
+    // frame; a stopped one shows the river as it stands. Time the worker is
+    // stepping is not yet in the river's.
+    const moved = renderer.tween(river, running ? river.time() + owed - (asked ?? 0) - dt : Infinity);
+    return drew || renderer.idle(river, river.memory, state) || moved || running;
   }
 
   // The mean, 95th and 99th percentile of the recent frame times.
@@ -251,7 +294,7 @@ export async function startApp({ view, renderer, display }) {
     running = !running;
     // The stopped channel shows the river as it stands, so a full step
     // owed starts the trailing channel from there.
-    if (running) owed = river.get_param('dt');
+    if (running) owed = dt;
     settle = !running;
     $('play').textContent = running ? 'Pause' : 'Play';
     wake();
@@ -260,10 +303,11 @@ export async function startApp({ view, renderer, display }) {
   $('play').addEventListener('click', togglePlay);
   // Advance one second's worth of simulated time.
   const step = () => {
-    river.advance(local.speed);
-    dirty = true;
-    settle = !running;
-    wake();
+    if (!ready || warming > 0) return;
+    request({ steps: Math.round(local.speed / dt) }, () => {
+      dirty = true;
+      settle = !running;
+    });
   };
   $('step').addEventListener('click', step);
   $('reset').addEventListener('click', () => reset());
@@ -280,6 +324,7 @@ export async function startApp({ view, renderer, display }) {
   // the clipboard. The view's width is written in full, since a river in a
   // window of a slightly different width soon diverges.
   $('link').addEventListener('click', () => {
+    if (!ready) return;
     const url = new URL(location.href);
     url.searchParams.set('seed', String(Number($('seed').value) >>> 0));
     url.searchParams.set('tick', String(river.steps()));

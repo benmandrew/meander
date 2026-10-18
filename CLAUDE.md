@@ -24,7 +24,7 @@ A new parameter touches the `Params` field and its `Default`, `Params::NAMES`, a
 - Keep step time even: spread periodic grid work across steps in bands of rows, and carry searches across steps within a per-step `BUDGET`. Check with the snapshot percentiles.
 - No `hypot`, `ln` or `cos` on the hot path. They are software routines in WASM and made a step 3.6× slower than native. Reuse `Sim`'s scratch buffers; do not allocate per step.
 - Use the PRNG in `rng.rs`; do not add `rand` or `getrandom`. New stochastic processes draw from the `events` stream.
-- JS must call `sync()` after stepping and rebuild every typed-array view, because WASM memory growth detaches old views.
+- The river runs in `web/worker.js`; the renderer reads a `RiverView` (`web/snapshot.js`) of the last snapshot. A new accessor the renderer reads needs an entry there. Build typed-array views on `memory.buffer` at each use, since each snapshot brings a new buffer.
 - Run `make test` after any change to the dynamics. The validation tests in `src/lib.rs` pin the model's behaviour.
 - SVG only. A WebGL view (commit e6cd034) and a raster floodplain map were both rejected; ask before reintroducing either. Keep floodplain detail as vector shapes.
 - Commits use conventional prefixes, e.g. `feat: stochastic flood-driven cutoffs`.
