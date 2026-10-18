@@ -876,10 +876,11 @@ const LEVEE_HEIGHT: f64 = 0.25;
 /// Default coarse ground; see [`Params`]. Gravel and colluvium erode
 /// at 0.4 of the floodplain's rate.
 const COARSE_FACTOR: f64 = 0.4;
-/// Default upland clearance; see [`Params`]. It begins 100 units, 250
-/// years, after the default warm-up of 500, and the supply triples over
-/// the 1,000 years that follow, as the post-medieval alluvium of English
-/// valleys shows sediment yields rising severalfold after clearance.
+/// Default upland clearance; see [`Params`]. It begins at 600 units,
+/// 1,500 years, 500 years before the default warm-up of 800 ends, and the
+/// supply triples over the 1,000 years that follow, as the post-medieval
+/// alluvium of English valleys shows sediment yields rising severalfold
+/// after clearance.
 const CLEARANCE_START: f64 = 600.0;
 const CLEARANCE_TIME: f64 = 400.0;
 const CLEARANCE_SUPPLY: f64 = 3.0;

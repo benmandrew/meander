@@ -2,7 +2,7 @@
 
 A live browser simulation of a meandering river: a Rust core (`src/`, no dependencies) compiled to WASM (`wasm/`) and drawn as SVG by plain ES modules in `web/`. The panel shows only a speed slider; the simulation runs on its `Params` defaults.
 
-Describe every change, in comments and prose, in years. One unit of simulated time is 2.5 years (`YEARS_PER_UNIT` in `ui.js`), the warm-up is about 1,250 years, and forest takes about 3,400 years to mature.
+Describe every change, in comments and prose, in years. One unit of simulated time is 2.5 years (`YEARS_PER_UNIT` in `ui.js`), the warm-up is 2,000 years, and forest takes about 3,400 years to mature.
 
 Read `docs/architecture.md` before changing a process or a renderer layer, and keep it current. Read `docs/development.md` for the hooks, CI, URL parameters and the smoke test.
 

@@ -22,7 +22,7 @@ const CONTROLS = [
 
 // Page settings the panel does not show: the warm-up on reset, in
 // simulated time, and the initial noise, in channel widths.
-const SETTINGS = { warmup: 500, noise: 0.5 };
+const SETTINGS = { warmup: 800, noise: 0.5 };
 
 // Years per unit of simulated time. At this scale the median bank migrates
 // about 1% of a channel width per year and the fastest 10% of the channel

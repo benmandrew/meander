@@ -4,7 +4,7 @@
 //!
 //! cargo run --release -p meander-core --example fuzz -- [runs] [years] [base]
 //!
-//! `runs` defaults to 32 and `years`, after the page's warm-up of 1,250
+//! `runs` defaults to 32 and `years`, after the page's warm-up of 2,000
 //! years, to 2,500. `base` seeds the draws of seeds and widths, so a sweep
 //! repeats exactly; it defaults to the clock and is printed. Exits with 1
 //! if any run fails.
@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 // The page's settings, from `web/ui.js`.
 const YEARS_PER_UNIT: f64 = 2.5;
-const WARMUP: f64 = 500.0;
+const WARMUP: f64 = 800.0;
 const NOISE: f64 = 0.5;
 const VIEW_H: f64 = 480.0;
 // Window aspect ratios, from a phone held upright to an ultrawide screen.
