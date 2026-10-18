@@ -112,9 +112,21 @@ const LEVEE_LEVELS = [0.3, 0.7];
 // Simulated time between levee redraws.
 const LEVEE_REFRESH = 10;
 // Milliseconds a frame for floodplain redraws, and on a frame that draws
-// nothing else. Work beyond it carries on in the frames that follow.
+// nothing else. Work beyond it carries on in the frames that follow. As
+// the floodplain falls behind from half the lag `ui.js` allows to all of
+// it, a frame's budget rises to the idle frame's, so the river slows less.
+// While the floodplain only sets the river's speed, the budget stays put:
+// on a phone at 8× throttling the idle budget there cut the frames that
+// showed the river moving from 28 to 24 a second, for 17% more speed.
 const FLOODPLAIN_BUDGET = 4;
 const FLOODPLAIN_IDLE_BUDGET = 10;
+// Each layer's expected redraw time in real time is a running mean, which
+// keeps `REDRAW_MEMORY` of the mean before, and a redraw is expected to
+// take at least `REDRAW_SLACK` ms more. A redraw's time counts at most
+// `REDRAW_GAP` ms from one frame to the next.
+const REDRAW_MEMORY = 0.8;
+const REDRAW_SLACK = 100;
+const REDRAW_GAP = 100;
 // Valley sides. Each wall is a scarp from its foot, where the floodplain
 // ends, up to its brow, where the older upland begins. The core sets the
 // foot, with the combes cut back into it (see `walls.rs`). The scarp is
@@ -431,6 +443,9 @@ const CHANNEL_MARGIN = 3;
 // a segment a step, so this spans ten steps at the top speed.
 const FOOT_BACK = 2;
 const FOOT_AHEAD = 8;
+// Device pixels the channel must have moved for a frame to redraw it. At
+// the default speed it moves 0.1–0.3 CSS px a frame on a landscape phone.
+const MIN_MOVE = 0.5;
 // Sine of the turn between the tangents at a segment's ends, about 3°,
 // below which a channel edge is drawn as a straight segment and not a
 // curve. At 3° the curve lies under 0.1 px from the chord, and about three
@@ -509,7 +524,7 @@ function channelFrame(pts) {
   const n = pts.length / 2;
   const nx = new Float64Array(n), ny = new Float64Array(n), curv = new Float64Array(n);
   for (let i = 0; i < n; i++) {
-    const [a, b] = [Math.max(0, i - 1), Math.min(n - 1, i + 1)];
+    const a = Math.max(0, i - 1), b = Math.min(n - 1, i + 1);
     const tx = pts[2 * b] - pts[2 * a], ty = pts[2 * b + 1] - pts[2 * a + 1];
     const len = Math.sqrt(tx * tx + ty * ty) || 1;
     nx[i] = -ty / len;
@@ -536,22 +551,24 @@ function edgeData(edge, frame, start, back) {
   const { nx, ny } = frame;
   const n = edge.length / 2, s = back ? -1 : 1;
   let k = back ? n - 1 : 0;
-  let d = dp1(edge[2 * k]) + ' ' + dp1(edge[2 * k + 1]);
-  for (let m = 1; m < n; m++, k += s) {
+  let ax = edge[2 * k], ay = edge[2 * k + 1];
+  let tax = s * ny[start + k], tay = -s * nx[start + k];
+  let d = dp1(ax) + ' ' + dp1(ay);
+  for (let m = 1; m < n; m++) {
     const j = k + s;
-    const [ax, ay, bx, by] = [edge[2 * k], edge[2 * k + 1], edge[2 * j], edge[2 * j + 1]];
-    const [dx, dy] = [bx - ax, by - ay];
+    const bx = edge[2 * j], by = edge[2 * j + 1];
     // Tangents in the direction of travel: the left normal turned clockwise.
-    const [tax, tay] = [s * ny[start + k], -s * nx[start + k]];
-    const [tbx, tby] = [s * ny[start + j], -s * nx[start + j]];
+    const tbx = s * ny[start + j], tby = -s * nx[start + j];
     if (Math.abs(tax * tby - tay * tbx) < CURVE_TURN) {
       d += 'L' + dp1(bx) + ' ' + dp1(by);
-      continue;
+    } else {
+      const dx = bx - ax, dy = by - ay;
+      const ha = Math.max(0, dx * tax + dy * tay) / 3;
+      const hb = Math.max(0, dx * tbx + dy * tby) / 3;
+      d += 'C' + dp1(ax + ha * tax) + ' ' + dp1(ay + ha * tay) + ' ' + dp1(bx - hb * tbx) + ' ' + dp1(by - hb * tby)
+        + ' ' + dp1(bx) + ' ' + dp1(by);
     }
-    const ha = Math.max(0, dx * tax + dy * tay) / 3;
-    const hb = Math.max(0, dx * tbx + dy * tby) / 3;
-    d += 'C' + dp1(ax + ha * tax) + ' ' + dp1(ay + ha * tay) + ' ' + dp1(bx - hb * tbx) + ' ' + dp1(by - hb * tby)
-      + ' ' + dp1(bx) + ' ' + dp1(by);
+    k = j; ax = bx; ay = by; tax = tbx; tay = tby;
   }
   return d;
 }
@@ -574,45 +591,60 @@ function scratch(name, n) {
 function channelData(pts, widths, frame, scale, bar, start, end) {
   if (end - start < 2) return '';
   const { nx, ny, curv } = frame;
-  const [left, right] = [scratch('left', 2 * (end - start)), scratch('right', 2 * (end - start))];
+  const left = scratch('left', 2 * (end - start)), right = scratch('right', 2 * (end - start));
   for (let i = start; i < end; i++) {
     const h = scale * widths[i], k = curv[i], b = bar ? bar[i] : 0;
-    const [bl, br] = [h + Math.max(0, b), h + Math.max(0, -b)];
+    const bl = h + Math.max(0, b), br = h + Math.max(0, -b);
     const hl = k > 0 ? Math.min(bl, 0.95 / k) : bl;
     const hr = k < 0 ? Math.min(br, -0.95 / k) : br;
-    const [x, y, j] = [pts[2 * i], pts[2 * i + 1], 2 * (i - start)];
-    [left[j], left[j + 1]] = [x + hl * nx[i], y + hl * ny[i]];
-    [right[j], right[j + 1]] = [x - hr * nx[i], y - hr * ny[i]];
+    const x = pts[2 * i], y = pts[2 * i + 1], j = 2 * (i - start);
+    left[j] = x + hl * nx[i]; left[j + 1] = y + hl * ny[i];
+    right[j] = x - hr * nx[i]; right[j + 1] = y - hr * ny[i];
   }
   return 'M' + edgeData(left, frame, start, false) + 'L' + edgeData(right, frame, start, true) + 'Z';
 }
 
-// The centreline and widths a fraction `f` of the way from `a`, with local
-// widths `wa`, to `b`, with `wb`, on the points of `b`. Each point of `b`
-// moves out from its foot on `a`, so the channel moves sideways as it
-// migrates, while resampling slides the points along it. A point more than
-// `far` from `a`, where a cutoff has rerouted the channel, stays put.
-function between(a, wa, b, wb, f, far) {
+// The feet on `a`, with local widths `wa`, of the points of `b`, with
+// `wb`, for `between`. Each point of `b` moves out from its foot on `a`, so
+// the channel moves sideways as it migrates, while resampling slides the
+// points along it. A point more than `far` from `a`, where a cutoff has
+// rerouted the channel, is its own foot. Also returns how far any point
+// with x in `[x0, x1]` moves, or its bank by `BANK_EDGE` of its width.
+function footing(a, wa, b, wb, far, x0, x1) {
   const na = a.length / 2, nb = b.length / 2;
   const line = new Float32Array(2 * nb), widths = new Float32Array(nb);
-  let j = 0;
+  let j = 0, move = 0;
   for (let i = 0; i < nb; i++) {
-    const [px, py] = [b[2 * i], b[2 * i + 1]];
-    let [best, fx, fy, fw, foot] = [far * far, px, py, wb[i], j];
+    const px = b[2 * i], py = b[2 * i + 1];
+    let best = far * far, fx = px, fy = py, fw = wb[i], foot = j;
     for (let k = Math.max(0, j - FOOT_BACK); k < Math.min(na - 1, j + FOOT_AHEAD); k++) {
-      const [ax, ay] = [a[2 * k], a[2 * k + 1]];
-      const [dx, dy] = [a[2 * k + 2] - ax, a[2 * k + 3] - ay];
+      const ax = a[2 * k], ay = a[2 * k + 1];
+      const dx = a[2 * k + 2] - ax, dy = a[2 * k + 3] - ay;
       const len2 = dx * dx + dy * dy;
       const t = len2 > 0 ? clamp01(((px - ax) * dx + (py - ay) * dy) / len2) : 0;
-      const [qx, qy] = [ax + t * dx, ay + t * dy];
+      const qx = ax + t * dx, qy = ay + t * dy;
       const d2 = (px - qx) ** 2 + (py - qy) ** 2;
-      if (d2 < best) [best, fx, fy, fw, foot] = [d2, qx, qy, wa[k] + t * (wa[k + 1] - wa[k]), k];
+      if (d2 < best) {
+        best = d2; fx = qx; fy = qy; fw = wa[k] + t * (wa[k + 1] - wa[k]); foot = k;
+      }
     }
     j = foot;
-    line[2 * i] = fx + f * (px - fx);
-    line[2 * i + 1] = fy + f * (py - fy);
-    widths[i] = fw + f * (wb[i] - fw);
+    line[2 * i] = fx; line[2 * i + 1] = fy; widths[i] = fw;
+    if (px >= x0 && px <= x1) {
+      move = Math.max(move, Math.sqrt((px - fx) ** 2 + (py - fy) ** 2) + BANK_EDGE * Math.abs(wb[i] - fw));
+    }
   }
+  return { line, widths, move };
+}
+
+// The centreline and widths a fraction `f` of the way from the feet to
+// `b`, with `wb`, into arrays kept with the feet. They are `Float32Array`s,
+// as the centrelines are, so the channel's functions see one kind of array.
+function between(feet, b, wb, f) {
+  feet.at ??= { line: new Float32Array(b.length), widths: new Float32Array(wb.length) };
+  const { line: fl, widths: fw } = feet, { line, widths } = feet.at;
+  for (let i = 0; i < b.length; i++) line[i] = fl[i] + f * (b[i] - fl[i]);
+  for (let i = 0; i < wb.length; i++) widths[i] = fw[i] + f * (wb[i] - fw[i]);
   return { line, widths };
 }
 
@@ -674,11 +706,11 @@ function smoothed(values, name) {
 // between signed offsets `a[i]` and `b[i]` along the left normal.
 function bandData(pts, frame, a, b, start, end) {
   const { nx, ny } = frame;
-  const [left, right] = [scratch('left', 2 * (end - start)), scratch('right', 2 * (end - start))];
+  const left = scratch('left', 2 * (end - start)), right = scratch('right', 2 * (end - start));
   for (let i = start; i < end; i++) {
-    const [x, y, j] = [pts[2 * i], pts[2 * i + 1], 2 * (i - start)];
-    [left[j], left[j + 1]] = [x + a[i] * nx[i], y + a[i] * ny[i]];
-    [right[j], right[j + 1]] = [x + b[i] * nx[i], y + b[i] * ny[i]];
+    const x = pts[2 * i], y = pts[2 * i + 1], j = 2 * (i - start);
+    left[j] = x + a[i] * nx[i]; left[j + 1] = y + a[i] * ny[i];
+    right[j] = x + b[i] * nx[i]; right[j + 1] = y + b[i] * ny[i];
   }
   return 'M' + edgeData(left, frame, start, false) + 'L' + edgeData(right, frame, start, true) + 'Z';
 }
@@ -940,6 +972,10 @@ function* boundaryArcs(lab, W, H, due) {
     if (j < H && edges[nh + j * CW + i]) out.push(nh + j * CW + i, i, j + 1);
     return out.length / 3;
   };
+  // How many edges meet at corner (i, j), which is cheaper than listing
+  // them, and at most corners none do.
+  const degree = (i, j) => (i > 0 ? edges[j * W + i - 1] : 0) + (i < W ? edges[j * W + i] : 0)
+    + (j > 0 ? edges[nh + (j - 1) * CW + i] : 0) + (j < H ? edges[nh + j * CW + i] : 0);
   const used = new Uint8Array(edges.length);
   const arcs = [], around = [], step = [];
   // Run from corner (i, j) along edge `e` to corner (ni, nj), and on until
@@ -967,7 +1003,8 @@ function* boundaryArcs(lab, W, H, due) {
   for (let j = 0; j <= H; j++) {
     if (due()) yield;
     for (let i = 0; i <= W; i++) {
-      if (incident(i, j, step) <= 2) continue;
+      if (degree(i, j) <= 2) continue;
+      incident(i, j, step);
       for (let k = 0; k < step.length; k += 3) if (!used[step[k]]) walk(i, j, step[k], step[k + 1], step[k + 2]);
     }
   }
@@ -1386,10 +1423,12 @@ function contourData(values, cols, rows, cell, c0, c1, level) {
     scratch.used = new Uint8Array(2 * n);
   }
   const { v, at, segs, used } = scratch;
-  v.fill(-level, 0, n);
+  v.fill(-level, 0, W);
+  v.fill(-level, n - W, n);
   for (let j = 1; j <= rows; j++) {
-    const row = (j - 1) * cols + c0 - 1;
-    for (let i = 1; i <= c1 - c0; i++) v[j * W + i] = values[row + i];
+    const row = (j - 1) * cols + c0;
+    v.set(values.subarray(row, row + c1 - c0), j * W + 1);
+    v[j * W] = v[j * W + W - 1] = -level;
   }
   // Edge ids: 2k is the edge from corner k rightwards, 2k + 1 downwards. The
   // cell with top-left corner k has the edge 2k + `side[s]` on side s.
@@ -1398,10 +1437,18 @@ function contourData(values, cols, rows, cell, c0, c1, level) {
   at.fill(-1, 0, 4 * n);
   let count = 0;
   for (let j = 0; j < H - 1; j++) {
+    // A cell's left corners, and whether they are above the level, are the
+    // right corners of the cell before.
+    let tr = v[j * W], br = v[j * W + W];
+    let up = +(tr > level), down = +(br > level);
     for (let i = 0; i < W - 1; i++) {
       const k = j * W + i;
-      const tl = v[k], tr = v[k + 1], br = v[k + W + 1], bl = v[k + W];
-      const c = (tl > level) * 8 + (tr > level) * 4 + (br > level) * 2 + (bl > level);
+      const tl = tr, bl = br, left = up * 8 + down;
+      tr = v[k + 1];
+      br = v[k + W + 1];
+      up = +(tr > level);
+      down = +(br > level);
+      const c = left + up * 4 + down * 2;
       if (c === 0 || c === 15) continue;
       const saddle = (c === 5 || c === 10) && (tl + tr + br + bl) / 4 <= level;
       const sides = CASE_SIDES[2 * c + saddle];
@@ -1421,7 +1468,7 @@ function contourData(values, cols, rows, cell, c0, c1, level) {
     const down = id & 1;
     const t = (level - v[k]) / (v[down ? k + W : k + 1] - v[k]);
     const x = (c0 + i + (down ? 0 : t) - 0.5) * cell, y = (j + (down ? t : 0) - 0.5) * cell;
-    return Math.round(10 * x) / 10 + ' ' + Math.round(10 * y) / 10;
+    return dp1(x) + ' ' + dp1(y);
   };
   // Chain the segments into closed loops.
   used.fill(0, 0, count);
@@ -1841,7 +1888,8 @@ class SvgRenderer {
     this.dropped = [];
     this.shadedFor = null;
     this.lastBar = null;
-    this.from = this.to = null;
+    this.from = this.to = this.pair = null;
+    this.scale = null;
     this.window = [x, w];
     this.size = [w, h];
     this.seed = seed;
@@ -1867,6 +1915,7 @@ class SvgRenderer {
     // each floodplain layer fell due, if it waits.
     [this.plugShown, this.fieldsShown, this.forestShown] = [null, null, null];
     this.dueSince = [];
+    this.redrawTime ??= [];
     // The first draw after a reset draws the floodplain and the channel
     // whole.
     this.fresh = true;
@@ -1933,6 +1982,10 @@ class SvgRenderer {
     // along the strip.
     const lab = new Int32Array(W * rows);
     const fields = [], index = new Map();
+    // A strip's length, lean and offset, and the last cell's field, kept
+    // for the cells after while they lie in the same strip and field.
+    let strip = { o: -1, k: 0, len: 0, lean: 0, shift: 0 };
+    let last = { key: -1, f: 0, field: null };
     for (let j = 0; j < rows; j++) {
       if (due()) yield;
       const y = (j + 0.5) * cell;
@@ -1945,19 +1998,28 @@ class SvgRenderer {
         const v = dy * L.ax - dx * L.ay + FIELD_BEND * w * Math.sin(u / L.wave + L.bend);
         const k = Math.floor(v / L.strip + L.phase);
         const across = v / L.strip + L.phase - k;
-        const len = (FIELD_LENGTH[0] + (FIELD_LENGTH[1] - FIELD_LENGTH[0]) * hash01(L.seed, k + 4096, 1)) * w;
-        const lean = (2 * hash01(L.seed, k + 4096, 2) - 1) * FIELD_LEAN * L.strip;
-        const m = Math.floor((u + lean * across) / len + hash01(L.seed, k + 4096, 3));
-        const key = (o * 4096 + (k + 2048)) * 4096 + (m + 2048);
-        let f = index.get(key);
-        if (f === undefined) {
-          f = fields.length + 1;
-          index.set(key, f);
-          fields.push({ key, o, cells: 0, risk: 0 });
+        if (strip.o !== o || strip.k !== k) {
+          strip = {
+            o, k,
+            len: (FIELD_LENGTH[0] + (FIELD_LENGTH[1] - FIELD_LENGTH[0]) * hash01(L.seed, k + 4096, 1)) * w,
+            lean: (2 * hash01(L.seed, k + 4096, 2) - 1) * FIELD_LEAN * L.strip,
+            shift: hash01(L.seed, k + 4096, 3),
+          };
         }
-        lab[j * W + i] = f;
-        fields[f - 1].cells++;
-        fields[f - 1].risk += risk[g];
+        const m = Math.floor((u + strip.lean * across) / strip.len + strip.shift);
+        const key = (o * 4096 + (k + 2048)) * 4096 + (m + 2048);
+        if (key !== last.key) {
+          let f = index.get(key);
+          if (f === undefined) {
+            f = fields.length + 1;
+            index.set(key, f);
+            fields.push({ key, o, cells: 0, risk: 0 });
+          }
+          last = { key, f, field: fields[f - 1] };
+        }
+        lab[j * W + i] = last.f;
+        last.field.cells++;
+        last.field.risk += risk[g];
       }
     }
     // Fold slivers into a neighbouring field of the same holding.
@@ -2293,7 +2355,7 @@ class SvgRenderer {
     return lake;
   }
 
-  draw(river, memory, { local }) {
+  draw(river, memory, { local, lagging = 0 }) {
     const w = river.get_param('width');
     // The floodplain layers sync their own data, which on a `River` can
     // grow memory, so they go before the views below are built.
@@ -2305,7 +2367,9 @@ class SvgRenderer {
     for (const [layer, show] of layers) {
       if (layer.style.display !== (show ? '' : 'none')) layer.style.display = show ? '' : 'none';
     }
-    this.drawFloodplain(river, memory, local, this.fresh ? Infinity : FLOODPLAIN_BUDGET);
+    const urgency = clamp01(2 * lagging - 1);
+    const floodplain = FLOODPLAIN_BUDGET + (FLOODPLAIN_IDLE_BUDGET - FLOODPLAIN_BUDGET) * urgency;
+    this.drawFloodplain(river, memory, local, this.fresh ? Infinity : floodplain);
     this.fresh = false;
     // The floodplain features come as copies, which can grow memory too.
     const [jams, mills, leats] = [river.jams(), river.mills(), river.mill_leats()];
@@ -2336,7 +2400,6 @@ class SvgRenderer {
       const next = { line: line.slice(), widths: widths.slice(), t, length: lineLength(line) };
       this.from = this.to && this.to.length - next.length < w ? this.to : next;
       this.to = next;
-      this.tweened = null;
     }
     // Channel points, to find lake points beside it.
     const reach = (MAX_WIDTH + ALONGSIDE_GAP) * w;
@@ -2501,22 +2564,49 @@ class SvgRenderer {
     if (fords) this.drawFords(river, fords, w);
   }
 
+  // Device pixels a unit. Read again only after a resize, since reading the
+  // window's size after a frame's writes forces a layout.
+  pixels() {
+    if (!this.scale) {
+      const [w, h] = this.size;
+      this.scale = Math.min(innerWidth / w, innerHeight / h) * (devicePixelRatio || 1);
+      addEventListener('resize', () => { this.scale = null; }, { once: true });
+    }
+    return this.scale;
+  }
+
   // Draw the channel as it stood at simulated time `at`, between the
   // centrelines of the last two draws. At low speeds the river steps only
   // every few frames, by up to a pixel, so the channel trails it by a step
-  // and moves on every frame. Returns whether it drew.
+  // and moves on every frame that would move it by `MIN_MOVE` device
+  // pixels. Returns whether it drew.
   tween(river, at) {
     const { from, to } = this;
     if (!to) return false;
     const f = to.t > from.t ? clamp01((at - from.t) / (to.t - from.t)) : 1;
-    if (f === this.tweened) return false;
-    this.tweened = f;
     const w = river.get_param('width');
-    const { line, widths } = f < 1 ? between(from.line, from.widths, to.line, to.widths, f, w) : to;
-    const frame = channelFrame(line);
     // The points to draw: the window, and room for the widest bank and its
     // bar beyond it each side.
     const [x0, vw] = this.window;
+    // The feet of a pair's points on the centreline before, found once and
+    // only for a frame between the two, since at high speeds a frame
+    // mostly draws the last.
+    const feet = (pair) => pair.feet ??= footing(pair.from.line, pair.from.widths, pair.line, pair.widths, w, x0 - CHANNEL_MARGIN * w, x0 + vw + CHANNEL_MARGIN * w);
+    // How far the drawn channel may lie from this pair's at `drawnF`: a
+    // new pair starts from where the last left off, and a cutoff, which
+    // starts a pair at its end, always redraws.
+    if (this.pair !== to) {
+      const last = this.pair;
+      const left = last && this.drawnF < 1 ? (1 - this.drawnF) * feet(last).move : 0;
+      this.offset = last && from === last && from !== to ? this.offset + left : Infinity;
+      [this.pair, this.drawnF, to.from] = [to, 0, from];
+    }
+    const ahead = f === this.drawnF ? 0 : from === to ? Infinity : f < 1 || to.feet ? Math.abs(f - this.drawnF) * feet(to).move : Infinity;
+    const move = this.offset + ahead;
+    if (move === 0 || (move * this.pixels() < MIN_MOVE && at !== Infinity)) return false;
+    [this.offset, this.drawnF] = [0, f];
+    const { line, widths } = f < 1 ? between(feet(to), to.line, to.widths, f) : to;
+    const frame = channelFrame(line);
     const shown = span(line, x0 - CHANNEL_MARGIN * w, x0 + vw + CHANNEL_MARGIN * w);
     const waterRuns = channelRuns(line, widths, frame, shown, 0.5);
     const bend = smoothed(frame.curv, 'bend');
@@ -2980,9 +3070,21 @@ class SvgRenderer {
       layer.run();
       worked = true;
     }
-    const t = river.time();
-    layers.forEach((layer, k) => {
-      this.dueSince[k] = layer.due() ? (this.dueSince[k] ?? t) : null;
+    // A redraw ends when its layer shows a new picture, though the next
+    // may be due at once. Its time counts at most `REDRAW_GAP` ms between
+    // calls, so a hidden tab does not count.
+    const t = river.time(), now = performance.now();
+    const gap = Math.min(REDRAW_GAP, now - (this.floodplainAt ?? now));
+    this.floodplainAt = now;
+    this.floodplainLayers(river, memory, local).forEach((layer, k) => {
+      let since = this.dueSince[k];
+      if (since) since.spent += gap;
+      if (since && (layer.shown !== since.shown || !layer.due())) {
+        const took = since.spent;
+        this.redrawTime[k] = REDRAW_MEMORY * (this.redrawTime[k] ?? took) + (1 - REDRAW_MEMORY) * took;
+        since = null;
+      }
+      this.dueSince[k] = layer.due() ? since ?? { t, spent: 0, shown: layer.shown } : null;
     });
     return worked;
   }
@@ -2990,7 +3092,25 @@ class SvgRenderer {
   // Simulated time the longest-waiting floodplain redraw has been due.
   behind(river) {
     const t = river.time();
-    return Math.max(0, ...this.dueSince.map((since) => since === null ? 0 : t - since));
+    return Math.max(0, ...this.dueSince.map((since) => since ? t - since.t : 0));
+  }
+
+  // The highest speed, in simulated time a second, at which every redraw
+  // under way finishes within `lag` of simulated time from falling due, if
+  // it takes `margin` times as long in real time as that layer's recent
+  // redraws. A redraw past that is expected to take half as long again as
+  // it has so far.
+  allowance(river, lag, margin) {
+    const t = river.time();
+    let speed = Infinity;
+    this.dueSince.forEach((since, k) => {
+      const took = this.redrawTime[k];
+      if (!since || took === undefined) return;
+      const age = since.spent;
+      const left = Math.max(REDRAW_SLACK, margin * took - age, age / 2) / 1000;
+      speed = Math.min(speed, Math.max(0, lag - (t - since.t)) / left);
+    });
+    return speed;
   }
 
   // Contour the overbank deposits over the window every `LEVEE_REFRESH` of

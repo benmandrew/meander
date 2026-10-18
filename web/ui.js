@@ -30,20 +30,38 @@ const SETTINGS = { warmup: 500, noise: 0.5 };
 const YEARS_PER_UNIT = 2.5;
 
 // The river holds still while a floodplain redraw has been due for more
-// than `MAX_LAG` of simulated time, 25 years, so a slow machine runs below
-// the set speed instead of drawing the floodplain centuries late.
+// than `MAX_LAG` of simulated time, 25 years, or `LAG_SECONDS` of the set
+// speed if longer, so a slow machine runs below the set speed instead of
+// drawing the floodplain centuries late. At high speeds a lag in simulated
+// time alone is a few frames, and redraws spread over frames held the
+// river twice a second. Before the hold, the river slows to the speed at
+// which the redraws under way finish within the limit if they take
+// 1 / `PACE_LAG` times as long in real time as each layer's recent
+// redraws, which take about as long at any speed. With no margin, the
+// river ran 1–13% faster than at 0.7 on a phone at 4× throttling, and
+// still never stood still for 3 frames. It slows at once and
+// speeds up again over `PACE_SECONDS`, so a machine too slow for the set
+// speed runs the river at a steady lower speed instead of in starts and
+// stops.
 const MAX_LAG = 10;
+const LAG_SECONDS = 0.5;
+const PACE_LAG = 1;
+const PACE_SECONDS = 1;
 
 // The worker steps the river (see `worker.js`) while the page draws, one
 // request a frame. A request may take `STEP_SHARE` of the last frame's
 // interval, but at least `STEP_BUDGET` ms, so the worker is kept busy and
 // its reply still comes before the next frame. Simulated time the budget
 // cannot cover is dropped, so a machine too slow for the set speed runs the
-// river slower instead of owing more steps to each request. The warm-up and
-// a replay step in requests of `WARM_BUDGET` ms.
+// river slower instead of owing more steps to each request. So is time
+// owed beyond `MAX_OWED` s at the river's speed, past the request under way
+// and the next step, while a reply is late, so the river does not lurch on
+// when it comes. The warm-up and a replay step in requests of
+// `WARM_BUDGET` ms.
 const STEP_SHARE = 0.8;
 const STEP_BUDGET = 8;
 const WARM_BUDGET = 12;
+const MAX_OWED = 0.04;
 
 // The panel shows the JS time of the last `FRAME_WINDOW` frames, about 10 s,
 // refreshed every `STATS_EVERY` ms.
@@ -101,8 +119,12 @@ export async function startApp({ view, renderer, display }) {
   const frameTimes = new Float64Array(FRAME_WINDOW);
   let frames = 0;
   let statsAt = -Infinity;
-  // Simulated time owed to the loop but not yet stepped.
+  // Simulated time owed to the loop but not yet stepped, and the speed the
+  // river runs at, at most the set speed `paceFor` it was found for, or null
+  // to start at the speed allowed.
   let owed = 0;
+  let pace = null;
+  let paceFor = null;
   // Steps of the warm-up or replay still to run, spread over frames so the
   // page stays live, and its total.
   let warming = 0;
@@ -114,6 +136,9 @@ export async function startApp({ view, renderer, display }) {
   // Whether the river has stopped, on a pause or a single step, and the
   // drawing work spread over frames should finish on the next frame.
   let settle = false;
+  // The year and tick last shown, so a draw formats them only on a change.
+  let shownYear = null;
+  let shownTick = null;
   // Whether a frame is scheduled. The loop sleeps while the river is paused
   // and has nothing left to draw, and `wake` starts it again.
   let scheduled = false;
@@ -137,7 +162,7 @@ export async function startApp({ view, renderer, display }) {
     state.bounds = [local.view ?? WORLD_H * r.width / r.height, WORLD_H];
     const seed = Number($('seed').value) >>> 0;
     pending.clear();
-    [ready, asked, owed, warming] = [false, null, 0, 0];
+    [ready, asked, owed, warming, pace] = [false, null, 0, 0, null];
     replaying = target !== undefined;
     dirty = true;
     request({ reset: { bounds: state.bounds, seed, noise: local.noise } }, () => {
@@ -230,8 +255,16 @@ export async function startApp({ view, renderer, display }) {
   // must run another frame.
   function update(elapsed) {
     // A held frame is not owed later, so the river does not lurch on.
-    if (running && renderer.behind(river) <= MAX_LAG) {
-      owed += local.speed * elapsed;
+    const lag = Math.max(MAX_LAG, LAG_SECONDS * local.speed), behind = renderer.behind(river);
+    state.lagging = behind / lag;
+    const allowed = Math.min(local.speed, renderer.allowance(river, lag, 1 / PACE_LAG));
+    // Only a pace held below the set speed rises slowly, so a new speed
+    // from the slider takes effect at once.
+    const held = pace !== null && pace < paceFor;
+    pace = held ? Math.min(allowed, pace + (allowed - pace) * Math.min(1, elapsed / PACE_SECONDS)) : allowed;
+    paceFor = local.speed;
+    if (running && behind <= lag) {
+      owed = Math.min(owed + pace * elapsed, (asked ?? 0) + dt + pace * MAX_OWED);
       const steps = Math.floor(owed / dt);
       if (asked === null && steps > 0) {
         asked = steps * dt;
@@ -259,13 +292,18 @@ export async function startApp({ view, renderer, display }) {
     if (dirty) {
       dirty = false;
       renderer.draw(river, river.memory, state);
-      const years = (river.steps() - epoch()) * dt * YEARS_PER_UNIT;
-      const year = `Year ${Math.round(years).toLocaleString('en-GB')}`;
-      if ($('year').textContent !== year) $('year').textContent = year;
+      const years = Math.round((river.steps() - epoch()) * dt * YEARS_PER_UNIT);
+      if (years !== shownYear) {
+        shownYear = years;
+        $('year').textContent = `Year ${years.toLocaleString('en-GB')}`;
+      }
       // The step count from the reset, which with the seed and the view's
       // width fixes the river's state. Not while it is being edited.
-      const tick = String(river.steps());
-      if ($('tick').value !== tick && document.activeElement !== $('tick')) $('tick').value = tick;
+      const tick = river.steps();
+      if (tick !== shownTick && document.activeElement !== $('tick')) {
+        shownTick = tick;
+        $('tick').value = String(tick);
+      }
     }
     // A running channel trails the river by a step, so it moves on every
     // frame; a stopped one shows the river as it stands. Time the worker is
@@ -319,6 +357,10 @@ export async function startApp({ view, renderer, display }) {
   $('tick').addEventListener('change', () => {
     const target = Math.round(Number($('tick').value));
     if (Number.isFinite(target) && target >= 0) reset(target);
+    // The next draw writes the tick back, over an edit that was not a tick.
+    shownTick = null;
+    dirty = true;
+    wake();
   });
   // Put a link that replays to the current tick in the address bar and on
   // the clipboard. The view's width is written in full, since a river in a
