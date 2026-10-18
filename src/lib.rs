@@ -11,6 +11,7 @@ pub mod geom;
 pub mod ips;
 pub mod land;
 pub mod mills;
+pub mod ponds;
 pub mod rng;
 pub mod tracks;
 pub mod tributary;
@@ -1347,6 +1348,8 @@ impl Sim {
         let phase = self.steps % land::SURVEY_STEPS;
         if phase == 0 {
             self.read_valley();
+            let filled = self.oxbows.iter().filter(|o| o.filled_at.is_finite());
+            self.land.set_scars(filled.map(|o| &o.points[..]));
         }
         let streams = self.tributaries.iter().map(|t| t.version + 1).sum();
         if self.land_streams != streams {
@@ -1369,7 +1372,13 @@ impl Sim {
             &s,
             phase,
         );
-        (self.tracks).tick(&self.land, &self.erodibility, self.params.width, phase == 0);
+        (self.tracks).tick(
+            &self.land,
+            &self.erodibility,
+            self.params.width,
+            self.time,
+            phase == 0,
+        );
         self.recruit_wood();
         self.found_mill();
         self.rework_oxbows();
@@ -2790,6 +2799,71 @@ mod tests {
         assert!(on.land.buildings.len() > on.land.count());
         assert_eq!(off.centerline, on.centerline);
         assert_eq!(off.land.owner, on.land.owner);
+    }
+
+    #[test]
+    fn churches_stand_apart_and_ponds_lie_in_old_channels() {
+        let (mut churches, mut ponds) = (0, 0);
+        for seed in [1, 3] {
+            let mut sim = Sim::new(Params::default(), [900.0, 480.0], seed, 0.5);
+            for _ in 0..12000 {
+                sim.step();
+            }
+            let (land, w) = (&sim.land, sim.params.width);
+            let standing: Vec<_> = (land.buildings.iter())
+                .filter(|b| b.kind == farm::Kind::Church && b.standing())
+                .collect();
+            for (k, a) in standing.iter().enumerate() {
+                assert_eq!(a.dir, [1.0, 0.0], "a church laid east and west");
+                assert_eq!(a.holding, land::NONE, "a church no holding keeps");
+                for b in &standing[k + 1..] {
+                    assert!(dist(a.pos, b.pos) >= farm::CHURCH_GAP * w);
+                }
+            }
+            for p in &land.ponds {
+                let i = land.index(p.pos);
+                assert!(sim.erodibility.cut_at[i].is_finite(), "a pond off the plug");
+                if p.kept() {
+                    let seat = land.holdings[p.holding as usize].as_ref().map(|g| g.seat);
+                    assert!(seat.is_some(), "a pond kept by no holding");
+                }
+            }
+            churches += standing.len();
+            ponds += land.ponds.len();
+        }
+        eprintln!("{churches} churches and {ponds} ponds over two runs of 3,000 years");
+        assert!(churches >= 1 && ponds >= 1);
+    }
+
+    #[test]
+    fn lanes_wear_into_hollow_ways_that_outlast_them() {
+        let mut sim = Sim::new(Params::default(), [900.0, 480.0], 2, 0.5);
+        for _ in 0..6000 {
+            sim.step();
+        }
+        let tracks = &sim.tracks;
+        let depths: Vec<f32> = tracks.depths.iter().flatten().copied().collect();
+        assert!(depths.iter().all(|d| (0.0..=1.0).contains(d)));
+        let deep = depths.iter().filter(|&&d| d > 0.5).count();
+        assert!(
+            deep > depths.len() / 4,
+            "{deep} of {} cells deep",
+            depths.len()
+        );
+        assert!(!tracks.hollows.is_empty(), "no abandoned hollow ways");
+        let on: std::collections::BTreeSet<_> = (tracks.tracks.iter().flatten())
+            .map(|p| (p[0].to_bits(), p[1].to_bits()))
+            .collect();
+        for (h, d) in tracks.hollows.iter().zip(&tracks.hollow_depths) {
+            assert!(h.len() >= 2 && h.len() == d.len());
+            for (p, &d) in h.iter().zip(d) {
+                assert!(d > 0.0 && d <= 1.0);
+                assert!(
+                    !on.contains(&(p[0].to_bits(), p[1].to_bits())),
+                    "a hollow way on a track"
+                );
+            }
+        }
     }
 
     #[test]

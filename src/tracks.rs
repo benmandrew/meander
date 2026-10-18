@@ -13,11 +13,21 @@
 //! network's tracks costs less, so ways stay in use and the network
 //! changes only where the land or the river has.
 //!
+//! The churches are destinations too, so the network gathers on them.
+//!
+//! A lane in use for centuries wears into a *hollow way*, sunk below the
+//! fields by feet, hooves and wheels and by the rain that runs down it.
+//! Each cell keeps the time it has carried a track, and a track is a
+//! full hollow way after [`HOLLOW_TIME`]. When the network leaves a lane
+//! worn for over [`HOLLOW_MIN`], the lane stays as an earthwork that fills
+//! at [`HOLLOW_FILL`] of the rate it wore, until the channel sweeps it.
+//!
 //! Tracks read the land and change nothing else.
 
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BinaryHeap};
 
+use crate::farm::Kind;
 use crate::field::{Erodibility, LAKE_DEPTH};
 use crate::geom::P;
 use crate::land::{Land, NONE};
@@ -40,6 +50,13 @@ const DETOUR: f32 = 2.0;
 /// Overbank deposit, in channel depths, below which an oxbow's ground is
 /// open water that no track crosses.
 const LAKE_OPEN: f32 = -0.5 * LAKE_DEPTH as f32;
+/// Simulated time a lane takes to wear into a full hollow way: 400 units,
+/// 1,000 years; the least wear that leaves an abandoned lane as an
+/// earthwork: 40 units, 100 years; and the rate an abandoned hollow way
+/// fills, as a fraction of the rate it wore.
+const HOLLOW_TIME: f32 = 400.0;
+const HOLLOW_MIN: f32 = 40.0;
+const HOLLOW_FILL: f32 = 0.25;
 
 enum Phase {
     /// Start a search from every farmstead.
@@ -57,7 +74,14 @@ pub struct Tracks {
     pub tracks: Vec<Vec<P>>,
     /// Where each track crosses the channel, from bank to bank.
     pub fords: Vec<[P; 2]>,
-    /// Count changes to `tracks` and to `fords`.
+    /// Each track's depth as a hollow way at each of its cells, in [0, 1].
+    pub depths: Vec<Vec<f32>>,
+    /// The abandoned hollow ways: each one's cell centres, and its depth
+    /// at each.
+    pub hollows: Vec<Vec<P>>,
+    pub hollow_depths: Vec<Vec<f32>>,
+    /// Count changes to the tracks, their depths and the hollow ways, and
+    /// to `fords`.
     pub version: u64,
     pub ford_version: u64,
     phase: Phase,
@@ -82,6 +106,15 @@ pub struct Tracks {
     cells: Vec<Vec<u32>>,
     /// The fords as last found, kept to find them again into.
     spare: Vec<[P; 2]>,
+    /// Time each cell has carried a track, and the time each cell of an
+    /// abandoned hollow way left the network.
+    wear: Vec<f32>,
+    left: Vec<f32>,
+    /// The abandoned hollow ways' cells, and whether each cell is in one.
+    relicts: Vec<Vec<u32>>,
+    relict: Vec<bool>,
+    /// Time the last network was laid.
+    built_at: f64,
 }
 
 impl Default for Tracks {
@@ -103,6 +136,14 @@ impl Default for Tracks {
             meets: BTreeMap::new(),
             cells: Vec::new(),
             spare: Vec::new(),
+            depths: Vec::new(),
+            hollows: Vec::new(),
+            hollow_depths: Vec::new(),
+            wear: Vec::new(),
+            left: Vec::new(),
+            relicts: Vec::new(),
+            relict: Vec::new(),
+            built_at: f64::NAN,
         }
     }
 }
@@ -120,7 +161,7 @@ impl Tracks {
     /// One step's share of the work. `fresh` is set in the step after the
     /// holdings read the channel, when the fords are found again on the
     /// tracks as they run.
-    pub fn tick(&mut self, land: &Land, field: &Erodibility, width: f64, fresh: bool) {
+    pub fn tick(&mut self, land: &Land, field: &Erodibility, width: f64, time: f64, fresh: bool) {
         let n = land.owner.len();
         if self.stamp.len() != n {
             *self = Self {
@@ -129,13 +170,19 @@ impl Tracks {
                 label: vec![NONE; n],
                 from: vec![NONE; n],
                 on: vec![false; n],
+                wear: vec![0.0; n],
+                left: vec![0.0; n],
+                relict: vec![false; n],
                 version: self.version + 1,
                 ford_version: self.ford_version + 1,
                 ..Self::default()
             };
         }
-        if fresh && self.find_fords(land) {
-            self.ford_version += 1;
+        if fresh {
+            if self.find_fords(land) {
+                self.ford_version += 1;
+            }
+            self.wash(land, time);
         }
         let cw = (land.cell / width) as f32;
         match self.phase {
@@ -154,7 +201,7 @@ impl Tracks {
                 };
             }
             Phase::Build => {
-                self.build(land);
+                self.build(land, time);
                 self.phase = Phase::Start;
             }
         }
@@ -169,9 +216,18 @@ impl Tracks {
         self.heap.clear();
         self.seats.clear();
         self.meets.clear();
-        for h in land.holdings.iter().flatten() {
-            let (i, k) = (land.index(h.seat), self.seats.len() as u32);
-            self.seats.push(h.seat);
+        let churches = (land.buildings.iter())
+            .filter(|b| b.kind == Kind::Church && b.standing())
+            .map(|b| b.pos);
+        for seat in land
+            .holdings
+            .iter()
+            .flatten()
+            .map(|h| h.seat)
+            .chain(churches)
+        {
+            let (i, k) = (land.index(seat), self.seats.len() as u32);
+            self.seats.push(seat);
             if !self.reached(i) {
                 self.stamp[i] = self.search;
                 (self.cost[i], self.label[i], self.from[i]) = (0.0, k, NONE);
@@ -329,8 +385,9 @@ impl Tracks {
         out[start..].reverse();
     }
 
-    /// Lay the lanes, cheapest first, and the tracks along them.
-    fn build(&mut self, land: &Land) {
+    /// Lay the lanes, cheapest first, and the tracks along them, wearing
+    /// the last network's cells by the time it was in use.
+    fn build(&mut self, land: &Land, time: f64) {
         let mut meets: Vec<_> = self.meets.iter().map(|(&k, &v)| (k, v)).collect();
         meets.sort_by(|a, b| a.1.0.total_cmp(&b.1.0).then(a.0.cmp(&b.0)));
         let mut graph = vec![Vec::new(); self.seats.len()];
@@ -349,21 +406,136 @@ impl Tracks {
             path.extend(back.into_iter().rev());
             cells.push(path);
         }
+        let used = if self.built_at.is_nan() {
+            0.0
+        } else {
+            (time - self.built_at) as f32
+        };
+        self.built_at = time;
+        // A cell several tracks share wears once.
         for &k in self.cells.iter().flatten() {
-            self.on[k as usize] = false;
+            let k = k as usize;
+            if self.on[k] {
+                self.wear[k] += used;
+                self.on[k] = false;
+            }
         }
         for &k in cells.iter().flatten() {
-            self.on[k as usize] = true;
+            let k = k as usize;
+            if self.relict[k] {
+                self.wear[k] = self.lasting(k, time);
+                self.relict[k] = false;
+            }
+            self.on[k] = true;
+        }
+        self.prune(time);
+        for t in &self.cells {
+            let mut run = Vec::new();
+            for &k in t.iter().chain([&NONE]) {
+                let i = k as usize;
+                if k != NONE && !self.on[i] && !self.relict[i] && self.wear[i] >= HOLLOW_MIN {
+                    (self.left[i], self.relict[i]) = (time as f32, true);
+                    run.push(k);
+                } else if run.len() >= 2 {
+                    self.relicts.push(std::mem::take(&mut run));
+                } else {
+                    for &j in &run {
+                        self.relict[j as usize] = false;
+                    }
+                    run.clear();
+                }
+            }
         }
         if cells != self.cells {
             self.tracks = (cells.iter())
                 .map(|t| t.iter().map(|&k| land.centre(k as usize)).collect())
                 .collect();
             self.cells = cells;
-            self.version += 1;
             if self.find_fords(land) {
                 self.ford_version += 1;
             }
+        }
+        self.depths = (self.cells.iter())
+            .map(|t| t.iter().map(|&k| self.depth(k as usize, time)).collect())
+            .collect();
+        self.read_hollows(land, time);
+        self.version += 1;
+    }
+
+    /// Wear left at cell `i` of an abandoned hollow way at `time`.
+    fn lasting(&self, i: usize, time: f64) -> f32 {
+        (self.wear[i] - HOLLOW_FILL * (time as f32 - self.left[i])).max(0.0)
+    }
+
+    /// Depth of cell `i` as a hollow way at `time`, in [0, 1].
+    fn depth(&self, i: usize, time: f64) -> f32 {
+        let wear = if self.relict[i] {
+            self.lasting(i, time)
+        } else {
+            self.wear[i]
+        };
+        (wear / HOLLOW_TIME).min(1.0)
+    }
+
+    /// Split the abandoned hollow ways at the cells the network has taken
+    /// up again or that have filled, and drop the pieces under two cells.
+    fn prune(&mut self, time: f64) {
+        let mut kept = Vec::with_capacity(self.relicts.len());
+        for run in std::mem::take(&mut self.relicts) {
+            let mut piece = Vec::new();
+            for &k in run.iter().chain([&NONE]) {
+                let i = k as usize;
+                if k != NONE && self.relict[i] && self.lasting(i, time) > 0.0 {
+                    piece.push(k);
+                    continue;
+                }
+                if k != NONE && self.relict[i] {
+                    (self.relict[i], self.wear[i]) = (false, 0.0);
+                }
+                if piece.len() >= 2 {
+                    kept.push(std::mem::take(&mut piece));
+                } else {
+                    for &j in &piece {
+                        (self.relict[j as usize], self.wear[j as usize]) = (false, 0.0);
+                    }
+                }
+                piece.clear();
+            }
+        }
+        self.relicts = kept;
+    }
+
+    /// Copy the abandoned hollow ways' points and depths for a renderer.
+    fn read_hollows(&mut self, land: &Land, time: f64) {
+        self.hollows = (self.relicts.iter())
+            .map(|r| r.iter().map(|&k| land.centre(k as usize)).collect())
+            .collect();
+        self.hollow_depths = (self.relicts.iter())
+            .map(|r| r.iter().map(|&k| self.depth(k as usize, time)).collect())
+            .collect();
+    }
+
+    /// Wipe the wear from the cells of the tracks and the hollow ways that
+    /// the water has taken or the channel has swept to bare bar since the
+    /// last survey, and copy the hollow ways again if any changed.
+    fn wash(&mut self, land: &Land, time: f64) {
+        for &k in self.cells.iter().flatten() {
+            if !land.open[k as usize] {
+                self.wear[k as usize] = 0.0;
+            }
+        }
+        let mut swept = false;
+        for &k in self.relicts.iter().flatten() {
+            let i = k as usize;
+            if !land.open[i] && self.wear[i] > 0.0 {
+                self.wear[i] = 0.0;
+                swept = true;
+            }
+        }
+        if swept {
+            self.prune(time);
+            self.read_hollows(land, time);
+            self.version += 1;
         }
     }
 

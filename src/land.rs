@@ -29,6 +29,7 @@ use std::collections::{BinaryHeap, VecDeque};
 use crate::farm::{Building, HAMLET_GAP, Reach};
 use crate::field::Erodibility;
 use crate::geom::P;
+use crate::ponds::Pond;
 use crate::rng::Rng;
 use crate::smoothstep;
 
@@ -216,6 +217,13 @@ pub struct Land {
     /// A point on the leat of each working mill, which the holding that
     /// has the ground there counts as its own.
     pub mills: Vec<P>,
+    /// The fishponds, kept and silting; their changes count in
+    /// `building_version`.
+    pub ponds: Vec<Pond>,
+    /// The courses of the oxbows whose lakes have filled, back to back,
+    /// and the start of each in `scar_points`, with an end marker.
+    pub(crate) scar_points: Vec<P>,
+    pub(crate) scar_starts: Vec<usize>,
     /// The tributaries' courses, which no building stands across.
     pub(crate) streams: Vec<Reach>,
     /// Simulated time of the work under way.
@@ -246,8 +254,11 @@ pub struct Land {
     touched: Vec<usize>,
     heap: BinaryHeap<Reverse<(u32, u32)>>,
     rng: Rng,
-    /// Draws for the farmsteads, apart from the holdings' own.
+    /// Draws for the farmsteads, apart from the holdings' own, and for
+    /// the churches and fishponds, apart from both, since the farmsteads'
+    /// stream also decides the hamlets, which shape the holdings.
     pub(crate) farm_rng: Rng,
+    pub(crate) works_rng: Rng,
     founded: bool,
 }
 
@@ -268,6 +279,9 @@ impl Land {
             buildings: Vec::new(),
             building_version: 0,
             mills: Vec::new(),
+            ponds: Vec::new(),
+            scar_points: Vec::new(),
+            scar_starts: Vec::new(),
             streams: Vec::new(),
             now: 0.0,
             open: vec![false; n],
@@ -289,6 +303,7 @@ impl Land {
             heap: BinaryHeap::new(),
             rng: Rng::new(seed ^ 0x1A4D_5EED),
             farm_rng: Rng::new(seed ^ 0x0FA2_3570),
+            works_rng: Rng::new(seed ^ 0x5EC7_0C4E),
             founded: false,
         }
     }
@@ -314,6 +329,11 @@ impl Land {
     /// Number of live holdings.
     pub fn count(&self) -> usize {
         self.holdings.iter().flatten().count()
+    }
+
+    /// Whether the parish boundary has been set.
+    pub(crate) fn parish(&self) -> bool {
+        !self.side.is_empty()
     }
 
     /// Set the parish boundary on `line`, which runs from the domain's
@@ -367,7 +387,7 @@ impl Land {
         for phase in 0..SURVEY_STEPS {
             self.survey(field, line, widths, valley, s, phase);
         }
-        self.work(s, usize::MAX);
+        self.work(field, s, usize::MAX);
     }
 
     /// One step's share of the work: the survey's work for step `phase` of
@@ -383,7 +403,7 @@ impl Land {
         phase: u64,
     ) {
         self.survey(field, line, widths, valley, s, phase);
-        self.work(s, BUDGET);
+        self.work(field, s, BUDGET);
     }
 
     /// Step `phase` of a survey. The channel is read when it starts, and
@@ -416,6 +436,7 @@ impl Land {
         } else if p == 2 * BANDS {
             self.now = s.time;
             self.weather(s.width);
+            self.weather_ponds(field, s.width);
             if self.founded {
                 self.tasks.push_back(Task::Accrete);
                 if s.farmsteads {
@@ -585,7 +606,7 @@ impl Land {
     /// next due reorganisation whenever the queue empties. Each task other
     /// than a search or a farmstead's change costs a quarter of a step's
     /// budget.
-    fn work(&mut self, s: &Settings, mut budget: usize) {
+    fn work(&mut self, field: &Erodibility, s: &Settings, mut budget: usize) {
         self.now = s.time;
         let cw = (self.cell / s.width) as f32;
         let limit = (REACH * self.target(s).1) as f32;
@@ -628,7 +649,7 @@ impl Land {
                 // costs nothing from the budget, so the holdings run as
                 // they would without farmsteads.
                 Task::Build(h) => {
-                    self.build(h, s);
+                    self.build(h, s, field);
                     true
                 }
                 Task::Done => {

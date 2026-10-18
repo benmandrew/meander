@@ -19,13 +19,38 @@
 //! building is sited across a tributary, and the bank or a stream takes
 //! any building it reaches. Abandoned buildings stand as ruins that
 //! fade over [`RUIN_TIME`], as the house platforms of deserted villages do.
+//!
+//! Once the parish boundary is set, a farmstead that has raised its whole
+//! plan on dry ground may found the parish church, with chance
+//! [`CHURCH_CHANCE`] at each such reorganisation and none within
+//! [`CHURCH_GAP`] of another. The church stands in its churchyard, laid
+//! east and west as medieval churches were, with the chancel at the east
+//! end. It belongs to no holding, so it stays when the farmsteads around
+//! it move away, as the churches of deserted villages stand alone in the
+//! fields. It is abandoned only when its ground grows too wet, and its
+//! stone ruin fades over [`CHURCH_RUIN_TIME`].
 
+use crate::field::Erodibility;
 use crate::geom::P;
 use crate::land::{FLEE_RISK, Land, NONE, SEAT_RISK, Settings};
 
 /// Simulated time over which an abandoned building fades away: 60 units,
 /// 150 years.
 pub const RUIN_TIME: f64 = 60.0;
+/// Simulated time over which a ruined church fades away: 400 units,
+/// 1,000 years, since it is built of stone.
+pub const CHURCH_RUIN_TIME: f64 = 400.0;
+/// Chance that a reorganisation which finds its farmstead's plan complete
+/// founds a church; the least distance between two standing churches, in
+/// channel widths; and the highest flood risk under a churchyard, on the
+/// driest ground of the floodplain.
+const CHURCH_CHANCE: f64 = 0.05;
+pub(crate) const CHURCH_GAP: f64 = 60.0;
+const CHURCH_RISK: f32 = 0.18;
+/// Distances from the seat, in channel widths, at which a church is
+/// sited, and the directions tried at each.
+const CHURCH_RINGS: [f64; 3] = [2.5, 3.5, 4.5];
+const CHURCH_WAYS: usize = 8;
 /// Highest flood risk at which a field barn stands; every other building
 /// stands to `FLEE_RISK`.
 const BARN_RISK: f32 = 0.8;
@@ -83,7 +108,12 @@ pub enum Kind {
     Cottage,
     /// A hay barn out on the meadow.
     FieldBarn,
+    /// The parish church in its churchyard, which belongs to no holding.
+    Church,
 }
+
+/// Number of kinds of building.
+const KINDS: usize = 8;
 
 impl Kind {
     /// Footprint, along the ridge by across it, in channel widths. The
@@ -97,11 +127,22 @@ impl Kind {
             Kind::Shed => [0.8, 0.5],
             Kind::Cottage => [0.8, 0.55],
             Kind::FieldBarn => [0.7, 0.45],
+            // The churchyard, which keeps other buildings off.
+            Kind::Church => [3.4, 2.2],
         }
     }
 
     fn slot(self) -> usize {
         self as usize
+    }
+
+    /// Simulated time over which the ruin fades away.
+    pub fn ruin_time(self) -> f64 {
+        if self == Kind::Church {
+            CHURCH_RUIN_TIME
+        } else {
+            RUIN_TIME
+        }
     }
 }
 
@@ -129,22 +170,22 @@ impl Building {
         self.ruined.is_infinite()
     }
 
-    fn rect(&self, w: f64) -> Rect {
+    pub(crate) fn rect(&self, w: f64) -> Rect {
         rect(self.pos, self.dir, self.kind, w)
     }
 }
 
 /// A footprint: centre, unit vector along the ridge, and half extents.
-type Rect = (P, P, [f64; 2]);
+pub(crate) type Rect = (P, P, [f64; 2]);
 
-fn rect(pos: P, dir: P, kind: Kind, w: f64) -> Rect {
+pub(crate) fn rect(pos: P, dir: P, kind: Kind, w: f64) -> Rect {
     let s = kind.size();
     (pos, dir, [0.5 * s[0] * w, 0.5 * s[1] * w])
 }
 
 /// Whether two footprints come within `pad` of each other, by separating
 /// axes.
-fn overlap(a: Rect, b: Rect, pad: f64) -> bool {
+pub(crate) fn overlap(a: Rect, b: Rect, pad: f64) -> bool {
     let d = [b.0[0] - a.0[0], b.0[1] - a.0[1]];
     let reach = |(_, u, h): Rect, n: P| {
         h[0] * (u[0] * n[0] + u[1] * n[1]).abs() + h[1] * (u[0] * n[1] - u[1] * n[0]).abs()
@@ -164,7 +205,7 @@ pub(crate) struct Reach {
 }
 
 /// Whether footprint `r` comes within `pad` of any stream.
-fn on_stream(streams: &[Reach], r: Rect, pad: f64) -> bool {
+pub(crate) fn on_stream(streams: &[Reach], r: Rect, pad: f64) -> bool {
     let ((c, u, h), n) = (r, [-r.1[1], r.1[0]]);
     let ex = h[0] * u[0].abs() + h[1] * n[0].abs() + pad;
     let ey = h[0] * u[1].abs() + h[1] * n[1].abs() + pad;
@@ -177,7 +218,7 @@ fn on_stream(streams: &[Reach], r: Rect, pad: f64) -> bool {
     })
 }
 
-fn dist2(a: P, b: P) -> f64 {
+pub(crate) fn dist2(a: P, b: P) -> f64 {
     (a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)
 }
 
@@ -236,18 +277,25 @@ impl Land {
         self.building_version += changed as u64;
     }
 
-    /// Remove the buildings and ruins the water has reached, a stream
-    /// among them, and the ruins that have faded. Runs at the end of a
-    /// survey, when `dist` is whole.
+    /// Abandon each church whose ground has grown too wet, then remove the
+    /// buildings and ruins the water has reached, a stream among them, and
+    /// the ruins that have faded. Runs at the end of a survey, when `dist`
+    /// is whole.
     pub(crate) fn weather(&mut self, w: f64) {
         let (cols, rows, c, now) = (self.cols, self.rows, self.cell, self.now);
+        for k in 0..self.buildings.len() {
+            let b = &self.buildings[k];
+            if b.kind == Kind::Church && b.standing() && self.risk[self.index(b.pos)] > FLEE_RISK {
+                self.ruin(k);
+            }
+        }
         let (dist, streams) = (&self.dist, &self.streams);
         let before = self.buildings.len();
         self.buildings.retain(|b| {
             let x = ((b.pos[0] / c).max(0.0) as usize).min(cols - 1);
             let y = ((b.pos[1] / c).max(0.0) as usize).min(rows - 1);
             dist[y * cols + x] > 0.0
-                && now - b.ruined < RUIN_TIME
+                && now - b.ruined < b.kind.ruin_time()
                 && !on_stream(streams, b.rect(w), 0.0)
         });
         self.building_version += (self.buildings.len() != before) as u64;
@@ -267,8 +315,9 @@ impl Land {
     /// farmstead that has moved leaves its buildings and raises a house at
     /// its new seat. Otherwise the worst threatened building is abandoned,
     /// then one building is raised towards the plan's target, or one
-    /// beyond it abandoned.
-    pub(crate) fn build(&mut self, h: usize, s: &Settings) {
+    /// beyond it abandoned. A farmstead whose plan is complete may found a
+    /// church or dig fishponds instead.
+    pub(crate) fn build(&mut self, h: usize, s: &Settings, field: &Erodibility) {
         let Some(g) = self.holdings[h].as_ref() else {
             return;
         };
@@ -303,7 +352,7 @@ impl Land {
             self.ruin(k);
         }
         let want = self.wanted(h, s);
-        let mut have = [0usize; 7];
+        let mut have = [0usize; KINDS];
         for b in self.buildings.iter().filter(|b| mine(b)) {
             have[b.kind.slot()] += 1;
         }
@@ -321,7 +370,7 @@ impl Land {
         }
         let ridge = self.risk[self.index(seat)] > SEAT_RISK;
         let plan: &[Kind] = if ridge { &RIDGE_PLAN } else { &COURT_PLAN };
-        let mut tally = [0usize; 7];
+        let mut tally = [0usize; KINDS];
         let mut next = None;
         for &k in plan.iter().chain(&[Kind::Cottage, Kind::FieldBarn]) {
             tally[k.slot()] += 1;
@@ -330,7 +379,12 @@ impl Land {
                 break;
             }
         }
-        let Some(kind) = next else { return };
+        let Some(kind) = next else {
+            if !self.found_church(h, s) {
+                self.dig_ponds(h, s, field);
+            }
+            return;
+        };
         let site = if kind == Kind::FieldBarn {
             self.barn_site(h, axis, s)
         } else {
@@ -345,7 +399,7 @@ impl Land {
     /// How many of each kind of building holding `h` wants: the first of
     /// its plan in proportion to its area, a cottage while it has a working
     /// mill, and a field barn while enough of its ground is meadow.
-    fn wanted(&self, h: usize, s: &Settings) -> [usize; 7] {
+    fn wanted(&self, h: usize, s: &Settings) -> [usize; KINDS] {
         let g = self.holdings[h].as_ref().unwrap();
         let me = h as u32;
         let a = g.area as f64 / self.target(s).0;
@@ -355,7 +409,7 @@ impl Land {
             (&COURT_PLAN, 1.0 + 4.0 * a)
         };
         let n = (n.round() as usize).clamp(1, plan.len());
-        let mut want = [0usize; 7];
+        let mut want = [0usize; KINDS];
         for k in &plan[..n] {
             want[k.slot()] += 1;
         }
@@ -510,7 +564,8 @@ impl Land {
                     CLEAR * w
                 };
                 b.standing() && overlap(o, r, pad)
-            }) || on_stream(&self.streams, r, CLEAR * w);
+            }) || on_stream(&self.streams, r, CLEAR * w)
+                || self.on_ponds(r, CLEAR * w, w);
             let Some(risk) = ground.filter(|_| !blocked) else {
                 continue;
             };
@@ -569,7 +624,12 @@ impl Land {
     /// either way. With none, the holding goes without a farmstead until
     /// the stream or its seat moves.
     fn house_site(&self, me: u32, seat: P, dir: P, w: f64) -> Option<(P, P)> {
-        let clear = |r: Rect| !on_stream(&self.streams, r, CLEAR * w);
+        let clear = |r: Rect| {
+            !on_stream(&self.streams, r, CLEAR * w)
+                && !(self.buildings.iter()).any(|o| {
+                    o.kind == Kind::Church && o.standing() && overlap(o.rect(w), r, CLEAR * w)
+                })
+        };
         if clear(rect(seat, dir, Kind::House, w)) {
             return Some((seat, dir));
         }
@@ -633,8 +693,60 @@ impl Land {
             .buildings
             .iter()
             .any(|b| b.standing() && overlap(b.rect(s.width), r, CLEAR * s.width))
-            && !on_stream(&self.streams, r, CLEAR * s.width);
+            && !on_stream(&self.streams, r, CLEAR * s.width)
+            && !self.on_ponds(r, CLEAR * s.width, s.width);
         clear.then_some((p, axis))
+    }
+
+    /// Found a church for holding `h`, if the parish boundary is set, no
+    /// standing church lies within [`CHURCH_GAP`] of the seat or the site, the seat
+    /// stands on ground below [`CHURCH_RISK`], and a draw falls under
+    /// [`CHURCH_CHANCE`]. The churchyard goes on the driest site of
+    /// [`CHURCH_RINGS`] around the seat that lies wholly on the holding's
+    /// ground below `CHURCH_RISK`, clear of buildings and streams, laid
+    /// east and west. Returns whether a church was founded.
+    fn found_church(&mut self, h: usize, s: &Settings) -> bool {
+        let Some(seat) = self.holdings[h].as_ref().map(|g| g.seat) else {
+            return false;
+        };
+        let w = s.width;
+        let gap = (CHURCH_GAP * w).powi(2);
+        let near = |l: &Land, p: P| {
+            (l.buildings.iter())
+                .any(|b| b.kind == Kind::Church && b.standing() && dist2(b.pos, p) < gap)
+        };
+        if !self.parish()
+            || near(self, seat)
+            || self.risk[self.index(seat)] > CHURCH_RISK
+            || self.works_rng.uniform() >= CHURCH_CHANCE
+        {
+            return false;
+        }
+        let (me, east) = (h as u32, [1.0, 0.0]);
+        let mut best: Option<(f64, P)> = None;
+        for ring in CHURCH_RINGS {
+            for k in 0..CHURCH_WAYS {
+                let a = std::f64::consts::TAU * k as f64 / CHURCH_WAYS as f64;
+                let (sin, cos) = a.sin_cos();
+                let p = [seat[0] + ring * w * cos, seat[1] + ring * w * sin];
+                let r = rect(p, east, Kind::Church, w);
+                let Some(risk) = self.ground(r, me).filter(|&r| r <= CHURCH_RISK) else {
+                    continue;
+                };
+                let blocked = (self.buildings.iter())
+                    .any(|b| b.standing() && overlap(b.rect(w), r, CLEAR * w))
+                    || on_stream(&self.streams, r, CLEAR * w)
+                    || self.on_ponds(r, CLEAR * w, w)
+                    || near(self, p);
+                let score = ring + RISK_WEIGHT * risk as f64;
+                if !blocked && best.is_none_or(|(b, _)| score < b) {
+                    best = Some((score, p));
+                }
+            }
+        }
+        let Some((_, p)) = best else { return false };
+        self.raise(Kind::Church, p, east, NONE, p);
+        true
     }
 }
 

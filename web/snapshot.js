@@ -17,7 +17,8 @@ const SCALARS = [
 // Copies the river returns, passed on as they are.
 const VECTORS = [
   'jams', 'tributaries', 'tributary_courses', 'mills', 'mill_leats', 'track_points',
-  'track_lengths', 'fords', 'boundary', 'buildings', 'wall_combes',
+  'track_lengths', 'track_depths', 'hollow_points', 'hollow_lengths', 'hollow_depths',
+  'fords', 'boundary', 'buildings', 'ponds', 'wall_combes',
 ];
 
 // Buffers in the WASM memory, at `<name>_ptr`, each with its element type

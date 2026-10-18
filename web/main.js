@@ -241,6 +241,20 @@ const USE_MARGIN = 0.05;
 const CROP_OPACITY = 0.5;
 const WOODLAND = 0.12;
 const WOODS_OPACITY = 0.35;
+// Ridge and furrow: centuries of ploughing each strip towards its middle
+// raised it into a ridge, and arable fields show their furrows,
+// `FURROW_GAP` widths apart, along the field's length. An ox team began to
+// swing left before the headland, so each ridge bends in a reversed S,
+// `FURROW_S` of the field's length either way. The furrows stop
+// `FURROW_HEAD` widths short of each end, where the team turned on the
+// headland, and are sampled every `FURROW_STEP` widths.
+const FURROW = [124, 122, 78];
+const FURROW_GAP = 0.6;
+const FURROW_S = 0.05;
+const FURROW_HEAD = 0.4;
+const FURROW_STEP = 0.5;
+const FURROW_WIDTH = 0.09;
+const FURROW_OPACITY = 0.3;
 // Hedges along `HEDGE_EDGE` of the boundaries between holdings and
 // `HEDGE_SIDE` of those between fields of one holding, `HEDGE_WIDTH`
 // widths thick. Crowns beside a hedge stand in it as hedgerow trees.
@@ -315,7 +329,7 @@ const LEAT_TAIL = 6;
 // as a house platform over the core's `RUIN_TIME` (150 years); the
 // farmsteads are redrawn at least every `BUILDING_REFRESH` (50 years) as
 // the platforms fade.
-const FOOTPRINTS = [[1.1, 0.7], [0.9, 0.35], [1.5, 0.8], [1.0, 0.55], [0.8, 0.5], [0.8, 0.55], [0.7, 0.45]];
+const FOOTPRINTS = [[1.1, 0.7], [0.9, 0.35], [1.5, 0.8], [1.0, 0.55], [0.8, 0.5], [0.8, 0.55], [0.7, 0.45], [3.4, 2.2]];
 const THATCH = [146, 128, 96];
 const YARD_EARTH = [204, 190, 152];
 const MOUND = [180, 170, 126];
@@ -323,6 +337,27 @@ const PLATFORM = [150, 140, 108];
 const MOUND_RIM = 0.3;
 const YARD_RIM = 0.35;
 const BUILDING_REFRESH = 20;
+// The parish church, laid east and west in a churchyard of radii
+// `CHURCH_YARD` widths: a west tower, the nave and the chancel at the east
+// end, each a centre along the church and half extents along and across
+// it, in widths. Stone walls and a roof of stone slates, with a yew or two
+// in the churchyard. A ruin fades over the core's `CHURCH_RUIN_TIME`
+// (1,000 years).
+const CHURCH_YARD = [1.7, 1.1];
+const CHURCH_PARTS = [[-1.0, 0.27, 0.27], [-0.09, 0.64, 0.36], [0.85, 0.3, 0.26]];
+const CHURCH_ROOF = [150, 146, 132];
+const TOWER = [122, 118, 106];
+const CHURCHYARD = [150, 170, 110];
+const YEW = [44, 66, 48];
+const YEW_RADIUS = 0.24;
+// Fishponds in the old channels: the core's `POND` footprint in widths,
+// still water darker than the river's, a fringe of reeds, and the spoil
+// banks `POND_BANK` widths wide around each. An abandoned pond silts to
+// marsh over the core's `POND_RUIN_TIME` (250 years).
+const POND = [1.3, 0.5];
+const POND_WATER = [72, 116, 124];
+const POND_BANK = 0.16;
+const POND_MARSH = [118, 134, 96];
 // Tracks: an earth surface `TRACK_WIDTH` wide on a darker verge
 // `TRACK_VERGE` wide, simplified to within `TRACK_SIMPLIFY` widths and
 // redrawn at most every `TRACK_REFRESH`.
@@ -332,6 +367,17 @@ const TRACK_WIDTH = 0.3;
 const TRACK_VERGE = 0.5;
 const TRACK_SIMPLIFY = 0.35;
 const TRACK_REFRESH = 20;
+// Hollow ways: a track the core has worn past each of `HOLLOW_LEVELS` of
+// depth gains a pair of banks `HOLLOW_WIDTH` widths wide, the shaded one
+// set towards the upper-left light and the lit one away from it, by
+// `HOLLOW_SHIFT` widths, so the banks stack deeper as the lane sinks. An
+// abandoned hollow way keeps its banks over a grassy floor until it fills.
+const HOLLOW_LEVELS = [0.2, 0.45, 0.7];
+const HOLLOW_WIDTH = 0.9;
+const HOLLOW_SHIFT = 0.12;
+const HOLLOW_SHADE = [86, 90, 58];
+const HOLLOW_LIGHT = [240, 232, 196];
+const HOLLOW_FLOOR = [126, 140, 92];
 // A ford: a band of broken, shallow water `FORD_WIDTH` wide across the
 // channel, with stepping stones of bar sand along it.
 const FORD_WATER = [150, 188, 196];
@@ -1717,6 +1763,10 @@ class SvgRenderer {
     this.scarpMask = el('path', { fill: 'black' }, mask);
     this.fieldLayer = el('g', { mask: 'url(#farmland)' }, ground);
     this.parcels = el('g', {}, this.fieldLayer);
+    this.furrows = el('path', {
+      fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${FURROW})`,
+      'stroke-opacity': FURROW_OPACITY,
+    }, this.fieldLayer);
     this.hedges = el('path', {
       fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${HEDGE})`, 'stroke-opacity': 0.8,
     }, this.fieldLayer);
@@ -1790,17 +1840,37 @@ class SvgRenderer {
     // ridges.
     // Tracks lie over the fields, levees and marsh, and under the
     // farmsteads they lead to and the trees that overhang them.
+    // Fishponds lie over the marsh of the plugs they are dug in, and under
+    // the tracks that run along their dams: the spoil banks, then the
+    // water with its reeds, then the ponds silting up.
+    const ponds = el('g', { 'stroke-linejoin': 'round' }, ground);
+    this.pondBanks = el('path', { fill: `rgb(${MOUND})`, 'fill-opacity': 0.55 }, ponds);
+    this.fishponds = el('path', {
+      fill: `rgb(${POND_WATER})`, 'fill-opacity': 0.9, stroke: REEDS, 'stroke-opacity': 0.8,
+    }, ponds);
+    this.siltLayer = el('g', {}, ponds);
     const tracks = el('g', round, ground);
+    // Hollow ways' banks lie under the lanes, deepest on top.
+    this.hollowFloor = el('path', { stroke: `rgb(${HOLLOW_FLOOR})`, 'stroke-opacity': 0.35 }, tracks);
+    this.hollowBanks = HOLLOW_LEVELS.map(() => [HOLLOW_LIGHT, HOLLOW_SHADE].map((c) => el('path', {
+      stroke: `rgb(${c})`, 'stroke-opacity': c === HOLLOW_SHADE ? 0.22 : 0.3,
+    }, tracks)));
     this.verges = el('path', { stroke: `rgb(${VERGE})`, 'stroke-opacity': 0.4 }, tracks);
     this.tracks = el('path', { stroke: `rgb(${TRACK})`, 'stroke-opacity': 0.85 }, tracks);
     this.tracksAt = null;
     const farms = el('g', { 'stroke-linejoin': 'round' }, ground);
+    this.churchyards = el('path', {
+      fill: `rgb(${CHURCHYARD})`, 'fill-opacity': 0.5, stroke: `rgb(${STONE})`, 'stroke-opacity': 0.9,
+    }, farms);
     this.yards = el('path', { fill: `rgb(${YARD_EARTH})`, 'fill-opacity': 0.55 }, farms);
     this.mounds = el('path', { fill: `rgb(${MOUND})`, 'fill-opacity': 0.5 }, farms);
     this.ruinLayer = el('g', { fill: `rgb(${PLATFORM})`, stroke: `rgb(${WALLING})` }, farms);
     this.thatch = el('path', { fill: `rgb(${THATCH})`, stroke: `rgb(${WALLING})` }, farms);
     this.tiles = el('path', { fill: `rgb(${ROOF})`, stroke: `rgb(${WALLING})` }, farms);
+    this.churches = el('path', { fill: `rgb(${CHURCH_ROOF})`, stroke: `rgb(${WALLING})` }, farms);
+    this.towers = el('path', { fill: `rgb(${TOWER})`, stroke: `rgb(${WALLING})` }, farms);
     this.roofRidges = el('path', { fill: 'none', stroke: `rgb(${WALLING})` }, farms);
+    this.yews = el('path', { fill: `rgb(${YEW})`, 'fill-opacity': 0.9 }, farms);
     this.buildingsAt = null;
     // Trees lie over the scroll bars, which the canopy hides as it closes:
     // the shadows of every crown, then the crowns in a few tones, then
@@ -1924,6 +1994,7 @@ class SvgRenderer {
     this.fieldsAt = null;
     this.fieldJob = null;
     this.cropMask = null;
+    this.churchyardsAt = null;
     this.meadow = new Map();
     for (const scar of this.scars) scar.shape = null;
     for (const lake of this.lakes) lake.inputs = null;
@@ -2013,7 +2084,7 @@ class SvgRenderer {
           if (f === undefined) {
             f = fields.length + 1;
             index.set(key, f);
-            fields.push({ key, o, cells: 0, risk: 0 });
+            fields.push({ key, o, k, m, strip, cells: 0, risk: 0 });
           }
           last = { key, f, field: fields[f - 1] };
         }
@@ -2052,6 +2123,40 @@ class SvgRenderer {
       const uses = meadow ? MEADOWS : ARABLE;
       f.colour = f.woods ? FOREST.at(-1).colour : uses[Math.floor(hash01(f.key, 8) * uses.length)];
       f.opacity = f.woods ? WOODS_OPACITY : (CROP_OPACITY * (0.8 + 0.4 * hash01(f.key, 9))).toFixed(2);
+    }
+    // The furrows of each arable field: lines along its length at even
+    // places across its strip, bent by the strip's wave and the reversed
+    // S, kept where they cross the field's own cells.
+    let furrowData = '';
+    const [head, step] = [FURROW_HEAD * w, FURROW_STEP * w];
+    for (const [n, f] of fields.entries()) {
+      if (n % 4 === 0 && due()) yield;
+      if (f.woods || meadowNow.get(f.key)) continue;
+      const L = layouts[f.o], { len, lean, shift } = f.strip;
+      if (len <= 2 * head) continue;
+      const count = Math.max(1, Math.round(L.strip / (FURROW_GAP * w)));
+      const steps = Math.max(2, Math.ceil((len - 2 * head) / step));
+      for (let r = 0; r < count; r++) {
+        const across = (r + 0.5) / count;
+        const [u0, v0] = [(f.m - shift) * len - lean * across, (f.k + across - L.phase) * L.strip];
+        let run = [];
+        for (let q = 0; q <= steps + 1; q++) {
+          let inside = false, x = 0, y = 0;
+          if (q <= steps) {
+            const t = (head + (len - 2 * head) * q / steps) / len, u = u0 + t * len;
+            const v = v0 - FURROW_S * len * Math.sin(2 * Math.PI * t) - FIELD_BEND * w * Math.sin(u / L.wave + L.bend);
+            [x, y] = [L.x + u * L.ax - v * L.ay, L.y + u * L.ay + v * L.ax];
+            const [i, j] = [Math.floor(x / cell) - c0, Math.floor(y / cell)];
+            inside = i >= 0 && j >= 0 && i < W && j < rows && lab[j * W + i] === n + 1;
+          }
+          if (inside) {
+            run.push(x, y);
+          } else {
+            if (run.length >= 4) furrowData += pointsData(run);
+            run = [];
+          }
+        }
+      }
     }
     const mask = new Uint8Array(W * rows);
     for (let n = 0; n < lab.length; n++) {
@@ -2112,6 +2217,7 @@ class SvgRenderer {
       drawn.push([field, twin(this.fieldPaths.get(field.key) ?? el('path', {}), d)]);
     }
     const hedges = twin(this.hedges, hedgeData);
+    const furrows = twin(this.furrows, furrowData);
     // The writes alone in the last stage, which a call's chaining would
     // otherwise run into.
     yield;
@@ -2131,6 +2237,9 @@ class SvgRenderer {
     if (hedges !== this.hedges) this.hedges.replaceWith(hedges);
     this.hedges = hedges;
     set(this.hedges, 'stroke-width', dp1(HEDGE_WIDTH * w));
+    if (furrows !== this.furrows) this.furrows.replaceWith(furrows);
+    this.furrows = furrows;
+    set(this.furrows, 'stroke-width', dp1(FURROW_WIDTH * w));
     this.cropMask = { mask, c0, W };
     this.treesStale = true;
   }
@@ -2784,9 +2893,48 @@ class SvgRenderer {
     const yards = new Map();
     let [mounds, thatch, tiles, ridges] = ['', '', '', ''];
     const ruins = [];
+    // A box about `along` widths from the centre along the ridge and
+    // `across` widths across it, `hl` by `hd` widths.
+    const piece = (cx, cy, ux, uy, along, across, hl, hd) => {
+      const [bx, by] = [cx + along * w * ux + across * w * uy, cy + along * w * uy - across * w * ux];
+      return pointsData([[-1, -1], [1, -1], [1, 1], [-1, 1]].flatMap(([s, r]) => [
+        bx + s * hl * w * ux + r * hd * w * uy, by + s * hl * w * uy - r * hd * w * ux,
+      ])) + 'Z';
+    };
+    const ellipse = (cx, cy, rx, ry) => {
+      const arc = `A${dp1(rx)} ${dp1(ry)} 0 1 0`;
+      return `M${dp1(cx - rx)} ${dp1(cy)}${arc} ${dp1(cx + rx)} ${dp1(cy)}${arc} ${dp1(cx - rx)} ${dp1(cy)}Z`;
+    };
+    let [yardsOf, churches, towers, yews] = ['', '', '', ''];
+    const churchyards = [];
     for (let k = 0; k < data.length; k += 8) {
       const [cx, cy, ux, uy, kind, mound, age, holding] = data.subarray(k, k + 8);
       if (cx < x0 - 4 * w || cx > x0 + vw + 4 * w) continue;
+      if (kind === 7) {
+        const yard = ellipse(cx, cy, CHURCH_YARD[0] * w, CHURCH_YARD[1] * w);
+        const parts = CHURCH_PARTS.map(([at, hl, hd]) => piece(cx, cy, ux, uy, at, 0, hl, hd));
+        if (age > 0) {
+          ruins.push([parts.join(''), 1 - age], [yard, 1 - age, true]);
+          continue;
+        }
+        yardsOf += yard;
+        churchyards.push(cx, cy);
+        towers += parts[0];
+        churches += parts[1] + parts[2];
+        for (const [at, hl] of CHURCH_PARTS.slice(1)) {
+          ridges += `M${dp1(cx + (at - hl) * w * ux)} ${dp1(cy + (at - hl) * w * uy)}`
+            + `L${dp1(cx + (at + hl) * w * ux)} ${dp1(cy + (at + hl) * w * uy)}`;
+        }
+        // A yew or two south of the nave, where they stand in most
+        // churchyards, placed by the church's site.
+        const yewCount = 1 + Math.floor(2 * hash01(Math.round(cx), Math.round(cy), 11));
+        for (let y = 0; y < yewCount; y++) {
+          const along = -0.6 + 1.2 * hash01(Math.round(cx), Math.round(cy), 12 + y);
+          const [yx, yy] = [cx + along * w * ux - 0.72 * w * uy, cy + along * w * uy + 0.72 * w * ux];
+          yews += circleData(yx, yy, YEW_RADIUS * w);
+        }
+        continue;
+      }
       const [hl, hd] = [0.5 * FOOTPRINTS[kind][0] * w, 0.5 * FOOTPRINTS[kind][1] * w];
       const corners = (grow) => [[-1, -1], [1, -1], [1, 1], [-1, 1]].flatMap(([s, r]) => [
         cx + s * (hl + grow) * ux + r * (hd + grow) * uy, cy + s * (hl + grow) * uy - r * (hd + grow) * ux,
@@ -2818,6 +2966,17 @@ class SvgRenderer {
       yardData += pointsData(chaikin(chaikin([...ring, ring[0], ring[1]], true), true)) + 'Z';
     }
     const stroke = dp1(0.06 * w);
+    // Crowns stand clear of the churchyards, which hold only their yews.
+    if (`${churchyards}` !== `${this.churchyardsAt}`) {
+      this.churchyardsAt = churchyards;
+      this.treesStale = true;
+    }
+    set(this.churchyards, 'd', yardsOf);
+    set(this.churches, 'd', churches);
+    set(this.towers, 'd', towers);
+    set(this.yews, 'd', yews);
+    for (const p of [this.churches, this.towers]) set(p, 'stroke-width', stroke);
+    set(this.churchyards, 'stroke-width', dp1(0.1 * w));
     set(this.yards, 'd', yardData);
     set(this.mounds, 'd', mounds);
     set(this.thatch, 'd', thatch);
@@ -2825,12 +2984,45 @@ class SvgRenderer {
     set(this.roofRidges, 'd', ridges);
     for (const p of [this.thatch, this.tiles, this.roofRidges]) set(p, 'stroke-width', stroke);
     this.ruinLayer.replaceChildren();
-    for (const [d, fade] of ruins) {
+    // A ruined churchyard keeps only its wall.
+    for (const [d, fade, wall] of ruins) {
       el('path', {
-        d, 'fill-opacity': (0.3 * fade).toFixed(2), 'stroke-opacity': (0.6 * fade).toFixed(2), 'stroke-width': stroke,
+        d, 'fill-opacity': wall ? 0 : (0.3 * fade).toFixed(2), 'stroke-opacity': (0.6 * fade).toFixed(2), 'stroke-width': stroke,
         'stroke-dasharray': `${dp1(0.2 * w)} ${dp1(0.15 * w)}`,
       }, this.ruinLayer);
     }
+    this.drawPonds(river, w);
+  }
+
+  // The fishponds over the window: each a rounded rectangle along its old
+  // channel, its spoil banks around it. A pond kept by its holding holds
+  // water edged with reeds; an abandoned one turns from water to marsh over
+  // the first half of its silting and fades over the whole.
+  drawPonds(river, w) {
+    const data = river.ponds();
+    const [x0, vw] = this.window;
+    const [hl, hd] = [0.5 * POND[0] * w, 0.5 * POND[1] * w];
+    const outline = (cx, cy, ux, uy, grow) => pointsData(chaikin(chaikin([[-1, -1], [1, -1], [1, 1], [-1, 1], [-1, -1]]
+      .flatMap(([s, r]) => [cx + s * (hl + grow) * ux - r * (hd + grow) * uy, cy + s * (hl + grow) * uy + r * (hd + grow) * ux]),
+    true), true)) + 'Z';
+    let [banks, water] = ['', ''];
+    this.siltLayer.replaceChildren();
+    for (let k = 0; k < data.length; k += 5) {
+      const [cx, cy, ux, uy, age] = data.subarray(k, k + 5);
+      if (cx < x0 - 2 * w || cx > x0 + vw + 2 * w) continue;
+      if (age > 0) {
+        el('path', {
+          d: outline(cx, cy, ux, uy, 0), fill: mix(POND_WATER, POND_MARSH, smoothstep(2 * age)),
+          'fill-opacity': (0.85 * (1 - age)).toFixed(2),
+        }, this.siltLayer);
+        continue;
+      }
+      banks += outline(cx, cy, ux, uy, POND_BANK * w);
+      water += outline(cx, cy, ux, uy, 0);
+    }
+    set(this.pondBanks, 'd', banks);
+    set(this.fishponds, 'd', water);
+    set(this.fishponds, 'stroke-width', dp1(0.1 * w));
   }
 
   // The tracks over the window. Tracks share their ends near the
@@ -2838,44 +3030,83 @@ class SvgRenderer {
   // drawn once: a track is cut into runs of cells not drawn already, each
   // run starting from the cell where it leaves a track drawn before, and
   // each run is simplified and rounded on its own. The runs then meet at
-  // the cell centres they share.
+  // the cell centres they share. The stretches of each run, and of each
+  // abandoned hollow way, deeper than each of `HOLLOW_LEVELS` gain that
+  // level's banks.
   drawTracks(river, w) {
     this.tracksAt = { key: river.track_version(), t: river.time() };
-    const [pts, lengths] = [river.track_points(), river.track_lengths()];
+    const [pts, lengths, depths] = [river.track_points(), river.track_lengths(), river.track_depths()];
     const [x0, vw] = this.window;
     const [lo, hi] = [x0 - 2 * w, x0 + vw + 2 * w];
     const drawn = new Set();
-    let d = '';
-    const flush = (run) => {
-      if (run.length < 4) return;
-      let inside = false;
-      for (let k = 0; k < run.length && !inside; k += 2) inside = run[k] >= lo && run[k] <= hi;
-      if (inside) d += pointsData(chaikin(chaikin(simplify(run, TRACK_SIMPLIFY * w), false), false));
+    const line = (run) => pointsData(chaikin(chaikin(simplify(run, TRACK_SIMPLIFY * w), false), false));
+    const shown = (run) => {
+      for (let k = 0; k < run.length; k += 2) if (run[k] >= lo && run[k] <= hi) return true;
+      return false;
+    };
+    let [d, floor] = ['', ''];
+    const banks = HOLLOW_LEVELS.map(() => '');
+    const hollow = (run, deep) => HOLLOW_LEVELS.forEach((level, b) => {
+      let part = [];
+      for (let k = 0; k <= deep.length; k++) {
+        if (k < deep.length && deep[k] >= level) {
+          part.push(run[2 * k], run[2 * k + 1]);
+          continue;
+        }
+        if (part.length >= 4) banks[b] += line(part);
+        part = [];
+      }
+    });
+    const flush = (run, deep) => {
+      if (run.length < 4 || !shown(run)) return;
+      d += line(run);
+      hollow(run, deep);
     };
     let start = 0;
     for (const len of lengths) {
-      let run = [];
+      let [run, deep] = [[], []];
       for (let k = start; k < start + len; k++) {
         const [x, y] = [pts[2 * k], pts[2 * k + 1]];
         const key = `${x} ${y}`;
         if (drawn.has(key)) {
           if (run.length) {
             run.push(x, y);
-            flush(run);
+            deep.push(depths[k]);
+            flush(run, deep);
           }
-          run = [x, y];
+          [run, deep] = [[x, y], [depths[k]]];
           continue;
         }
         drawn.add(key);
         run.push(x, y);
+        deep.push(depths[k]);
       }
-      flush(run);
+      flush(run, deep);
       start += len;
+    }
+    const [hpts, hlengths, hdepths] = [river.hollow_points(), river.hollow_lengths(), river.hollow_depths()];
+    start = 0;
+    for (const len of hlengths) {
+      const run = Array.from(hpts.subarray(2 * start, 2 * (start + len)));
+      const deep = hdepths.subarray(start, start + len);
+      start += len;
+      if (run.length < 4 || !shown(run)) continue;
+      hollow(run, deep);
+      if (deep.some((v) => v >= HOLLOW_LEVELS[0])) floor += line(run);
     }
     set(this.tracks, 'd', d);
     set(this.verges, 'd', d);
     set(this.tracks, 'stroke-width', dp1(TRACK_WIDTH * w));
     set(this.verges, 'stroke-width', dp1(TRACK_VERGE * w));
+    set(this.hollowFloor, 'd', floor);
+    set(this.hollowFloor, 'stroke-width', dp1(TRACK_VERGE * w));
+    banks.forEach((data, b) => this.hollowBanks[b].forEach((bank, side) => {
+      // Light from the upper left: the shaded bank lies towards it.
+      const shift = dp1((side ? -1 : 1) * HOLLOW_SHIFT * w * Math.SQRT1_2);
+      set(bank, 'd', data);
+      set(bank, 'transform', `translate(${shift} ${shift})`);
+      set(bank, 'stroke-width', dp1(HOLLOW_WIDTH * w));
+    }));
   }
 
   // Each ford: a band of shallow water across the channel from bank to
@@ -3235,7 +3466,7 @@ class SvgRenderer {
     }
     yield;
     const treeArgs = [cols, rows, cell, shrub, forest, w, graze];
-    const crop = this.cropMask;
+    const [crop, yards] = [this.cropMask, this.churchyardsAt];
     const trees = yield* this.treeStages(blur, ...treeArgs);
     yield;
     swap(this.forest, forestData);
@@ -3246,9 +3477,9 @@ class SvgRenderer {
     if (this.treeBlur?.length !== blur.length) this.treeBlur = new Float32Array(blur.length);
     this.treeBlur.set(blur);
     this.treeArgs = treeArgs;
-    // Fields finished since the crowns were sized leave them stale, for
-    // `redrawTrees` to size again.
-    if (this.cropMask === crop) this.treesStale = false;
+    // Fields or churches changed since the crowns were sized leave them
+    // stale, for `redrawTrees` to size again.
+    if (this.cropMask === crop && this.churchyardsAt === yards) this.treesStale = false;
     // The grid stamps the channel as it lay at the sync, so centrelines
     // kept up to then are now bare in the contours.
     const keep = [];
@@ -3265,15 +3496,16 @@ class SvgRenderer {
   redrawTrees() {
     if (!this.treeJob) {
       this.treeJob = this.treeStages(this.treeBlur, ...this.treeArgs);
-      this.treeCrop = this.cropMask;
+      [this.treeCrop, this.treeYards] = [this.cropMask, this.churchyardsAt];
     }
     let step;
     do step = this.treeJob.next(); while (!step.done && performance.now() <= this.until);
     if (!step.done) return;
     this.treeJob = null;
     this.setTrees(step.value);
-    // Fields finished while the crowns were sized leave them stale still.
-    if (this.cropMask === this.treeCrop) this.treesStale = false;
+    // Fields or churches changed while the crowns were sized leave them
+    // stale still.
+    if (this.cropMask === this.treeCrop && this.churchyardsAt === this.treeYards) this.treesStale = false;
   }
 
   // Carry on with work spread over frames, on a frame that draws nothing.
@@ -3333,6 +3565,8 @@ class SvgRenderer {
     const grow = Math.max(1e-6, TREE_GROW * forest);
     const light = this.treeKinds.length - 1;
     const crop = this.cropMask;
+    const yards = this.churchyardsAt ?? [];
+    const [rx, ry] = [CHURCH_YARD[0] * w, CHURCH_YARD[1] * w];
     const data = [];
     for (const { crowns, paths } of this.treeStrips) {
       if (data.length) yield;
@@ -3342,6 +3576,11 @@ class SvgRenderer {
         if (i < 0 || i >= cols || j < 0 || j >= rows) continue;
         const k = i - (crop?.c0 ?? 0);
         if (crop && k >= 0 && k < crop.W && crop.mask[j * crop.W + k] && blur[j * cols + i] > farm) continue;
+        let yard = false;
+        for (let y = 0; y < yards.length && !yard; y += 2) {
+          yard = ((c.x - yards[y]) / rx) ** 2 + ((c.y - yards[y + 1]) / ry) ** 2 < 1;
+        }
+        if (yard) continue;
         const start = from + c.at * (to - from);
         const r = TREE_RADIUS * w * c.size * clamp01((blur[j * cols + i] - start) / grow);
         if (r < TREE_MIN * w) continue;

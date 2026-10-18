@@ -7,7 +7,8 @@
 //! without copying. Call `sync` after stepping, then rebuild every typed
 //! array view: memory growth detaches old views.
 
-use meander_core::farm::RUIN_TIME;
+use meander_core::land::NONE;
+use meander_core::ponds::POND_RUIN_TIME;
 use meander_core::{FAN_MAX_DEPTH, MILL_RUIN, Params, Sim};
 use wasm_bindgen::prelude::*;
 
@@ -482,6 +483,33 @@ impl River {
             .map(|t| t.len() as u32)
             .collect()
     }
+    /// Depth of each point of `track_points` as a hollow way, in [0, 1].
+    pub fn track_depths(&self) -> Vec<f32> {
+        self.sim.tracks.depths.iter().flatten().copied().collect()
+    }
+    /// Every abandoned hollow way's points, back to back, as flat x, y
+    /// pairs at the centres of its cells; see `hollow_lengths`.
+    pub fn hollow_points(&self) -> Vec<f32> {
+        (self.sim.tracks.hollows.iter().flatten())
+            .flat_map(|p| [p[0] as f32, p[1] as f32])
+            .collect()
+    }
+    /// The number of points of each hollow way in `hollow_points`.
+    pub fn hollow_lengths(&self) -> Vec<u32> {
+        (self.sim.tracks.hollows.iter())
+            .map(|t| t.len() as u32)
+            .collect()
+    }
+    /// Depth of each point of `hollow_points`, in [0, 1].
+    pub fn hollow_depths(&self) -> Vec<f32> {
+        self.sim
+            .tracks
+            .hollow_depths
+            .iter()
+            .flatten()
+            .copied()
+            .collect()
+    }
     /// Changes whenever the tracks are laid out again.
     pub fn track_version(&self) -> f64 {
         self.sim.tracks.version as f64
@@ -515,9 +543,10 @@ impl River {
 
     /// The farmsteads' buildings, eight values each: the centre's x and y,
     /// the unit vector along the ridge, the kind (0 house, 1 outshut, 2
-    /// barn, 3 byre, 4 shed, 5 cottage, 6 field barn), 1 if it stands on a
-    /// mound, its age as a ruin over `RUIN_TIME` (0 while it stands), and
-    /// the holding that keeps it, or −1 for a ruin.
+    /// barn, 3 byre, 4 shed, 5 cottage, 6 field barn, 7 church), 1 if it
+    /// stands on a mound, its age as a ruin over its kind's ruin time (0
+    /// while it stands), and the holding that keeps it, or −1 for a ruin
+    /// or a church.
     pub fn buildings(&self) -> Vec<f32> {
         let sim = &self.sim;
         let mut out = Vec::with_capacity(8 * sim.land.buildings.len());
@@ -525,9 +554,13 @@ impl River {
             let age = if b.standing() {
                 0.0
             } else {
-                ((sim.time - b.ruined) / RUIN_TIME).min(1.0)
+                ((sim.time - b.ruined) / b.kind.ruin_time()).min(1.0)
             };
-            let holding = if b.standing() { b.holding as f64 } else { -1.0 };
+            let holding = if b.standing() && b.holding != NONE {
+                b.holding as f64
+            } else {
+                -1.0
+            };
             out.extend(
                 [
                     b.pos[0],
@@ -544,7 +577,24 @@ impl River {
         }
         out
     }
-    /// Changes whenever a building is raised, abandoned or lost.
+    /// The fishponds, five values each: the centre's x and y, the unit
+    /// vector along the pond, and its age since it was abandoned over
+    /// `POND_RUIN_TIME` (0 while it is kept).
+    pub fn ponds(&self) -> Vec<f32> {
+        let sim = &self.sim;
+        let mut out = Vec::with_capacity(5 * sim.land.ponds.len());
+        for p in &sim.land.ponds {
+            let age = if p.kept() {
+                0.0
+            } else {
+                ((sim.time - p.ruined) / POND_RUIN_TIME).min(1.0)
+            };
+            out.extend([p.pos[0], p.pos[1], p.dir[0], p.dir[1], age].map(|v| v as f32));
+        }
+        out
+    }
+    /// Changes whenever a building is raised, abandoned or lost, and
+    /// whenever a fishpond is dug, abandoned or lost.
     pub fn building_version(&self) -> f64 {
         self.sim.land.building_version as f64
     }
