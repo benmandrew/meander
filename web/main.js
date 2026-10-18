@@ -238,7 +238,17 @@ const FIELD_REFRESH = 5;
 // `vegetation_time`, when it is as thick as old meadow: 50 to 250 years.
 // The regions are redrawn with the forest, every `LEVEE_REFRESH`, so each
 // redraw moves the fade by about one region, not the fields' whole edge.
+// The fields redraw after them, as which fields the fade reaches changes.
 const FIELD_FADE = 8;
+// A square larger than any window, for clips that cut holes in the plane.
+const OUTSIDE = 'M-1e6-1e6h2e6v2e6h-2e6z';
+// The opacity that a copy of a fading field adds in region `k` of the
+// fade, 1 to `FIELD_FADE`, over the copies in the regions before it, so
+// that `k` copies stack to `k / FIELD_FADE` of the field's `opacity`.
+function fadeStep(opacity, k) {
+  const share = opacity / FIELD_FADE;
+  return Math.round(1000 * share / (1 - share * (k - 1))) / 1000;
+}
 // Land use follows flood risk, as on a medieval floodplain: meadow and
 // pasture on ground at risk `MEADOW_RISK` or more, which floods too often
 // to plough, and arable on the drier ground. `WOODLAND` of the fields stay
@@ -1954,33 +1964,43 @@ class SvgRenderer {
     this.forestAt = null;
     // The upland's drier soil, under its fields.
     this.uplandLayer = el('g', { fill: `rgb(${UPLAND})`, 'fill-opacity': UPLAND_OPACITY }, ground);
-    // Fields lie over the forest, masked by the grassed ground: each fade
-    // region is painted over the last in a lighter grey, so the mask
-    // brightens towards the oldest ground with no seams between regions.
-    const mask = el('mask', { id: 'farmland', 'color-interpolation': 'sRGB' }, el('defs', {}, fields));
-    this.farmland = Array.from({ length: FIELD_FADE }, (_, k) => {
-      const grey = Math.round(255 * (k + 1) / FIELD_FADE);
-      return el('path', { 'fill-rule': 'evenodd', fill: `rgb(${grey},${grey},${grey})` }, mask);
-    });
-    // No fields in the hanger woods on the valley sides.
-    this.scarpMask = el('path', { fill: 'black' }, mask);
-    // The fields and their mask lie in a layer of their own. Safari renders
-    // a mask again whenever anything in its layer repaints, and with the
-    // fields among the rest of the floodplain the scroll bars, forest and
-    // farmsteads made it do so several times a second: at the default speed
-    // only 464–537 of 600 frames in 10 s reached the screen, against 600
-    // without the mask.
-    this.fieldLayer = el('g', { mask: 'url(#farmland)' }, fields);
+    // Fields lie over the forest, in a layer of their own, so a field redraw
+    // repaints only the fields and the rest of the floodplain's redraws do
+    // not repaint them. They fade in over the nested regions of the grassed
+    // ground. A field the fade reaches is drawn again in each region it
+    // reaches, clipped to the region, each copy adding to those before, so
+    // the copies brighten towards the oldest ground with no seams. A mask of
+    // the regions did this before, but Safari renders a mask again whenever
+    // its layer repaints, and every field, forest or wall redraw held up a
+    // frame by 30–100 ms; a clip of one path is plain geometry.
+    // WebKit clips to a clip path of one shape as geometry, with no image.
+    const defs = el('defs', {}, fields);
+    this.fadeRegions = Array.from({ length: FIELD_FADE }, (_, k) =>
+      el('path', { 'clip-rule': 'evenodd' }, el('clipPath', { id: `fade-${k + 1}` }, defs)));
+    // No fields in the hanger woods on the valley sides: the clip is the
+    // whole plane with each wood a hole in it.
+    this.scarpClip = el('path', { 'clip-rule': 'evenodd', d: OUTSIDE }, el('clipPath', { id: 'unwooded' }, defs));
+    this.fieldLayer = el('g', { 'clip-path': 'url(#unwooded)' }, fields);
     // The rest of the floodplain lies over the fields.
     ground = upper;
+    // The fields the fade does not reach, and the first copy of those it
+    // reaches throughout, then the copies in each region.
     this.parcels = el('g', {}, this.fieldLayer);
-    this.furrows = el('path', {
-      fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${FURROW})`,
-      'stroke-opacity': FURROW_OPACITY,
-    }, this.fieldLayer);
-    this.hedges = el('path', {
-      fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${HEDGE})`, 'stroke-opacity': 0.8,
-    }, this.fieldLayer);
+    this.parcelSteps = Array.from({ length: FIELD_FADE }, (_, k) =>
+      el('g', { 'clip-path': `url(#fade-${k + 1})` }, this.fieldLayer));
+    // The furrows and hedges of the fields the fade does not reach, and of
+    // those it does, drawn again in each region.
+    const strokes = (name, colour, opacity) => {
+      const style = { fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${colour})` };
+      const old = el('path', { ...style, 'stroke-opacity': opacity }, this.fieldLayer);
+      const faded = el('path', { ...style, id: `fading-${name}` }, defs);
+      for (let k = 1; k <= FIELD_FADE; k++) {
+        el('use', { href: `#fading-${name}`, 'clip-path': `url(#fade-${k})`, 'stroke-opacity': fadeStep(opacity, k) }, this.fieldLayer);
+      }
+      return [old, faded];
+    };
+    this.furrows = strokes('furrows', FURROW, FURROW_OPACITY);
+    this.hedges = strokes('hedges', HEDGE, 0.8);
     // Path element of each field drawn, by its key.
     this.fieldPaths = new Map();
     // Whether each field drawn, by its key, is meadow.
@@ -2207,6 +2227,7 @@ class SvgRenderer {
     this.fresh = true;
     this.scrollAt = null;
     this.fieldsAt = null;
+    this.fieldsStale = false;
     this.fieldJob = null;
     this.cropMask = null;
     this.churchyardsAt = null;
@@ -2226,6 +2247,7 @@ class SvgRenderer {
   drawFields(river, memory) {
     if (!this.fieldJob) {
       this.fieldsAt = { key: river.land_version(), t: river.time() };
+      this.fieldsStale = false;
       this.fieldJob = this.fieldStages(river, memory);
     }
     if (this.fieldJob.next().done) {
@@ -2247,6 +2269,9 @@ class SvgRenderer {
     const owner = new Uint32Array(buf, river.land_owner_ptr(), cols * rows).slice();
     const risk = new Float32Array(buf, river.land_risk_ptr(), cols * rows).slice();
     const hold = new Float32Array(buf, river.holdings_ptr(), 6 * river.holding_slots()).slice();
+    // The forest's age grid, as its last redraw drew the fade's regions,
+    // which a redraw finishing during this one would change.
+    const age = this.treeBlur?.slice();
     const w = river.get_param('width');
     const [c0, c1] = this.windowColumns(cols, cell);
     const W = c1 - c0;
@@ -2339,10 +2364,27 @@ class SvgRenderer {
       f.colour = f.woods ? FOREST.at(-1).colour : uses[Math.floor(hash01(f.key, 8) * uses.length)];
       f.opacity = f.woods ? WOODS_OPACITY : (CROP_OPACITY * (0.8 + 0.4 * hash01(f.key, 9))).toFixed(2);
     }
+    // No crowns in the fields (`mask`), which keep out of the hanger woods
+    // on the valley sides. Each field's first and last region of
+    // the fade, from 0, short of the first, to `FIELD_FADE`.
+    const [graze, shrub] = [river.get_param('grazing_time'), river.get_param('vegetation_time')];
+    const mask = new Uint8Array(W * rows);
+    for (const f of fields) [f.first, f.last] = [FIELD_FADE, 0];
+    for (let n = 0; n < lab.length; n++) {
+      if (n % W === 0 && due()) yield;
+      if (!lab[n]) continue;
+      const [i, j] = [n % W, Math.floor(n / W)];
+      if (this.scarpAt((c0 + i + 0.5) * cell, (j + 0.5) * cell) === 2) continue;
+      const f = fields[lab[n] - 1];
+      mask[n] = !f.woods;
+      const sward = age ? (age[j * cols + c0 + i] - graze) / (shrub - graze) : -1;
+      const k = Math.max(0, Math.min(FIELD_FADE, Math.floor(sward * FIELD_FADE) + 1));
+      [f.first, f.last] = [Math.min(f.first, k), Math.max(f.last, k)];
+    }
     // The furrows of each arable field: lines along its length at even
     // places across its strip, bent by the strip's wave and the reversed
     // S, kept where they cross the field's own cells.
-    let furrowData = '';
+    const furrowData = ['', ''];
     const [head, step] = [FURROW_HEAD * w, FURROW_STEP * w];
     for (const [n, f] of fields.entries()) {
       if (n % 4 === 0 && due()) yield;
@@ -2367,23 +2409,17 @@ class SvgRenderer {
           if (inside) {
             run.push(x, y);
           } else {
-            if (run.length >= 4) furrowData += pointsData(run);
+            if (run.length >= 4) furrowData[+(f.first < FIELD_FADE)] += pointsData(run);
             run = [];
           }
         }
       }
     }
-    const mask = new Uint8Array(W * rows);
-    for (let n = 0; n < lab.length; n++) {
-      if (n % W === 0 && due()) yield;
-      mask[n] = lab[n] > 0 && !fields[lab[n] - 1].woods
-        && this.scarpAt((c0 + n % W + 0.5) * cell, (Math.floor(n / W) + 0.5) * cell) !== 2;
-    }
     // Trace, simplify and round each boundary once, so neighbouring fields
     // share it exactly.
     const arcs = yield* boundaryArcs(lab, W, rows, due);
     const outlines = new Map();
-    let hedgeData = '';
+    const hedgeData = ['', ''];
     for (const arc of arcs) {
       if (due()) yield;
       const world = arc.pts.map((v, k) => (k % 2 ? v : c0 + v) * cell);
@@ -2401,7 +2437,7 @@ class SvgRenderer {
       const [fa, fb] = [fields[arc.a - 1], fields[arc.b - 1]];
       const pair = hash01(Math.min(fa.key, fb.key), Math.max(fa.key, fb.key));
       if (pair >= (fa.o === fb.o ? HEDGE_SIDE : HEDGE_EDGE)) continue;
-      hedgeData += pointsData(pts);
+      hedgeData[+(Math.min(fa.first, fb.first) < FIELD_FADE)] += pointsData(pts);
       for (const n of arc.cells) mask[n] = 0;
     }
     // Chain each field's arcs into rings, end to start.
@@ -2428,40 +2464,50 @@ class SvgRenderer {
         }
         if (ring.length >= 6) d += pointsData(ring) + 'Z';
       }
-      const field = fields[f - 1];
-      drawn.push([field, twin(this.fieldPaths.get(field.key) ?? el('path', {}), d)]);
+      // A copy throughout the field at the opacity of its first region,
+      // then one in each region after it.
+      const field = fields[f - 1], { first, last } = field;
+      const copies = first > 0 ? [[0, field.opacity * first / FIELD_FADE]] : [];
+      for (let k = first + 1; k <= last; k++) copies.push([k, fadeStep(field.opacity, k)]);
+      for (const [k, opacity] of copies) {
+        const key = field.key * (FIELD_FADE + 1) + k;
+        drawn.push([key, k, field.colour, opacity, twin(this.fieldPaths.get(key) ?? el('path', {}), d)]);
+      }
     }
-    const hedges = twin(this.hedges, hedgeData);
-    const furrows = twin(this.furrows, furrowData);
+    const hedges = hedgeData.map((d, k) => twin(this.hedges[k], d));
+    const furrows = furrowData.map((d, k) => twin(this.furrows[k], d));
     // The writes alone in the last stage, which a call's chaining would
     // otherwise run into.
     yield;
     const kept = new Map();
-    for (const [field, path] of drawn) {
-      const old = this.fieldPaths.get(field.key);
-      this.fieldPaths.delete(field.key);
-      if (!old) this.parcels.append(path);
+    for (const [key, k, colour, opacity, path] of drawn) {
+      const old = this.fieldPaths.get(key);
+      this.fieldPaths.delete(key);
+      if (!old) (k ? this.parcelSteps[k - 1] : this.parcels).append(path);
       else if (old !== path) old.replaceWith(path);
-      kept.set(field.key, path);
-      set(path, 'fill', `rgb(${field.colour})`);
-      set(path, 'fill-opacity', field.opacity);
+      kept.set(key, path);
+      set(path, 'fill', `rgb(${colour})`);
+      set(path, 'fill-opacity', Math.round(1000 * opacity) / 1000);
     }
     for (const path of this.fieldPaths.values()) path.remove();
     this.meadow = meadowNow;
     this.fieldPaths = kept;
-    if (hedges !== this.hedges) this.hedges.replaceWith(hedges);
-    this.hedges = hedges;
-    set(this.hedges, 'stroke-width', dp1(HEDGE_WIDTH * w));
-    if (furrows !== this.furrows) this.furrows.replaceWith(furrows);
-    this.furrows = furrows;
-    set(this.furrows, 'stroke-width', dp1(FURROW_WIDTH * w));
-    this.cropMask = { mask, c0, W };
-    this.treesStale = true;
+    swap(this.hedges, hedges);
+    for (const path of this.hedges) set(path, 'stroke-width', dp1(HEDGE_WIDTH * w));
+    swap(this.furrows, furrows);
+    for (const path of this.furrows) set(path, 'stroke-width', dp1(FURROW_WIDTH * w));
+    // The fields redraw after each forest redraw, mostly over the same
+    // cells, and the crowns go stale only when those change.
+    const crop = this.cropMask;
+    if (!crop || crop.c0 !== c0 || crop.W !== W || crop.mask.some((v, n) => v !== mask[n])) {
+      this.cropMask = { mask, c0, W };
+      this.treesStale = true;
+    }
   }
 
   // Draw the valley sides over the window [x0, x0 + vw): the upland's tint
   // under its fields, and on each wall the hachures and the hanger woods,
-  // with the mask that keeps fields out of the woods. The core narrows the
+  // with the clip that keeps fields out of the woods. The core narrows the
   // valley at the window edges to keep bends off them; the walls are drawn
   // at its full width, so that device does not show.
   drawWalls(river, x0, vw, h, seed) {
@@ -2478,7 +2524,8 @@ class SvgRenderer {
       this.uplandLayer.replaceChildren();
       this.scarpLayer.replaceChildren();
       this.wallLines = null;
-      set(this.scarpMask, 'd', '');
+      set(this.scarpClip, 'd', OUTSIDE);
+      this.fieldsStale = true;
       return;
     }
     // Each path as its layer and attributes, put on the page at the end.
@@ -2488,7 +2535,7 @@ class SvgRenderer {
     const between = ([a, b], u) => a + (b - a) * u;
     const combeData = river.wall_combes();
     const sides = [];
-    let maskData = '';
+    let clipData = OUTSIDE;
     for (const side of [-1, 1]) {
       const breadth = valueNoise(rand, vw, [12 * w, 4 * w]);
       const hanger = valueNoise(rand, vw, [HANGER.knots * w, 4 * w]);
@@ -2560,8 +2607,8 @@ class SvgRenderer {
         for (let j = k1 - 1; j >= k0; j--) point(ring, j, woodEdge(j, -1));
         woods += lineData(ring, 0, ring.length / 2, true);
       }
-      maskData += woods;
       paths.push([this.scarpLayer, { d: woods, fill: `rgb(${FOREST.at(-1).colour})`, 'fill-opacity': WOODS_OPACITY }]);
+      clipData += woods;
       // Hachures, sorted into three weights by steepness, each a wedge
       // around its course, thinning down the slope.
       const half = [0, 1, 2].map((k) => 0.5 * HACHURE_WIDTH * w * (0.6 + 0.4 * k));
@@ -2610,8 +2657,10 @@ class SvgRenderer {
     this.uplandLayer.replaceChildren();
     this.scarpLayer.replaceChildren();
     for (const [layer, attrs] of paths) el('path', attrs, layer);
-    set(this.scarpMask, 'd', maskData);
+    set(this.scarpClip, 'd', clipData);
     this.wallLines = { x0, step, n, h, w, sides };
+    // Which fields the fade reaches changes with the woods they keep out of.
+    this.fieldsStale = true;
   }
 
   // 0 off the valley sides at world point (x, y), 1 on rough grass on
@@ -3487,7 +3536,7 @@ class SvgRenderer {
       },
       {
         shown: this.fieldsShown,
-        due: () => this.fieldJob || isDue(this.fieldsAt, river.land_version(), t, FIELD_REFRESH, true),
+        due: () => this.fieldJob || this.fieldsStale || isDue(this.fieldsAt, river.land_version(), t, FIELD_REFRESH, true),
         run: () => this.drawFields(river, memory),
         job: () => this.fieldJob,
       },
@@ -3699,7 +3748,7 @@ class SvgRenderer {
 
   // The stages of a forest redraw: copy the age grid, blur it like the plug
   // grid, contour each of the forest's nested regions, then each region of
-  // the farmland clip, a stage for each, then size the tree crowns. A
+  // the fields' fade, a stage for each, then size the tree crowns. A
   // stage that contoured every region of a level at once overran the
   // floodplain's budget. The first stage reads WASM memory, so it runs in
   // the call that starts the redraw. The contours are kept on twins until
@@ -3734,7 +3783,7 @@ class SvgRenderer {
     for (let k = 0; k < FIELD_FADE; k++) {
       yield;
       const level = graze + (shrub - graze) * k / FIELD_FADE;
-      farmData.push(twin(this.farmland[k], contourData(blur, cols, rows, cell, c0, c1, level)));
+      farmData.push(twin(this.fadeRegions[k], contourData(blur, cols, rows, cell, c0, c1, level)));
     }
     yield;
     const treeArgs = [cols, rows, cell, shrub, forest, w, graze];
@@ -3742,13 +3791,15 @@ class SvgRenderer {
     const trees = yield* this.treeStages(blur, ...treeArgs);
     yield;
     swap(this.forest, forestData);
-    swap(this.farmland, farmData);
+    swap(this.fadeRegions, farmData);
     this.setTrees(trees);
     // A crown redraw under way reads `treeBlur`, which changes here.
     this.treeJob = null;
     if (this.treeBlur?.length !== blur.length) this.treeBlur = new Float32Array(blur.length);
     this.treeBlur.set(blur);
     this.treeArgs = treeArgs;
+    // Which fields the fade reaches follows these regions.
+    this.fieldsStale = true;
     // Fields or churches changed since the crowns were sized leave them
     // stale, for `redrawTrees` to size again.
     if (this.cropMask === crop && this.churchyardsAt === yards) this.treesStale = false;
