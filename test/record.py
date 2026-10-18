@@ -6,8 +6,10 @@ Usage: python3 test/record.py [render|encode|all] [out_dir]. `render`
 serves `web/` (which `make build` must have filled) as the smoke test
 does, warms up seed `SEED` or replays it to step `TICK`, hides the panel,
 and renders `SECONDS` s at `SPEED` units of simulated time a second to
-`master.mkv`. `encode` makes `meander.mp4` and `meander.webp` from the
-master, so they can be made again at other settings without rendering.
+`master.mkv`. `encode` makes an MP4 and a WebP from the master, so they
+can be made again at other settings without rendering. Each is named for
+its settings, as `meander-w1920-crf20.mp4` and
+`meander-w800-f15-q70.webp`, so encodes at other settings sit beside it.
 `all` (the default) does both. Environment variables override the
 settings below.
 
@@ -296,31 +298,41 @@ def encode(out):
     num, den = map(int, rate.split("/"))
     seconds = frames * den / num
 
-    mp4 = os.path.join(out, "meander.mp4")
-    run(
-        "mp4", frames,
-        ["ffmpeg", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
-         "-i", master, "-an", "-vf", f"scale={MP4_WIDTH}:-2:flags=lanczos",
-         "-c:v", "libx264", "-preset", "slow", "-crf", str(CRF),
-         "-pix_fmt", "yuv420p", "-movflags", "+faststart", mp4],
-        r"frame=(\d+)",
-    )
+    # A file is named for its settings, so one newer than the master is
+    # already this encode, and only the files at changed settings are made.
+    def stale(path):
+        if os.path.exists(path) and os.path.getmtime(path) >= os.path.getmtime(master):
+            print(f"{path}: up to date", file=sys.stderr)
+            return False
+        return True
 
-    webp = os.path.join(out, "meander.webp")
-    with tempfile.TemporaryDirectory() as tmp:
-        subprocess.run(
-            ["ffmpeg", "-loglevel", "error", "-i", master,
-             "-vf", f"fps={WEBP_FPS},scale={WEBP_WIDTH}:-2:flags=lanczos",
-             os.path.join(tmp, "%05d.png")],
-            check=True,
-        )
-        pngs = sorted(os.path.join(tmp, f) for f in os.listdir(tmp))
+    mp4 = os.path.join(out, f"meander-w{MP4_WIDTH}-crf{CRF}.mp4")
+    if stale(mp4):
         run(
-            "webp", len(pngs),
-            ["img2webp", "-v", "-loop", "0", "-lossy", "-q", str(WEBP_QUALITY),
-             "-d", str(round(1000 / WEBP_FPS)), *pngs, "-o", webp],
-            r"Added frame",
+            "mp4", frames,
+            ["ffmpeg", "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
+             "-i", master, "-an", "-vf", f"scale={MP4_WIDTH}:-2:flags=lanczos",
+             "-c:v", "libx264", "-preset", "slow", "-crf", str(CRF),
+             "-pix_fmt", "yuv420p", "-movflags", "+faststart", mp4],
+            r"frame=(\d+)",
         )
+
+    webp = os.path.join(out, f"meander-w{WEBP_WIDTH}-f{WEBP_FPS}-q{WEBP_QUALITY}.webp")
+    if stale(webp):
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run(
+                ["ffmpeg", "-loglevel", "error", "-i", master,
+                 "-vf", f"fps={WEBP_FPS},scale={WEBP_WIDTH}:-2:flags=lanczos",
+                 os.path.join(tmp, "%05d.png")],
+                check=True,
+            )
+            pngs = sorted(os.path.join(tmp, f) for f in os.listdir(tmp))
+            run(
+                "webp", len(pngs),
+                ["img2webp", "-v", "-loop", "0", "-lossy", "-q", str(WEBP_QUALITY),
+                 "-d", str(round(1000 / WEBP_FPS)), *pngs, "-o", webp],
+                r"Added frame",
+            )
 
     for path in (mp4, webp):
         print(f"{path}: {size(path)}, {seconds:.1f} s")

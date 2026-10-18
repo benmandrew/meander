@@ -23,9 +23,10 @@ fuzz:
 smoke: build
 	python3 test/smoke.py
 
-# Render the river to a lossless video/master.mkv, and encode it to
-# video/meander.mp4 and video/meander.webp; see test/record.py for the
-# settings. video-encode encodes the master again without rendering.
+# Render the river to a lossless video/master.mkv, and encode it to an
+# MP4 and a WebP in video/, named for their settings; see test/record.py
+# for the settings. video-encode encodes the master again without
+# rendering.
 video: build
 	python3 test/record.py all video
 
