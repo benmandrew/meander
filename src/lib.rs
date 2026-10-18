@@ -1781,6 +1781,13 @@ impl Sim {
     /// increasing order; collisions only add candidates, which callers
     /// reject by distance.
     fn build_grid(&mut self, size: f64) -> Cells {
+        self.build_grid_of(size, size)
+    }
+
+    /// As [`Self::build_grid`], but cells of `cell`, from `size` to twice
+    /// it, if the grid must be filled again, so it also serves a later
+    /// search within `cell`.
+    fn build_grid_of(&mut self, size: f64, cell: f64) -> Cells {
         if let Some((g, v)) = self.grid_for
             && g.size >= size
             && g.size <= 2.0 * size
@@ -1788,6 +1795,7 @@ impl Sim {
         {
             return g;
         }
+        let size = cell.clamp(size, 2.0 * size);
         let pts = &self.centerline;
         let n = pts.len();
         let buckets = (4 * n).next_power_of_two();
@@ -1894,6 +1902,13 @@ impl Sim {
         self.widths.iter().fold(MIN_WIDTH, |a, &b| a.max(b))
     }
 
+    /// Size of the grid cells `capture` searches: banks within the cutoff
+    /// distance of a lake as wide as the widest channel.
+    fn capture_cell(&self) -> f64 {
+        let d_cut = self.params.cutoff_dist * self.params.width;
+        (0.5 * d_cut * (self.max_width() + MAX_WIDTH)).max(self.params.width)
+    }
+
     /// Find one neck cutoff and apply it. Returns whether a cut was made.
     /// A neck closes when the centrelines come within `cutoff_dist` times
     /// the mean of their local widths, so the banks meet at a cutoff
@@ -1905,7 +1920,9 @@ impl Sim {
         if n < k_sep + 2 || d_cut <= 0.0 {
             return false;
         }
-        let g = self.build_grid(d_cut * self.max_width());
+        // In `capture`'s cells, which it searches next on the same
+        // centreline unless a cut is made, so one grid serves both.
+        let g = self.build_grid_of(d_cut * self.max_width(), self.capture_cell());
         let (pts, widths) = (&self.centerline, &self.widths);
 
         // Smallest upstream index first, then the smallest loop from it. A
@@ -1958,8 +1975,7 @@ impl Sim {
         }
         let ds = geom::length(&self.centerline) / (n - 1) as f64;
         let plug = END_PLUG * self.params.width;
-        let g =
-            self.build_grid((0.5 * d_cut * (self.max_width() + MAX_WIDTH)).max(self.params.width));
+        let g = self.build_grid(self.capture_cell());
         let (pts, widths) = (&self.centerline, &self.widths);
         let mut runs = std::mem::take(&mut self.contacts);
         // Captures that qualify, as (ratio, oxbow, A, B).
