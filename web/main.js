@@ -1913,10 +1913,10 @@ function resize(list, n, parent) {
 }
 
 class SvgRenderer {
-  constructor(bars, ground, svg) {
-    this.layers = [bars, ground, svg];
+  constructor(bars, [ground, fields, upper], svg) {
+    this.layers = [bars, ground, fields, upper, svg];
     this.bars = bars;
-    this.ground = ground;
+    this.grounds = [ground, fields, upper];
     this.svg = svg;
     for (const s of this.layers) s.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     const round = { fill: 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' };
@@ -1957,14 +1957,22 @@ class SvgRenderer {
     // Fields lie over the forest, masked by the grassed ground: each fade
     // region is painted over the last in a lighter grey, so the mask
     // brightens towards the oldest ground with no seams between regions.
-    const mask = el('mask', { id: 'farmland', 'color-interpolation': 'sRGB' }, el('defs', {}, ground));
+    const mask = el('mask', { id: 'farmland', 'color-interpolation': 'sRGB' }, el('defs', {}, fields));
     this.farmland = Array.from({ length: FIELD_FADE }, (_, k) => {
       const grey = Math.round(255 * (k + 1) / FIELD_FADE);
       return el('path', { 'fill-rule': 'evenodd', fill: `rgb(${grey},${grey},${grey})` }, mask);
     });
     // No fields in the hanger woods on the valley sides.
     this.scarpMask = el('path', { fill: 'black' }, mask);
-    this.fieldLayer = el('g', { mask: 'url(#farmland)' }, ground);
+    // The fields and their mask lie in a layer of their own. Safari renders
+    // a mask again whenever anything in its layer repaints, and with the
+    // fields among the rest of the floodplain the scroll bars, forest and
+    // farmsteads made it do so several times a second: at the default speed
+    // only 464–537 of 600 frames in 10 s reached the screen, against 600
+    // without the mask.
+    this.fieldLayer = el('g', { mask: 'url(#farmland)' }, fields);
+    // The rest of the floodplain lies over the fields.
+    ground = upper;
     this.parcels = el('g', {}, this.fieldLayer);
     this.furrows = el('path', {
       fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${FURROW})`,
@@ -4092,10 +4100,10 @@ class SvgRenderer {
     }
   }
 
-  // Serialise the current frame, both layers, as a standalone SVG file.
+  // Serialise the current frame, every layer, as a standalone SVG file.
   save() {
     const copy = this.svg.cloneNode(true);
-    copy.prepend(...[...this.bars.childNodes, ...this.ground.childNodes].map((n) => n.cloneNode(true)));
+    copy.prepend(...[this.bars, ...this.grounds].flatMap((s) => [...s.childNodes]).map((n) => n.cloneNode(true)));
     copy.setAttribute('xmlns', NS);
     copy.removeAttribute('id');
     const blob = new Blob([new XMLSerializer().serializeToString(copy)], { type: 'image/svg+xml' });
@@ -4108,7 +4116,8 @@ class SvgRenderer {
 }
 
 const svg = document.getElementById('view');
-const renderer = new SvgRenderer(document.getElementById('bars'), document.getElementById('ground'), svg);
+const grounds = ['ground', 'fields', 'upper'].map((id) => document.getElementById(id));
+const renderer = new SvgRenderer(document.getElementById('bars'), grounds, svg);
 document.getElementById('save').addEventListener('click', () => renderer.save());
 
 startApp({

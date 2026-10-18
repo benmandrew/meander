@@ -49,7 +49,7 @@ html, body {
   color: var(--panel-fg);
 }
 
-#bars, #ground, #view {
+#bars, #ground, #fields, #upper, #view {
   position: fixed;
   inset: 0;
   width: 100%;
@@ -59,8 +59,9 @@ html, body {
 
 /* Each its own compositing layer, so redrawing the channel does not repaint
    them, and the frequent changes to the ground do not repaint the bulky old
-   point bars beneath it. */
-#bars, #ground {
+   point bars beneath it. The masked fields have a layer of their own, since
+   Safari renders a mask again on every repaint of its layer. */
+#bars, #ground, #fields, #upper {
   will-change: transform;
 }
 

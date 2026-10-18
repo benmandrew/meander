@@ -306,9 +306,14 @@ export async function startApp({ view, renderer, display }) {
       }
     }
     // A running channel trails the river by a step, so it moves on every
-    // frame; a stopped one shows the river as it stands. Time the worker is
-    // stepping is not yet in the river's.
-    const moved = renderer.tween(river, running ? river.time() + owed - (asked ?? 0) - dt : Infinity);
+    // frame; a stopped one shows the river as it stands. The river's time
+    // and the time owed sum to an even clock, since a reply moves time from
+    // one to the other; while the worker steps, the channel waits at the
+    // newest snapshot. Taking the time asked off as well sent the channel
+    // back to the start of its step at each request: 201 times in 602
+    // frames, so it moved only as each step came in, and in Safari, where
+    // the reply often comes a frame later, it went back and forth.
+    const moved = renderer.tween(river, running ? river.time() + owed - dt : Infinity);
     return drew || renderer.idle(river, river.memory, state) || moved || running;
   }
 
