@@ -1923,9 +1923,9 @@ function resize(list, n, parent) {
 }
 
 class SvgRenderer {
-  constructor(bars, [band, ground, fields, lower, swept, upper], svg) {
+  constructor(bars, [band, ground, fields, lower, swept, upper, trees], svg) {
     this.bars = bars;
-    this.grounds = [band, ground, fields, lower, swept, upper];
+    this.grounds = [band, ground, fields, lower, swept, upper, trees];
     this.layers = [bars, ...this.grounds, svg];
     this.svg = svg;
     for (const s of this.layers) s.setAttribute('preserveAspectRatio', 'xMidYMid meet');
@@ -1975,6 +1975,7 @@ class SvgRenderer {
     // frame by 30–100 ms; a clip of one path is plain geometry.
     // WebKit clips to a clip path of one shape as geometry, with no image.
     const defs = el('defs', {}, fields);
+    this.fieldDefs = defs;
     this.fadeRegions = Array.from({ length: FIELD_FADE }, (_, k) =>
       el('path', { 'clip-rule': 'evenodd' }, el('clipPath', { id: `fade-${k + 1}` }, defs)));
     // No fields in the hanger woods on the valley sides: the clip is the
@@ -2004,6 +2005,9 @@ class SvgRenderer {
     this.hedges = strokes('hedges', HEDGE, 0.8);
     // Path element of each field drawn, by its key.
     this.fieldPaths = new Map();
+    // The outline of each field drawn in several copies, by its key, which
+    // the copies use, so a change to the field rewrites one path.
+    this.fieldShapes = new Map();
     // Whether each field drawn, by its key, is meadow.
     this.meadow = new Map();
     this.fieldsAt = null;
@@ -2110,6 +2114,9 @@ class SvgRenderer {
     // their highlights.
     // Each kind's opacity is the group's, so its dots of different sizes,
     // which lie in different paths, do not build up where they overlap.
+    // They lie in a layer of their own, so a crown redraw and a farmstead
+    // redraw do not repaint each other.
+    ground = trees;
     this.treeLayer = el('g', { fill: 'none', 'stroke-linecap': 'round' }, ground);
     this.treeKinds = [
       el('g', { stroke: `rgb(${TREE_SHADOW})`, opacity: 0.3 }, this.treeLayer),
@@ -2450,7 +2457,7 @@ class SvgRenderer {
       for (const n of arc.cells) mask[n] = 0;
     }
     // Chain each field's arcs into rings, end to start.
-    const drawn = [];
+    const drawn = [], shapes = [];
     for (const [f, list] of outlines) {
       if (due()) yield;
       const from = new Map();
@@ -2478,9 +2485,17 @@ class SvgRenderer {
       const field = fields[f - 1], { first, last } = field;
       const copies = first > 0 ? [[0, field.opacity * first / FIELD_FADE]] : [];
       for (let k = first + 1; k <= last; k++) copies.push([k, fadeStep(field.opacity, k)]);
+      if (copies.length === 1) {
+        const [[k, opacity]] = copies, key = field.key * (FIELD_FADE + 1) + k;
+        const old = this.fieldPaths.get(key);
+        drawn.push([key, k, field.colour, opacity, twin(old?.tagName === 'path' ? old : el('path', {}), d)]);
+        continue;
+      }
+      const id = `field-${field.key}`;
+      shapes.push([field.key, twin(this.fieldShapes.get(field.key) ?? el('path', { id }), d)]);
       for (const [k, opacity] of copies) {
-        const key = field.key * (FIELD_FADE + 1) + k;
-        drawn.push([key, k, field.colour, opacity, twin(this.fieldPaths.get(key) ?? el('path', {}), d)]);
+        const key = field.key * (FIELD_FADE + 1) + k, old = this.fieldPaths.get(key);
+        drawn.push([key, k, field.colour, opacity, old?.tagName === 'use' ? old : el('use', { href: `#${id}` })]);
       }
     }
     const hedges = hedgeData.map((d, k) => twin(this.hedges[k], d));
@@ -2488,6 +2503,16 @@ class SvgRenderer {
     // The writes alone in the last stage, which a call's chaining would
     // otherwise run into.
     yield;
+    const keptShapes = new Map();
+    for (const [key, shape] of shapes) {
+      const old = this.fieldShapes.get(key);
+      this.fieldShapes.delete(key);
+      if (!old) this.fieldDefs.append(shape);
+      else if (old !== shape) old.replaceWith(shape);
+      keptShapes.set(key, shape);
+    }
+    for (const shape of this.fieldShapes.values()) shape.remove();
+    this.fieldShapes = keptShapes;
     const kept = new Map();
     for (const [key, k, colour, opacity, path] of drawn) {
       const old = this.fieldPaths.get(key);
@@ -4180,7 +4205,7 @@ class SvgRenderer {
 }
 
 const svg = document.getElementById('view');
-const grounds = ['band', 'ground', 'fields', 'lower', 'swept', 'upper'].map((id) => document.getElementById(id));
+const grounds = ['band', 'ground', 'fields', 'lower', 'swept', 'upper', 'trees'].map((id) => document.getElementById(id));
 const renderer = new SvgRenderer(document.getElementById('bars'), grounds, svg);
 document.getElementById('save').addEventListener('click', () => renderer.save());
 
