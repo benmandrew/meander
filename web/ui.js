@@ -184,6 +184,9 @@ export async function startApp({ view, renderer, display }) {
     request({ steps: warming, budget: WARM_BUDGET, capture: CAPTURE_STEPS }, ({ stepped, captures }) => {
       for (const { t, line } of captures) renderer.capture(river, line, t, state);
       warming -= stepped;
+      // The first frame shows the floodplain whole, not crowns over fields
+      // that are still being drawn.
+      if (warming <= 0) settle = true;
       if (warming <= 0 && replaying) pause();
       $('overlay').hidden = warming <= 0;
       const done = Math.round(100 * (1 - warming / warmTotal));
