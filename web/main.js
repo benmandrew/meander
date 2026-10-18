@@ -125,6 +125,11 @@ const FLOODPLAIN_IDLE_BUDGET = 10;
 // take at least `REDRAW_SLACK` ms more. A redraw's time counts at most
 // `REDRAW_GAP` ms from one frame to the next.
 const REDRAW_MEMORY = 0.8;
+// Seconds in real time a floodplain layer rests after showing a new
+// picture before it may start another. Its refreshes are set in simulated
+// time, so at full speed the forest fell due six times a second; resting
+// is not counted as due, so it does not slow the river.
+const REDRAW_REST = 0.5;
 const REDRAW_SLACK = 100;
 const REDRAW_GAP = 100;
 // Valley sides. Each wall is a scarp from its foot, where the floodplain
@@ -2185,6 +2190,9 @@ class SvgRenderer {
     // each floodplain layer fell due, if it waits.
     [this.plugShown, this.fieldsShown, this.forestShown] = [null, null, null];
     this.dueSince = [];
+    // Each layer's picture as last seen, and when in real time it changed.
+    this.lastShown = [];
+    this.shownAt = [];
     this.redrawTime ??= [];
     // The first draw after a reset draws the floodplain and the channel
     // whole.
@@ -3467,22 +3475,26 @@ class SvgRenderer {
         shown: this.plugShown,
         due: () => this.plugJob || isDue(this.plugAt, river.cutoffs(), t, LEVEE_REFRESH),
         run: () => this.drawPlugs(river, memory),
+        job: () => this.plugJob,
       },
       {
         shown: this.fieldsShown,
         due: () => this.fieldJob || isDue(this.fieldsAt, river.land_version(), t, FIELD_REFRESH, true),
         run: () => this.drawFields(river, memory),
+        job: () => this.fieldJob,
       },
       {
         shown: this.forestShown,
         due: () => this.forestJob || isDue(this.forestAt, this.forestKey(river), t, LEVEE_REFRESH),
         run: () => this.drawForest(river, memory),
+        job: () => this.forestJob,
       },
       // The crowns go stale when fields finish after the forest sized them.
       {
         shown: this.fieldsShown,
         due: () => this.treesStale && this.treeBlur,
         run: () => this.redrawTrees(),
+        job: () => this.treeJob,
       },
       {
         shown: this.scrollAt?.t,
@@ -3518,8 +3530,17 @@ class SvgRenderer {
         shown: this.wallsAt?.t,
         due: () => this.wallJob || isDue(this.wallsAt, river.wall_version(), t, WALL_REFRESH, true),
         run: () => this.redrawWalls(river),
+        job: () => this.wallJob,
       },
-    ];
+    ].map((layer, k) => ({ ...layer, due: () => layer.due() && this.rested(k, layer) }));
+  }
+
+  // Whether layer `k` may start a redraw: once `REDRAW_REST` has passed in
+  // real time since it last showed a new picture, or at once while its
+  // redraw is under way or the river is settling.
+  rested(k, layer) {
+    if (this.settling || layer.job?.()) return true;
+    return performance.now() - (this.shownAt[k] ?? -Infinity) >= 1000 * REDRAW_REST;
   }
 
   // Refresh the floodplain layers that are due, for `budget` ms a call.
@@ -3550,6 +3571,7 @@ class SvgRenderer {
     const gap = Math.min(REDRAW_GAP, now - (this.floodplainAt ?? now));
     this.floodplainAt = now;
     this.floodplainLayers(river, memory, local).forEach((layer, k) => {
+      if (layer.shown !== this.lastShown[k]) [this.lastShown[k], this.shownAt[k]] = [layer.shown, now];
       let since = this.dueSince[k];
       if (since) since.spent += gap;
       if (since && (layer.shown !== since.shown || !layer.due())) {
