@@ -192,6 +192,13 @@ const TREE_LIGHT = [150, 176, 108];
 // for each kind of mark, so the browser rasterises only the strips a tile
 // meets and a strip whose trees have not changed keeps its path data.
 const TREE_STRIP = 8;
+// Each circle of a crown is a dot: a zero-length line with round caps,
+// stroked at its diameter, which takes about 12 characters of path data
+// where two arcs took about 46. A path has one stroke width, so radii are
+// rounded to classes `CROWN_CLASS` apart, within 9%, from `CROWN_MIN`
+// widths, below the smallest highlight.
+const CROWN_CLASS = 2 ** (1 / 4);
+const CROWN_MIN = 0.025;
 // Farmland: the core shares the ground between landholdings, each worked
 // from a farmstead (see `land.rs`), and each holding is laid out in
 // fields. Fields are drawn only where grass has taken the ground, after
@@ -497,8 +504,12 @@ const ALONGSIDE_SPAN = 3;
 const BAR_STEP = 0.5;
 // Segments in each run of a long polyline drawn as one path element. The
 // browser rasterises the view in tiles and skips elements whose bounds miss
-// a tile, so short runs spare each tile from stroking the whole line.
-const RUN = 24;
+// a tile, so short runs spare each tile from stroking the whole line, but
+// each element costs a write, style and paint. Against runs of 24, runs of
+// 96 cut a channel redraw's page-thread time by about 0.4 ms (seed 7,
+// 1280 × 800) and left its GPU time unchanged; one path for the whole
+// channel cut 0.5 ms but added 0.3 ms of GPU time.
+const RUN = 96;
 // Channel drawn beyond each side of the window, in widths: the widest bank
 // with its bar reaches 1.5 widths from the centreline, and a curve's
 // handles up to half a width beyond its ends.
@@ -516,6 +527,12 @@ const MIN_MOVE = 0.5;
 // curve. At 3° the curve lies under 0.1 px from the chord, and about three
 // segments in four turn less, so the path data stays short.
 const CURVE_TURN = 0.05;
+// Distance in world units from the line through its neighbours within which
+// `lineData` leaves a point out: 0.25 px on a desktop window 768 units wide
+// at 1280 px, and 0.37 device px on a landscape phone with 3 device pixels to
+// the CSS pixel. Below the 0.1 units to which path data is written, which
+// it first rounds to, points could not move.
+const SIMPLIFY = 0.15;
 // Change in a lake's fill that redraws its outline. A lake fills over about
 // a thousand units of simulated time, so its outline is rebuilt every few
 // units, not every step, and moves less than a pixel at each rebuild.
@@ -583,6 +600,112 @@ function dp1(v) {
   return (r < 0 && q === 0 ? '-0' : '' + q) + (f ? '.' + f : '');
 }
 
+// Path data is written in relative coordinates from a pen held in whole
+// tenths of a unit, so each point lands where `dp1` would put it but its
+// numbers are shorter: the polylines on the page took 34–42% fewer bytes.
+// A subpath starts with an absolute M, from `penAt`, so path data from
+// separate calls can be joined. `num` writes tenths without a leading zero,
+// and `pair` and `sep` leave out a space before a minus sign.
+let penX = 0, penY = 0;
+
+function num(r) {
+  const a = r < 0 ? -r : r, q = Math.trunc(a / 10), f = a - 10 * q;
+  return (r < 0 ? '-' : '') + (f ? (q ? q + '.' : '.') + f : '' + q);
+}
+
+function pair(x, y) {
+  return num(x) + (y < 0 ? '' : ' ') + num(y);
+}
+
+// `s` after a number, with a space unless it starts with a minus sign.
+function sep(s) {
+  return s.charCodeAt(0) === 45 ? s : ' ' + s;
+}
+
+// The point (x, y) in absolute coordinates, moving the pen there.
+function penAt(x, y) {
+  penX = Math.round(10 * x);
+  penY = Math.round(10 * y);
+  return pair(penX, penY);
+}
+
+// The point (x, y) relative to the pen, moving the pen there.
+function penTo(x, y) {
+  const px = Math.round(10 * x), py = Math.round(10 * y);
+  const s = pair(px - penX, py - penY);
+  penX = px;
+  penY = py;
+  return s;
+}
+
+// A point relative to the pen without moving it, for a curve's handles.
+function penOff(x, y) {
+  return pair(Math.round(10 * x) - penX, Math.round(10 * y) - penY);
+}
+
+// Path data for points [start, end) of a flat x, y array: an absolute M and
+// relative lines, closed with `close`. Points within `SIMPLIFY` of the
+// line through the points kept either side are left out (`keepPoints`).
+function lineData(pts, start = 0, end = pts.length / 2, close = false) {
+  if (end - start < 2) return '';
+  const keep = SIMPLIFY > 0 ? keepPoints(pts, start, end, SIMPLIFY) : null;
+  let d = 'M' + penAt(pts[2 * start], pts[2 * start + 1]), first = true;
+  for (let i = start + 1; i < end; i++) {
+    if (keep && !keep[i - start]) continue;
+    const p = penTo(pts[2 * i], pts[2 * i + 1]);
+    d += first ? 'l' + p : sep(p);
+    first = false;
+  }
+  return close ? d + 'z' : d;
+}
+
+// Scratch for `keepPoints`, grown as needed and reused.
+const keepScratch = { keep: new Uint8Array(0), stack: new Int32Array(0) };
+
+// Flags, in a scratch array the next call overwrites, for the points
+// [start, end) of a flat x, y array that a Douglas–Peucker simplification
+// to within `tol` keeps, the end points always.
+function keepPoints(pts, start, end, tol) {
+  const n = end - start;
+  if (keepScratch.keep.length < n) {
+    keepScratch.keep = new Uint8Array(Math.ceil(1.25 * n));
+    keepScratch.stack = new Int32Array(2 * Math.ceil(1.25 * n));
+  }
+  const { keep, stack } = keepScratch;
+  keep.fill(0, 0, n);
+  keep[0] = keep[n - 1] = 1;
+  let top = 0;
+  stack[top++] = 0;
+  stack[top++] = n - 1;
+  const tol2 = tol * tol;
+  while (top) {
+    const b = stack[--top], a = stack[--top];
+    const ax = pts[2 * (start + a)], ay = pts[2 * (start + a) + 1];
+    const dx = pts[2 * (start + b)] - ax, dy = pts[2 * (start + b) + 1] - ay;
+    const len2 = dx * dx + dy * dy;
+    let far = -1, farD = tol2;
+    for (let k = a + 1; k < b; k++) {
+      const px = pts[2 * (start + k)] - ax, py = pts[2 * (start + k) + 1] - ay;
+      const t = len2 > 0 ? clamp01((px * dx + py * dy) / len2) : 0;
+      const ex = px - t * dx, ey = py - t * dy, d = ex * ex + ey * ey;
+      if (d > farD) { far = k; farD = d; }
+    }
+    if (far >= 0) {
+      keep[far] = 1;
+      stack[top++] = a; stack[top++] = far;
+      stack[top++] = far; stack[top++] = b;
+    }
+  }
+  return keep;
+}
+
+// Closed path data out along `left` and back along `right`, flat x, y
+// arrays that share their end points, each kept once.
+function ringData(left, right) {
+  for (let i = right.length / 2 - 2; i > 0; i--) left.push(right[2 * i], right[2 * i + 1]);
+  return lineData(left, 0, left.length / 2, true);
+}
+
 // Unit left normal and signed curvature at each point of a flat x, y array,
 // positive where the river turns towards the left normal.
 function channelFrame(pts) {
@@ -610,28 +733,33 @@ function channelFrame(pts) {
 // handle is a third of the chord projected on the tangent, so it shrinks
 // to nothing where the edge folds back at a tight bend and cannot loop.
 // A segment that turns less than `CURVE_TURN` stays straight. `back` runs
-// the edge upstream. The data starts with the first point,
-// ready to follow an M or an L.
+// the edge upstream. The data starts with the first point in absolute
+// coordinates, ready to follow an M or an L, and goes on in relative ones,
+// writing a command letter only where it changes.
 function edgeData(edge, frame, start, back) {
   const { nx, ny } = frame;
   const n = edge.length / 2, s = back ? -1 : 1;
   let k = back ? n - 1 : 0;
   let ax = edge[2 * k], ay = edge[2 * k + 1];
   let tax = s * ny[start + k], tay = -s * nx[start + k];
-  let d = dp1(ax) + ' ' + dp1(ay);
+  let d = penAt(ax, ay), last = '';
   for (let m = 1; m < n; m++) {
     const j = k + s;
     const bx = edge[2 * j], by = edge[2 * j + 1];
     // Tangents in the direction of travel: the left normal turned clockwise.
     const tbx = s * ny[start + j], tby = -s * nx[start + j];
     if (Math.abs(tax * tby - tay * tbx) < CURVE_TURN) {
-      d += 'L' + dp1(bx) + ' ' + dp1(by);
+      const p = penTo(bx, by);
+      d += last === 'l' ? sep(p) : 'l' + p;
+      last = 'l';
     } else {
       const dx = bx - ax, dy = by - ay;
       const ha = Math.max(0, dx * tax + dy * tay) / 3;
       const hb = Math.max(0, dx * tbx + dy * tby) / 3;
-      d += 'C' + dp1(ax + ha * tax) + ' ' + dp1(ay + ha * tay) + ' ' + dp1(bx - hb * tbx) + ' ' + dp1(by - hb * tby)
-        + ' ' + dp1(bx) + ' ' + dp1(by);
+      const p = penOff(ax + ha * tax, ay + ha * tay);
+      const c = p + sep(penOff(bx - hb * tbx, by - hb * tby)) + sep(penTo(bx, by));
+      d += last === 'c' ? sep(c) : 'c' + c;
+      last = 'c';
     }
     k = j; ax = bx; ay = by; tax = tbx; tay = tby;
   }
@@ -734,12 +862,12 @@ function span(pts, x0, x1) {
 
 // Channel outlines over the points `[start, end)` in runs of `RUN`
 // segments, each overlapping its neighbours by a segment so no seam shows
-// between them.
+// between them. The last run stops at `end`, or it would draw up to `RUN`
+// points beyond the window.
 function channelRuns(pts, widths, frame, [start, end], scale, bar = null) {
-  const n = pts.length / 2;
   const runs = [];
   for (let s = start; s < end - 1; s += RUN) {
-    runs.push(channelData(pts, widths, frame, scale, bar, Math.max(0, s - 1), Math.min(n, s + RUN + 2)));
+    runs.push(channelData(pts, widths, frame, scale, bar, Math.max(start, s - 1), Math.min(end, s + RUN + 2)));
   }
   return runs;
 }
@@ -906,10 +1034,7 @@ function midBarRuns(pts, widths, frame, bend, w, shown) {
 
 // Path data for points [start, end) of a flat x, y array.
 function pathData(pts, start, end) {
-  if (end - start < 2) return '';
-  const parts = new Array(end - start);
-  for (let i = start; i < end; i++) parts[i - start] = dp1(pts[2 * i]) + ' ' + dp1(pts[2 * i + 1]);
-  return 'M' + parts[0] + 'L' + parts.slice(1).join(' ');
+  return lineData(pts, start, end);
 }
 
 function mixRgb(a, b, t) {
@@ -1040,9 +1165,7 @@ function reversePoints(pts) {
 
 // Path data for a polyline given as a flat x, y array.
 function pointsData(pts) {
-  let d = 'M' + dp1(pts[0]) + ' ' + dp1(pts[1]);
-  for (let k = 2; k < pts.length; k += 2) d += (k === 2 ? 'L' : ' ') + dp1(pts[k]) + ' ' + dp1(pts[k + 1]);
-  return d;
+  return lineData(pts);
 }
 
 // Path data for the leat of `count` points from point `start` of `leats`,
@@ -1123,10 +1246,12 @@ function* boundaryArcs(lab, W, H, due) {
   return arcs;
 }
 
-// Path data for a circle.
+// Path data for a circle: two relative arcs from its left-hand point, the
+// second written without its command letter, which repeats, and the flags
+// without the spaces between them.
 function circleData(x, y, r) {
-  const [r1, d] = [dp1(r), dp1(2 * r)];
-  return `M${dp1(x - r)},${dp1(y)}a${r1},${r1} 0 1 0 ${d},0a${r1},${r1} 0 1 0 -${d},0`;
+  const r1 = dp1(r), d = Math.round(20 * r), radii = r1 + ' ' + r1;
+  return 'M' + penAt(x - r, y) + 'a' + radii + ' 0 10' + num(d) + ' 0 ' + radii + ' 0 10-' + num(d) + ' 0';
 }
 
 // Outline of a soil patch: an oval with radii `rx`, `ry` at a random angle,
@@ -1324,8 +1449,8 @@ function lakeData(bed, from, to, half, age, { below = 0, skew = 0, room = 0 } = 
         x -= nx * o;
         y -= ny * o;
       }
-      left.push(dp1(x + nx * h) + ' ' + dp1(y + ny * h));
-      right.push(dp1(x - nx * h) + ' ' + dp1(y - ny * h));
+      left.push(x + nx * h, y + ny * h);
+      right.push(x - nx * h, y - ny * h);
     };
     // Offset into an end region, and the bank shape there, for step `q`.
     const step = (e, q) => {
@@ -1343,7 +1468,7 @@ function lakeData(bed, from, to, half, age, { below = 0, skew = 0, room = 0 } = 
       add(v0 - o, shape);
     }
     // Both banks meet at the tips; keep each tip once.
-    path += 'M' + left.join('L') + 'L' + right.reverse().slice(1, -1).join('L') + 'Z';
+    path += ringData(left, right);
   }
   return path;
 }
@@ -1463,10 +1588,10 @@ function scarData(pts, widths, start, end, along, total, half, w) {
   for (let k = 0; k < m; k++) {
     const i = 2 * (start + k);
     const h = half * w * widths[start + k] * scarTaper(s[k], len, along, total, w);
-    left.push(dp1(pts[i] - ty[k] * h) + ' ' + dp1(pts[i + 1] + tx[k] * h));
-    right.push(dp1(pts[i] + ty[k] * h) + ' ' + dp1(pts[i + 1] - tx[k] * h));
+    left.push(pts[i] - ty[k] * h, pts[i + 1] + tx[k] * h);
+    right.push(pts[i] + ty[k] * h, pts[i + 1] - tx[k] * h);
   }
-  return 'M' + left.join('L') + 'L' + right.reverse().slice(1, -1).join('L') + 'Z';
+  return ringData(left, right);
 }
 
 // Marsh tufts on an oxbow scar, scattered `half` times the old channel's
@@ -1482,6 +1607,8 @@ function tuftData(pts, widths, start, end, along, total, half, w) {
   const { s, tx, ty } = arcFrame(pts, start, end);
   const len = s[m - 1], step = TUFT_STEP * w, seed = Math.round(total);
   let d = '', k = 0;
+  // Every tuft but the first moves to its base relative to the last.
+  const move = (x, y) => (d ? 'm' + penTo(x, y) : 'M' + penAt(x, y));
   for (let j = Math.floor(along / step); (j - 1) * step < along + len; j++) {
     const at = (j + 0.2 + 0.6 * hash01(seed, j, 1)) * step - along;
     if (at < 0 || at > len) continue;
@@ -1494,9 +1621,10 @@ function tuftData(pts, widths, start, end, along, total, half, w) {
     const x = pts[i] + (pts[i + 2] - pts[i]) * f - ty[k] * across;
     const y = pts[i + 1] + (pts[i + 3] - pts[i + 1]) * f + tx[k] * across;
     const a = TUFT_SIZE * w * (0.75 + 0.5 * hash01(seed, j, 4));
-    const [b, c] = [dp1(0.3 * a), dp1(0.5 * a)];
-    d += `M${dp1(x - 0.5 * a)} ${dp1(y)}h${dp1(a)}M${dp1(x)} ${dp1(y)}v-${dp1(0.7 * a)}`
-      + `M${dp1(x - 0.12 * a)} ${dp1(y)}l-${b}-${c}M${dp1(x + 0.12 * a)} ${dp1(y)}l${b}-${c}`;
+    const [b, c] = [0.3 * a, 0.5 * a];
+    d += move(x - 0.5 * a, y) + 'l' + penTo(x + 0.5 * a, y) + 'm' + penTo(x, y) + 'l' + penTo(x, y - 0.7 * a)
+      + 'm' + penTo(x - 0.12 * a, y) + 'l' + penTo(x - 0.12 * a - b, y - c)
+      + 'm' + penTo(x + 0.12 * a, y) + 'l' + penTo(x + 0.12 * a + b, y - c);
   }
   return d;
 }
@@ -1517,7 +1645,9 @@ const CASE_SIDES = CASES.flatMap((pairs, c) => (c === 5 || c === 10 ? pairs : [p
   .map((ps) => Int8Array.from(ps.flatMap((p) => [...p].map((s) => 'TRBL'.indexOf(s))))));
 
 // Scratch buffers for `contourData`, grown as needed and reused.
-const contourScratch = { v: new Float32Array(0), at: new Int32Array(0), segs: new Int32Array(0), used: new Uint8Array(0) };
+const contourScratch = {
+  v: new Float32Array(0), at: new Int32Array(0), segs: new Int32Array(0), used: new Uint8Array(0), loop: new Float64Array(0),
+};
 
 // Region where a grid exceeds `level`, as path data for the even-odd fill
 // rule. `values` holds `cols` × `rows` cells of side `cell`, row by row; only
@@ -1534,8 +1664,10 @@ function contourData(values, cols, rows, cell, c0, c1, level) {
     // At most two segments a cell.
     scratch.segs = new Int32Array(4 * n);
     scratch.used = new Uint8Array(2 * n);
+    // A loop passes each edge at most once.
+    scratch.loop = new Float64Array(4 * n);
   }
-  const { v, at, segs, used } = scratch;
+  const { v, at, segs, used, loop } = scratch;
   v.fill(-level, 0, W);
   v.fill(-level, n - W, n);
   for (let j = 1; j <= rows; j++) {
@@ -1575,31 +1707,33 @@ function contourData(values, cols, rows, cell, c0, c1, level) {
       }
     }
   }
-  // Where the contour crosses an edge.
+  // Where the contour crosses an edge, appended to the loop's points.
+  let points = 0;
   const point = (id) => {
     const k = id >> 1, i = k % W, j = (k - i) / W;
     const down = id & 1;
     const t = (level - v[k]) / (v[down ? k + W : k + 1] - v[k]);
-    const x = (c0 + i + (down ? 0 : t) - 0.5) * cell, y = (j + (down ? t : 0) - 0.5) * cell;
-    return dp1(x) + ' ' + dp1(y);
+    loop[2 * points] = (c0 + i + (down ? 0 : t) - 0.5) * cell;
+    loop[2 * points + 1] = (j + (down ? t : 0) - 0.5) * cell;
+    points++;
   };
   // Chain the segments into closed loops.
   used.fill(0, 0, count);
   let d = '';
   for (let s0 = 0; s0 < count; s0++) {
     if (used[s0]) continue;
-    let path = point(segs[2 * s0]), points = 1;
+    points = 0;
+    point(segs[2 * s0]);
     let s = s0, e = segs[2 * s0 + 1];
     while (s >= 0) {
       used[s] = 1;
-      path += 'L' + point(e);
-      points++;
+      point(e);
       const next = at[2 * e] === s ? at[2 * e + 1] : at[2 * e];
       if (next < 0 || used[next]) break;
       s = next;
       e = segs[2 * s] === e ? segs[2 * s + 1] : segs[2 * s];
     }
-    if (points > 3) d += 'M' + path + 'Z';
+    if (points > 3) d += lineData(loop, 0, points, true);
   }
   return d;
 }
@@ -1607,20 +1741,17 @@ function contourData(values, cols, rows, cell, c0, c1, level) {
 // Points of a flat x, y array with x in [x0, x1]: path data with one subpath
 // per run inside the range, and the points themselves.
 function cropped(line, x0, x1) {
-  const runs = [], kept = [];
-  let run = [];
-  for (let i = 0; i < line.length; i += 2) {
-    const x = line[i], y = line[i + 1];
-    if (x < x0 || x > x1) {
-      if (run.length > 1) runs.push(run);
-      run = [];
+  const kept = [];
+  let d = '', from = 0;
+  for (let i = 0; i <= line.length; i += 2) {
+    if (i < line.length && line[i] >= x0 && line[i] <= x1) {
+      kept.push(line[i], line[i + 1]);
       continue;
     }
-    run.push(x.toFixed(1) + ' ' + y.toFixed(1));
-    kept.push(x, y);
+    if (i / 2 - from > 1) d += lineData(line, from, i / 2);
+    from = i / 2 + 1;
   }
-  if (run.length > 1) runs.push(run);
-  return { d: runs.map((r) => 'M' + r[0] + 'L' + r.slice(1).join(' ')).join(''), pts: kept };
+  return { d, pts: kept };
 }
 
 // Arc length of points [start, end) of a flat x, y array.
@@ -1942,11 +2073,13 @@ class SvgRenderer {
     // Trees lie over the scroll bars, which the canopy hides as it closes:
     // the shadows of every crown, then the crowns in a few tones, then
     // their highlights.
-    this.treeLayer = el('g', {}, ground);
+    // Each kind's opacity is the group's, so its dots of different sizes,
+    // which lie in different paths, do not build up where they overlap.
+    this.treeLayer = el('g', { fill: 'none', 'stroke-linecap': 'round' }, ground);
     this.treeKinds = [
-      el('g', { fill: `rgb(${TREE_SHADOW})`, 'fill-opacity': 0.3 }, this.treeLayer),
-      ...TREE_TONES.map((c) => el('g', { fill: `rgb(${c})`, 'fill-opacity': 0.9 }, this.treeLayer)),
-      el('g', { fill: `rgb(${TREE_LIGHT})`, 'fill-opacity': 0.4 }, this.treeLayer),
+      el('g', { stroke: `rgb(${TREE_SHADOW})`, opacity: 0.3 }, this.treeLayer),
+      ...TREE_TONES.map((c) => el('g', { stroke: `rgb(${c})`, opacity: 0.9 }, this.treeLayer)),
+      el('g', { stroke: `rgb(${TREE_LIGHT})`, opacity: 0.4 }, this.treeLayer),
     ];
     this.treeStrips = [];
     // The parish boundary lies over the trees, as a map draws it, and under
@@ -2371,11 +2504,15 @@ class SvgRenderer {
       const woodEdge = (k, dir) => brow[k] + (0.5 + dir * 0.6 * wood[k]) * (foot[k] - brow[k]);
       const lines = { side, foot, brow, wood, woodEdge };
       sides.push(lines);
-      const y = (d) => dp1(side < 0 ? d : h - d);
-      const point = (k, d) => `${dp1(x0 + Math.min(k * step, vw))} ${y(d)}`;
-      const trace = (line, offset = 0) => Array.from(line, (d, k) => point(k, d + offset)).join(' ');
+      const y = (d) => (side < 0 ? d : h - d);
+      // Appends point k at distance `d` from the edge to the flat x, y array
+      // `pts`.
+      const point = (pts, k, d) => pts.push(x0 + Math.min(k * step, vw), y(d));
       const rim = side < 0 ? 0 : h;
-      paths.push([this.uplandLayer, { d: `M${dp1(x0)} ${rim} L${trace(foot)} L${dp1(x0 + vw)} ${rim}Z` }]);
+      const upland = [x0, rim];
+      foot.forEach((d, k) => point(upland, k, d));
+      upland.push(x0 + vw, rim);
+      paths.push([this.uplandLayer, { d: lineData(upland, 0, upland.length / 2, true) }]);
       const lit = side > 0;
       // Shade or light over the scarp, in nested bands between fractions
       // of the way from brow to foot.
@@ -2383,8 +2520,10 @@ class SvgRenderer {
       const bandOpacity = 1 - (1 - tone) ** (1 / SCARP_BANDS.length);
       let bands = '';
       for (const [a, b] of SCARP_BANDS) {
-        const along = (f) => Array.from(foot, (d, k) => point(k, brow[k] + f * (d - brow[k])));
-        bands += `M${along(a).join(' ')} L${along(b).reverse().join(' ')}Z`;
+        const band = [];
+        for (let k = 0; k < n; k++) point(band, k, brow[k] + a * (foot[k] - brow[k]));
+        for (let k = n - 1; k >= 0; k--) point(band, k, brow[k] + b * (foot[k] - brow[k]));
+        bands += lineData(band, 0, band.length / 2, true);
       }
       paths.push([this.scarpLayer, {
         d: bands, fill: `rgb(${lit ? SCARP_LIGHT : SCARP_SHADE})`, 'fill-opacity': bandOpacity.toFixed(3),
@@ -2400,10 +2539,10 @@ class SvgRenderer {
         const k0 = Math.max(0, k - 1);
         while (k < n && wood[k] > 0) k++;
         const k1 = Math.min(n, k + 1);
-        let d = '';
-        for (let j = k0; j < k1; j++) d += `${j > k0 ? 'L' : 'M'}${point(j, woodEdge(j, 1))}`;
-        for (let j = k1 - 1; j >= k0; j--) d += `L${point(j, woodEdge(j, -1))}`;
-        woods += d + 'Z';
+        const ring = [];
+        for (let j = k0; j < k1; j++) point(ring, j, woodEdge(j, 1));
+        for (let j = k1 - 1; j >= k0; j--) point(ring, j, woodEdge(j, -1));
+        woods += lineData(ring, 0, ring.length / 2, true);
       }
       maskData += woods;
       paths.push([this.scarpLayer, { d: woods, fill: `rgb(${FOREST.at(-1).colour})`, 'fill-opacity': WOODS_OPACITY }]);
@@ -2441,10 +2580,11 @@ class SvgRenderer {
             const len = Math.sqrt(tx * tx + td * td) || 1;
             const r = half[weight] * between(HACHURE_TAPER, k / Math.max(1, m - 1));
             const [ox, od] = [-td / len * r, tx / len * r];
-            left.push(`${dp1(pts[2 * k] + ox)} ${y(pts[2 * k + 1] + od)}`);
-            right.push(`${dp1(pts[2 * k] - ox)} ${y(pts[2 * k + 1] - od)}`);
+            left.push(pts[2 * k] + ox, y(pts[2 * k + 1] + od));
+            right.push(pts[2 * k] - ox, y(pts[2 * k + 1] - od));
           }
-          strokes[weight].push(`M${left.join(' ')} L${right.reverse().join(' ')}Z`);
+          for (let k = m - 1; k >= 0; k--) left.push(right[2 * k], right[2 * k + 1]);
+          strokes[weight].push(lineData(left, 0, left.length / 2, true));
         }
       }
       strokes.forEach((list) => paths.push([this.scarpLayer, {
@@ -2806,10 +2946,12 @@ class SvgRenderer {
     resize(this.waterRuns, waterRuns.length, this.water);
     bankRuns.forEach((d, k) => set(this.bankRuns[k], 'd', d));
     waterRuns.forEach((d, k) => set(this.waterRuns[k], 'd', d));
+    // Each depth band's runs are short stretches, so they share one path,
+    // which cut 0.2 ms more of style and paint.
     channelDepth(line, widths, frame, bend, w, shown).forEach((runs, m) => {
       const { g, paths } = this.depth[m];
-      resize(paths, runs.length, g);
-      runs.forEach((d, k) => set(paths[k], 'd', d));
+      resize(paths, 1, g);
+      set(paths[0], 'd', runs.join(''));
     });
     return true;
   }
@@ -3631,10 +3773,13 @@ class SvgRenderer {
     const w = river.get_param('width');
     const [gap, strip] = [TREE_GAP * w, TREE_STRIP * w];
     const count = Math.ceil(vw / strip);
-    this.treeStrips = Array.from({ length: count }, () => ({
-      crowns: [],
-      paths: this.treeKinds.map((g) => el('path', {}, g)),
-    }));
+    // Each strip's paths by `crownKey`, and the group of each key's size.
+    this.treeStrips = Array.from({ length: count }, () => ({ crowns: [], paths: new Map() }));
+    this.crownGroups = new Map();
+    this.crownWidth = w;
+    const min = CROWN_MIN * w;
+    this.crownClasses = Uint8Array.from({ length: Math.ceil(10 * TREE_RADIUS * w) + 1 },
+      (_, k) => Math.max(0, Math.round(Math.log(Math.max(k, 0.5) / (10 * min)) / Math.log(CROWN_CLASS))));
     for (let y = gap / 2; y < h; y += gap) {
       for (let x = x0 + gap / 2; x < x0 + vw; x += gap) {
         const cx = x + (rand() - 0.5) * gap, cy = y + (rand() - 0.5) * gap;
@@ -3652,9 +3797,36 @@ class SvgRenderer {
     }
   }
 
-  // Put the paths from `treeStages` on the page.
+  // Put the paths from `treeStages` on the page, each in its kind and size
+  // class's group.
   setTrees(data) {
-    this.treeStrips.forEach(({ paths }, s) => swap(paths, data[s]));
+    this.treeStrips.forEach(({ paths }, s) => {
+      for (const [key, t] of data[s]) {
+        const old = paths.get(key);
+        if (t === old) continue;
+        if (old) old.replaceWith(t);
+        else this.crownGroup(key).append(t);
+        paths.set(key, t);
+      }
+    });
+  }
+
+  // Key of a dot of kind `kind` and radius `r`, by its size class, looked
+  // up by the radius in tenths of a unit.
+  crownKey(kind, r) {
+    const classes = this.crownClasses, tenths = Math.round(10 * r);
+    return 64 * kind + classes[Math.min(classes.length - 1, tenths)];
+  }
+
+  // The group that strokes the dots of `key` at their class's diameter.
+  crownGroup(key) {
+    let g = this.crownGroups.get(key);
+    if (!g) {
+      const width = 2 * CROWN_MIN * this.crownWidth * CROWN_CLASS ** (key % 64);
+      g = el('g', { 'stroke-width': Math.round(100 * width) / 100 }, this.treeKinds[key >> 6]);
+      this.crownGroups.set(key, g);
+    }
+    return g;
   }
 
   // Size each crown by the blurred growth of the cell under it, a stage
@@ -3670,7 +3842,19 @@ class SvgRenderer {
     const data = [];
     for (const { crowns, paths } of this.treeStrips) {
       if (data.length) yield;
-      const d = paths.map(() => []);
+      // Path data by key, each with its own pen, since the keys interleave.
+      const d = new Map();
+      const dot = (kind, x, y, r) => {
+        const key = this.crownKey(kind, r);
+        const e = d.get(key);
+        if (!e) {
+          d.set(key, { d: 'M' + penAt(x, y) + 'h0', x: penX, y: penY });
+          return;
+        }
+        [penX, penY] = [e.x, e.y];
+        e.d += 'm' + penTo(x, y) + 'h0';
+        [e.x, e.y] = [penX, penY];
+      };
       for (const c of crowns) {
         const i = Math.floor(c.x / cell), j = Math.floor(c.y / cell);
         if (i < 0 || i >= cols || j < 0 || j >= rows) continue;
@@ -3684,11 +3868,25 @@ class SvgRenderer {
         const start = from + c.at * (to - from);
         const r = TREE_RADIUS * w * c.size * clamp01((blur[j * cols + i] - start) / grow);
         if (r < TREE_MIN * w) continue;
-        d[0].push(circleData(c.x + 0.15 * r, c.y + 0.2 * r, r));
-        for (const [dx, dy, lr] of c.lobes) d[1 + c.tone].push(circleData(c.x + dx * r, c.y + dy * r, lr * r));
-        d[light].push(circleData(c.x - 0.3 * r, c.y - 0.3 * r, 0.45 * r));
+        dot(0, c.x + 0.15 * r, c.y + 0.2 * r, r);
+        for (const [dx, dy, lr] of c.lobes) dot(1 + c.tone, c.x + dx * r, c.y + dy * r, lr * r);
+        dot(light, c.x - 0.3 * r, c.y - 0.3 * r, 0.45 * r);
       }
-      data.push(d.map((parts, k) => twin(paths[k], parts.join(''))));
+      // Twins of the strip's paths, new ones for keys it had none for, and
+      // empty ones for keys it no longer uses.
+      const twins = new Map();
+      for (const [key, { d: data }] of d) {
+        const old = paths.get(key);
+        if (old) {
+          twins.set(key, twin(old, data));
+        } else {
+          const t = el('path', { d: data });
+          t.attrs = { d: data };
+          twins.set(key, t);
+        }
+      }
+      for (const [key, old] of paths) if (!d.has(key)) twins.set(key, twin(old, ''));
+      data.push(twins);
     }
     return data;
   }
