@@ -101,7 +101,6 @@ html, body {
   padding: 12px 14px;
   background: var(--panel-bg);
   border: 1px solid var(--border);
-  border-radius: 10px;
 }
 
 #panel header {
@@ -121,7 +120,6 @@ button {
   color: inherit;
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 6px;
   padding: 4px 10px;
   cursor: pointer;
 }
@@ -158,7 +156,6 @@ button:hover { border-color: var(--accent); }
   color: inherit;
   background: transparent;
   border: 1px solid var(--border);
-  border-radius: 6px;
   padding: 3px 6px;
 }
 
