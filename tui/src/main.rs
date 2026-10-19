@@ -14,6 +14,7 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use render::{Picture, View};
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 /// Simulated time run before the year count starts: 2,000 years, as on the
@@ -34,6 +35,8 @@ const FRAME: Duration = Duration::from_millis(33);
 /// Time a frame may spend stepping. Simulated time the river cannot cover
 /// in it is dropped, so a slow machine runs below the set speed.
 const STEP_BUDGET: Duration = Duration::from_millis(25);
+/// Frames over which the status line reports draw times, about 8 s.
+const FRAMES: usize = 256;
 
 struct App {
     sim: Sim,
@@ -46,6 +49,9 @@ struct App {
     /// Simulated time owed to the loop but not yet stepped.
     owed: f64,
     picture: Picture,
+    /// Time each of the last `FRAMES` draws took, painting and writing to
+    /// the terminal, in milliseconds.
+    draws: VecDeque<f64>,
 }
 
 impl App {
@@ -69,6 +75,7 @@ impl App {
             paused: false,
             owed: 0.0,
             picture: Picture::default(),
+            draws: VecDeque::with_capacity(FRAMES),
         }
     }
 
@@ -100,6 +107,33 @@ impl App {
             self.owed -= dt;
         }
         self.owed = self.owed.min(dt);
+    }
+
+    fn record(&mut self, draw: Duration) {
+        if self.draws.len() == FRAMES {
+            self.draws.pop_front();
+        }
+        self.draws.push_back(draw.as_secs_f64() * 1e3);
+    }
+
+    /// The map's size in cells, and the mean, 95th and 99th percentile of
+    /// the recent draw times.
+    fn timing(&self, cols: u16, rows: u16) -> Line<'static> {
+        let dim = Style::new().fg(Color::Rgb(150, 146, 130));
+        let mut times: Vec<f64> = self.draws.iter().copied().collect();
+        times.sort_by(f64::total_cmp);
+        let stats = if times.is_empty() {
+            String::new()
+        } else {
+            let q = |f: f64| times[((times.len() - 1) as f64 * f).round() as usize];
+            let mean = times.iter().sum::<f64>() / times.len() as f64;
+            format!("{mean:.1}/{:.1}/{:.1} ms ", q(0.95), q(0.99))
+        };
+        Line::from(vec![
+            Span::raw(format!("   {cols}×{rows}")),
+            Span::styled("   draw mean/p95/p99 ", dim),
+            Span::raw(stats),
+        ])
     }
 
     fn status(&self) -> Line<'static> {
@@ -159,14 +193,23 @@ fn run(terminal: &mut DefaultTerminal, seed: u64) -> std::io::Result<()> {
     let mut app = App::new(seed, size.width, size.height);
     let mut last = Instant::now();
     loop {
+        let start = Instant::now();
         terminal.draw(|f| {
             let [map, status] =
                 Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).areas(f.area());
             let view = View::fit(&app.sim, app.world, map.width, 2 * map.height);
             app.picture.paint(&app.sim, &view);
             f.render_widget(&app.picture, map);
-            f.render_widget(app.status(), status);
+            let timing = app.timing(map.width, map.height);
+            let [left, right] = Layout::horizontal([
+                Constraint::Fill(1),
+                Constraint::Length(timing.width() as u16),
+            ])
+            .areas(status);
+            f.render_widget(app.status(), left);
+            f.render_widget(timing, right);
         })?;
+        app.record(start.elapsed());
         // The warm-up steps every frame it can, so it waits only for keys
         // already pressed.
         let next = if app.warming() {

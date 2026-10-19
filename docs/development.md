@@ -13,7 +13,7 @@ The pre-commit hook in `.githooks/` checks a copy of the index. Staged Rust gets
 - `make serve`: build, then serve `web/` at http://localhost:8000 with caching off.
 - `make smoke`: load the page in headless Chrome (`test/smoke.py`, Playwright). It fails on any page or console error, or if the channel stops being redrawn. Set `PLAYWRIGHT_BROWSERS_PATH` to use Playwright's Chromium in place of the installed Chrome.
 - `make fuzz`: run `RUNS` random seeds and window widths for `YEARS` each, checking `Sim::check` after every step. Each failure prints its seed, step and a replay link. `BASE=N` repeats a sweep.
-- `make tui`: run the river in the terminal (`tui/`). `SEED=N` picks the seed. Space pauses, `+` and `-` step the speed between 1.25 and 150 years a second, and `n` starts a new river.
+- `make tui`: run the river in the terminal (`tui/`). `SEED=N` picks the seed. Space pauses, `+` and `-` step the speed between 1.25 and 150 years a second, and `n` starts a new river. At its right the status line shows the map's size in cells and the mean, 95th and 99th percentile time to draw a frame over the last 256 frames.
 - `make video`: render the river in headless Chrome (`test/record.py`) to a lossless `video/master.mkv`, then encode an MP4 and an animated WebP named for their settings. `make video-encode` re-encodes without rendering. See the `Makefile` for the settings.
 
 ## URL parameters
