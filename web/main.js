@@ -9,6 +9,15 @@
 import { startApp } from './ui.js';
 
 const NS = 'http://www.w3.org/2000/svg';
+// Drawn without anti-aliasing: the old point bars, the forest's bands and
+// the fields' fills and furrows, whose edges lie between near-identical
+// tones. In Chrome on Linux an anti-aliased wide stroke or fill is
+// rasterised on one thread of the GPU process. Without it a full redraw
+// of the old bars took 1.7 ms of GPU raster in place of 100 ms, the
+// forest 3–4 ms in place of 15 and the fields 32–47 ms in place of
+// 63–83, on an Intel iGPU at 1850 × 966 (seeds 1 and 2), and changed
+// under 0.02% of the window's pixels by more than 3%.
+const ALIASED = { 'shape-rendering': 'optimizeSpeed' };
 const WATER = [61, 126, 166];
 // Water colour of a lake once cut off: the silt settles out of still
 // water, so it is clearer and darker than the river.
@@ -560,6 +569,13 @@ const LAKE_BUDGET = 2;
 // Whether a layer last drawn at `last`, a `{ key, t }`, is due again: once
 // `key` has changed or `every` of simulated time has passed, or with
 // `both` only once both have.
+// Whether the oxbow piece `piece` is `drawn` cut back from one end, both
+// given as their point count and end points (see `matchPieces`).
+function trimmedFrom(piece, drawn) {
+  const [n, ...a] = piece.split(' ').map(Number), [m, ...b] = drawn.split(' ').map(Number);
+  return n < m && ((a[0] === b[0] && a[1] === b[1]) || (a[2] === b[2] && a[3] === b[3]));
+}
+
 function isDue(last, key, t, every, both = false) {
   if (!last || t < last.t) return true;
   const changed = last.key !== key, aged = t - last.t >= every;
@@ -1944,7 +1960,7 @@ class SvgRenderer {
     // again as it forms on the old bar. Bands that have stopped growing lie
     // in the bottom layer; the growing band lies in a layer of its own, so
     // keeping a centreline repaints neither the old ones nor the forest.
-    this.oldBars = el('g', line, bars);
+    this.oldBars = el('g', { ...line, ...ALIASED }, bars);
     this.barLayer = el('g', line, band);
     // Coarse ground lies over the bars and under the vegetation that grows
     // over it. Its pebbles are sized for the channel width at each reset.
@@ -1958,7 +1974,7 @@ class SvgRenderer {
     // Shrub and forest lie over the bars and under the scroll bars, so the
     // ridges show through the trees.
     const stepOpacity = 1 - (1 - FOREST_OPACITY) ** (1 / FOREST_STEPS);
-    this.forestLayer = el('g', { 'fill-rule': 'evenodd', 'fill-opacity': stepOpacity.toFixed(4) }, ground);
+    this.forestLayer = el('g', { 'fill-rule': 'evenodd', 'fill-opacity': stepOpacity.toFixed(4), ...ALIASED }, ground);
     this.forest = FOREST.flatMap(({ colour }) => Array.from(
       { length: FOREST_STEPS }, () => el('path', { fill: `rgb(${colour})` }, this.forestLayer)));
     this.forestAt = null;
@@ -1987,22 +2003,24 @@ class SvgRenderer {
     ground = lower;
     // The fields the fade does not reach, and the first copy of those it
     // reaches throughout, then the copies in each region.
-    this.parcels = el('g', {}, this.fieldLayer);
+    this.parcels = el('g', ALIASED, this.fieldLayer);
     this.parcelSteps = Array.from({ length: FIELD_FADE }, (_, k) =>
-      el('g', { 'clip-path': `url(#fade-${k + 1})` }, this.fieldLayer));
+      el('g', { 'clip-path': `url(#fade-${k + 1})`, ...ALIASED }, this.fieldLayer));
     // The furrows and hedges of the fields the fade does not reach, and of
-    // those it does, drawn again in each region.
-    const strokes = (name, colour, opacity) => {
+    // those it does, drawn again in each region. The faded copies and the
+    // faint furrows are `ALIASED`; the hedges at full strength are not,
+    // since their jagged edges showed.
+    const strokes = (name, colour, opacity, aliased) => {
       const style = { fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${colour})` };
-      const old = el('path', { ...style, 'stroke-opacity': opacity }, this.fieldLayer);
-      const faded = el('path', { ...style, id: `fading-${name}` }, defs);
+      const old = el('path', { ...style, 'stroke-opacity': opacity, ...(aliased ? ALIASED : {}) }, this.fieldLayer);
+      const faded = el('path', { ...style, id: `fading-${name}`, ...ALIASED }, defs);
       for (let k = 1; k <= FIELD_FADE; k++) {
         el('use', { href: `#fading-${name}`, 'clip-path': `url(#fade-${k})`, 'stroke-opacity': fadeStep(opacity, k) }, this.fieldLayer);
       }
       return [old, faded];
     };
-    this.furrows = strokes('furrows', FURROW, FURROW_OPACITY);
-    this.hedges = strokes('hedges', HEDGE, 0.8);
+    this.furrows = strokes('furrows', FURROW, FURROW_OPACITY, true);
+    this.hedges = strokes('hedges', HEDGE, 0.8, false);
     // Path element of each field drawn, by its key.
     this.fieldPaths = new Map();
     // The outline of each field drawn in several copies, by its key, which
@@ -2172,6 +2190,7 @@ class SvgRenderer {
     // last, and whether the next draw rebuilds every lake.
     this.nextLake = 0;
     this.settling = false;
+    this.scarsDue = false;
     this.scars = [];
     this.bands = [];
     // Centrelines kept since the last forest redraw, each with its time,
@@ -2245,7 +2264,7 @@ class SvgRenderer {
     this.cropMask = null;
     this.churchyardsAt = null;
     this.meadow = new Map();
-    for (const scar of this.scars) scar.shape = null;
+    for (const scar of this.scars) scar.shape = scar.piece = scar.drawn = null;
     for (const lake of this.lakes) lake.inputs = null;
     this.drawSoils(river, x, w, h, seed);
     this.placeTrees(river, x, w, h, seed);
@@ -2754,6 +2773,35 @@ class SvgRenderer {
 
   // One lake's paths, one in each lake layer, and the gradients of its
   // plumes: from each end of its water, and around a delta's head.
+  // Reorder the scars and lakes so that the oxbow at each index of
+  // `pieces` keeps the elements that last drew its piece, or the piece the
+  // channel cut it from, and those left over come last. Matched by index, a cutoff, a split or a dropped oxbow
+  // handed each later oxbow its neighbour's elements, and all of them were
+  // redrawn: 236 scar rewrites in 20 s (seed 1).
+  matchPieces(pieces) {
+    const m = this.scars.length;
+    const last = new Map();
+    this.scars.forEach((s, i) => { if (s.piece !== null && !last.has(s.piece)) last.set(s.piece, i); });
+    const taken = new Uint8Array(m), order = new Array(pieces.length).fill(-1);
+    pieces.forEach((p, k) => {
+      const i = last.get(p);
+      if (i !== undefined && !taken[i]) [order[k], taken[i]] = [i, 1];
+    });
+    pieces.forEach((p, k) => {
+      if (order[k] >= 0) return;
+      const i = this.scars.findIndex((s, j) => !taken[j] && s.drawn !== null && trimmedFrom(p, s.drawn));
+      if (i >= 0) [order[k], taken[i]] = [i, 1];
+    });
+    let free = 0;
+    for (let k = 0; k < order.length; k++) {
+      if (order[k] >= 0) continue;
+      while (taken[free]) free++;
+      [order[k], taken[free]] = [free, 1];
+    }
+    for (let i = 0; i < m; i++) if (!taken[i]) order.push(i);
+    [this.scars, this.lakes] = [order.map((i) => this.scars[i]), order.map((i) => this.lakes[i])];
+  }
+
   newLake() {
     const grads = ['linearGradient', 'linearGradient', 'radialGradient'].map((kind) => {
       const g = el(kind, { id: `plume${this.plumeIds++}`, gradientUnits: 'userSpaceOnUse' }, this.defs);
@@ -2845,10 +2893,17 @@ class SvgRenderer {
       set(damp, 'fill', `rgb(${SCAR_DAMP})`);
       set(wet, 'fill', `rgb(${SCAR_WET})`);
       for (const [k, v] of Object.entries({ fill: 'none', stroke: `rgb(${SCAR_TUFT})`, 'stroke-linecap': 'round' })) set(tufts, k, v);
-      this.scars.push({ g, damp, wet, tufts, shape: null });
+      this.scars.push({ g, damp, wet, tufts, shape: null, piece: null, drawn: null });
     }
-    while (this.scars.length > n) this.scars.pop().g.remove();
     while (this.lakes.length < n) this.lakes.push(this.newLake());
+    // The channel splits an oxbow into pieces of its original polyline, so
+    // a piece's ends and length identify its shape.
+    const pieces = Array.from({ length: n }, (_, k) => {
+      const [s0, s1] = [2 * oxOff[k], 2 * oxOff[k + 1]];
+      return `${s1 - s0} ${oxPts[s0]} ${oxPts[s0 + 1]} ${oxPts[s1 - 2]} ${oxPts[s1 - 1]}`;
+    });
+    this.matchPieces(pieces);
+    while (this.scars.length > n) this.scars.pop().g.remove();
     while (this.lakes.length > n) for (const e of this.lakes.pop().owned) e.remove();
     // Where tributaries end in lakes, at the heads of their deltas.
     const mouths = [];
@@ -2862,6 +2917,7 @@ class SvgRenderer {
     // Lakes rebuild in turn within `LAKE_BUDGET`, except one the channel
     // has reshaped, which rebuilds at once.
     const [lakesFrom, budget] = [performance.now(), this.settling ? Infinity : LAKE_BUDGET];
+    const scarsDue = this.scarsDue || this.settling;
     const first = n ? this.nextLake % n : 0;
     const [x0, vw] = this.window;
     const [lo, hi] = [x0 - 2 * w, x0 + vw + 2 * w];
@@ -2877,14 +2933,11 @@ class SvgRenderer {
       for (let i = oxOff[k]; i < oxOff[k + 1] && !seen; i++) seen = oxPts[2 * i] >= lo && oxPts[2 * i] <= hi;
       if (!seen) {
         for (const e of [scar.damp, scar.wet, scar.tufts, ...lake.paths]) set(e, 'd', '');
-        scar.shape = null;
+        scar.shape = scar.piece = scar.drawn = null;
         lake.inputs = null;
         continue;
       }
-      // The channel splits an oxbow into pieces of its original polyline,
-      // so a piece's ends and length identify its shape.
-      const [s0, s1] = [2 * oxOff[k], 2 * oxOff[k + 1]];
-      const shape = `${s1 - s0} ${oxPts[s0]} ${oxPts[s0 + 1]} ${oxPts[s1 - 2]} ${oxPts[s1 - 1]}`;
+      const shape = scar.piece = pieces[k];
       // Mean width of the channel the oxbow was cut from.
       let wm = 0;
       for (let i = oxOff[k]; i < oxOff[k + 1]; i++) wm += oxWidth[i];
@@ -2896,8 +2949,13 @@ class SvgRenderer {
       const fades = [1, SCAR_WET_LIFE, SCAR_WET_LIFE].map((f, m) => (
         shown * SCAR_OPACITY[m] * (1 - smoothstep(oxScar[k] / (f * scarLife)))).toFixed(2));
       const scarShape = `${shape} ${w} ${local.oxbowShrink}`;
-      if (scar.shape !== scarShape && shown > 0) {
-        scar.shape = scarShape;
+      // A scar the channel has cut back, and its fade, change only after a
+      // forest redraw, until which the swept ground covers the cut end, so
+      // `#lower` repaints a few times a minute and not on most frames.
+      const refresh = scarsDue || scar.drawn === null;
+      const redraw = scar.shape !== scarShape && shown > 0 && (refresh || !trimmedFrom(shape, scar.drawn));
+      if (redraw) {
+        [scar.shape, scar.drawn] = [scarShape, shape];
         const [i0, i1, along, total] = [oxOff[k], oxOff[k + 1], oxAlong[k], oxLen[k]];
         const core = 0.5 * (1 - local.oxbowShrink);
         set(scar.damp, 'd', scarData(oxPts, oxWidth, i0, i1, along, total, SCAR_DAMP_HALF, w));
@@ -2905,9 +2963,11 @@ class SvgRenderer {
         set(scar.tufts, 'd', tuftData(oxPts, oxWidth, i0, i1, along, total, 0.7 * SCAR_DAMP_HALF, w));
         set(scar.tufts, 'stroke-width', dp1(0.06 * w));
       }
-      set(scar.damp, 'fill-opacity', fades[0]);
-      set(scar.wet, 'fill-opacity', fades[1]);
-      set(scar.tufts, 'stroke-opacity', fades[2]);
+      if (refresh || redraw) {
+        set(scar.damp, 'fill-opacity', fades[0]);
+        set(scar.wet, 'fill-opacity', fades[1]);
+        set(scar.tufts, 'stroke-opacity', fades[2]);
+      }
       if (age >= 1 || sliver) {
         // Elements are matched to oxbows by index, so a lake can come back
         // to these elements when the channel splits or drops an oxbow
@@ -2991,6 +3051,7 @@ class SvgRenderer {
       for (const e of lake.plumes) set(e, 'fill-opacity', plume);
     }
     this.nextLake = Math.max(0, waiting);
+    this.scarsDue = false;
 
     this.drawStreams(tribs, courses, w);
     this.drawMills(river, mills, leats, line, widths, w);
@@ -3593,7 +3654,7 @@ class SvgRenderer {
       },
       {
         shown: this.scrollAt?.t,
-        due: () => local.showScrolls && isDue(this.scrollAt, river.scroll_version(), t, LEVEE_REFRESH),
+        due: () => local.showScrolls && (!this.scrollAt || this.scrollAt.forest !== this.forestShown),
         run: () => this.drawScrolls(river, memory, w),
       },
       {
@@ -3849,6 +3910,7 @@ class SvgRenderer {
       else s.e?.remove();
     }
     this.swept = keep;
+    this.scarsDue = true;
   }
 
   // Redraw the crowns from the last forest redraw's growth, after new
@@ -4041,7 +4103,7 @@ class SvgRenderer {
   // `LEVEE_REFRESH` of simulated time as they age. A band's ridges darken
   // as vegetation takes them, and fade over the last quarter of their life.
   drawScrolls(river, memory, w) {
-    this.scrollAt = { key: river.scroll_version(), t: river.time() };
+    this.scrollAt = { t: river.time(), forest: this.forestShown };
     river.sync_scrolls();
     // Views must be built after syncing: it can grow memory.
     const buf = memory.buffer;
