@@ -203,6 +203,73 @@ pub struct Picture {
     /// row by row.
     samples: Vec<Rgb>,
     glyphs: Vec<Option<(char, Rgb)>>,
+    /// Scratch: the ground cells under the view, row by row, and the valley
+    /// floor's y range at each column of samples.
+    cells: Vec<Cell>,
+    floors: Vec<(f64, f64)>,
+}
+
+/// A ground cell's colour before its fields, hedges and valley walls, which
+/// vary within a cell, and what its fields need.
+#[derive(Clone, Copy)]
+struct Cell {
+    colour: Rgb,
+    /// Holding that owns the cell and has grazed it, if any.
+    holding: Option<u32>,
+    /// How far the fields have faded in: 0 when grazing starts and 1 at
+    /// `vegetation_time`, and beyond it on older ground.
+    fade: f64,
+    meadow: bool,
+}
+
+impl Cell {
+    fn new(sim: &Sim, c: usize) -> Self {
+        let p = &sim.params;
+        let (field, land) = (&sim.erodibility, &sim.land);
+        let full = (p.vegetation_time + p.forest_time) as f32;
+        let n = ((field.noise[c] as f64 - 0.35) / 0.3).clamp(0.0, 1.0);
+        let mut colour = mix(LOAM, gradient(&SOIL, n), 0.5);
+        colour = mix(colour, GRAVEL, 0.6 * field.coarse[c] as f64);
+        let silt = field.deposit[c] as f64 / p.levee_height.max(1e-9);
+        colour = mix(colour, LEVEE, 0.35 * silt);
+        let g = field.vegetation(c, full) as f64;
+        colour = if g < p.vegetation_time {
+            let bare = mix(BAR, colour, 0.3);
+            mix(
+                bare,
+                mix(colour, FOREST[0], 0.35),
+                smoothstep(g / p.vegetation_time),
+            )
+        } else {
+            let t = (g - p.vegetation_time) / p.forest_time.max(1e-9);
+            let tone = if t < FOREST_AT[0] {
+                mix(FOREST[0], FOREST[1], t / FOREST_AT[0])
+            } else {
+                mix(
+                    FOREST[1],
+                    FOREST[2],
+                    (t - FOREST_AT[0]) / (FOREST_AT[1] - FOREST_AT[0]),
+                )
+            };
+            mix(colour, tone, 0.35 + 0.5 * t.min(1.0))
+        };
+        let cut = field.cut_at[c];
+        if cut.is_finite() {
+            let fade = 1.0 - (sim.time - cut) / (p.oxbow_lifetime + p.scar_lifetime);
+            colour = mix(colour, SCAR_WET, 0.6 * fade);
+        }
+        let owner = land.owner[c];
+        let fade = (g - p.grazing_time) / (p.vegetation_time - p.grazing_time);
+        let held = owner != NONE
+            && fade > 0.0
+            && matches!(land.holdings.get(owner as usize), Some(Some(_)));
+        Cell {
+            colour,
+            holding: held.then_some(owner),
+            fade,
+            meadow: land.risk[c] >= MEADOW_RISK,
+        }
+    }
 }
 
 impl Picture {
@@ -265,76 +332,64 @@ impl Picture {
     fn ground(&mut self, sim: &Sim, view: &View) {
         let p = &sim.params;
         let (field, land) = (&sim.erodibility, &sim.land);
-        let full = (p.vegetation_time + p.forest_time) as f32;
-        let plug_life = p.oxbow_lifetime + p.scar_lifetime;
         let cell_at = |q: P| {
             let (cx, cy) = (q[0] / field.cell, q[1] / field.cell);
             (cx >= 0.0 && cy >= 0.0 && (cx as usize) < field.cols && (cy as usize) < field.rows)
                 .then(|| cy as usize * field.cols + cx as usize)
         };
-        for i in 0..view.w {
-            let x = view.centre(i, 0)[0];
-            let (lo, hi) = sim.floor(x, false);
-            for j in 0..view.h {
+        // The cells under the view, each worked out once for the samples
+        // that fall in it.
+        let range = |o: f64, n: usize, len: usize| {
+            let a = (o / field.cell).floor().clamp(0.0, len as f64) as usize;
+            let b = ((o + n as f64 * view.s) / field.cell).floor() + 1.0;
+            a..(b.clamp(0.0, len as f64) as usize).max(a)
+        };
+        let (xs, ys) = (
+            range(view.x0, view.w, field.cols),
+            range(view.y0, view.h, field.rows),
+        );
+        self.cells.clear();
+        for cy in ys.clone() {
+            self.cells
+                .extend(xs.clone().map(|cx| Cell::new(sim, cy * field.cols + cx)));
+        }
+        self.floors.clear();
+        self.floors
+            .extend((0..view.w).map(|i| sim.floor(view.centre(i, 0)[0], false)));
+        let d = HEDGE_WIDTH * view.px;
+        for j in 0..view.h {
+            for i in 0..view.w {
                 let q = view.centre(i, j);
                 let Some(c) = cell_at(q) else { continue };
-                let n = ((field.noise[c] as f64 - 0.35) / 0.3).clamp(0.0, 1.0);
-                let mut colour = mix(LOAM, gradient(&SOIL, n), 0.5);
-                colour = mix(colour, GRAVEL, 0.6 * field.coarse[c] as f64);
-                let silt = field.deposit[c] as f64 / p.levee_height.max(1e-9);
-                colour = mix(colour, LEVEE, 0.35 * silt);
-                let g = field.vegetation(c, full) as f64;
-                colour = if g < p.vegetation_time {
-                    let bare = mix(BAR, colour, 0.3);
-                    mix(
-                        bare,
-                        mix(colour, FOREST[0], 0.35),
-                        smoothstep(g / p.vegetation_time),
-                    )
-                } else {
-                    let t = (g - p.vegetation_time) / p.forest_time.max(1e-9);
-                    let tone = if t < FOREST_AT[0] {
-                        mix(FOREST[0], FOREST[1], t / FOREST_AT[0])
-                    } else {
-                        mix(
-                            FOREST[1],
-                            FOREST[2],
-                            (t - FOREST_AT[0]) / (FOREST_AT[1] - FOREST_AT[0]),
-                        )
-                    };
-                    mix(colour, tone, 0.35 + 0.5 * t.min(1.0))
-                };
-                let cut = field.cut_at[c];
-                if cut.is_finite() {
-                    let fade = 1.0 - (sim.time - cut) / plug_life;
-                    colour = mix(colour, SCAR_WET, 0.6 * fade);
-                }
-                let owner = land.owner[c];
-                if owner != NONE
-                    && let Some(Some(h)) = land.holdings.get(owner as usize)
+                let (cx, cy) = (c % field.cols, c / field.cols);
+                let cell = &self.cells[(cy - ys.start) * xs.len() + cx - xs.start];
+                let mut colour = cell.colour;
+                if let Some(h) = cell
+                    .holding
+                    .and_then(|o| land.holdings[o as usize].as_ref())
                 {
-                    let fade = (g - p.grazing_time) / (p.vegetation_time - p.grazing_time);
                     let across = (q[0] - h.seat[0]) * -h.axis[1] + (q[1] - h.seat[1]) * h.axis[0];
                     let strip = (across / (STRIP * p.width)).floor() as i64 as u64;
                     let pick = hash(h.seed as u64, strip);
-                    let crop = if land.risk[c] >= MEADOW_RISK {
+                    let crop = if cell.meadow {
                         MEADOWS[(pick % 2) as usize]
                     } else {
                         ARABLE[(pick % 3) as usize]
                     };
-                    colour = mix(colour, crop, 0.85 * fade);
+                    colour = mix(colour, crop, 0.85 * cell.fade);
                     // A hedge where the ground `HEDGE_WIDTH` pixels right
                     // or down has another owner.
-                    let d = HEDGE_WIDTH * view.px;
+                    let owner = land.owner[c];
                     let hedge = [[d, 0.0], [0.0, d]].iter().any(|d| {
                         cell_at([q[0] + d[0], q[1] + d[1]]).is_some_and(|k| land.owner[k] != owner)
                     });
                     if hedge {
-                        colour = mix(colour, HEDGE, 0.7 * fade);
+                        colour = mix(colour, HEDGE, 0.7 * cell.fade);
                     }
                 }
                 // Upland beyond the wall feet, with the scarp lit on the
                 // wall facing the sun and shaded on the other.
+                let (lo, hi) = self.floors[i];
                 let beyond = (lo - q[1]).max(q[1] - hi);
                 if beyond > 0.0 {
                     let (scarp, tone) = if q[1] < lo {
