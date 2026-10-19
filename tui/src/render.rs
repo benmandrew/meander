@@ -4,10 +4,10 @@
 //! centre, water and tracks are stamped over it, and buildings and mills
 //! take whole cells as glyphs. Colours follow the page's (`web/main.js`).
 
-use meander_core::Sim;
 use meander_core::farm::Kind;
 use meander_core::geom::{P, dist, seg_dist2};
 use meander_core::land::NONE;
+use meander_core::{FAN_MAX_DEPTH, Sim, Tributary};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
@@ -87,6 +87,29 @@ fn gradient(stops: &[Rgb], t: f64) -> Rgb {
 fn hash(a: u64, b: u64) -> u64 {
     let h = (a ^ b.wrapping_mul(0x9E37_79B9_7F4A_7C15)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     h ^ (h >> 31)
+}
+
+/// Fill `out` with a tributary's course above its mouth: from the edge of
+/// the world down to the head of its combe, which lies 0.9 of the combe's
+/// depth back from the mouth as on the page. The stream wanders by up to a
+/// channel width, less towards the head.
+fn upland_course(sim: &Sim, t: &Tributary, out: &mut Vec<P>) {
+    let w = sim.params.width;
+    let [x, y] = t.mouth;
+    let (edge, sign) = if t.side == 1 {
+        (sim.bounds[1], 1.0)
+    } else {
+        (0.0, -1.0)
+    };
+    let head = y + sign * 0.9 * t.scale * FAN_MAX_DEPTH * w;
+    let n = ((edge - head).abs() / (2.0 * w)).ceil().max(1.0) as usize;
+    let phase = x / w;
+    out.clear();
+    out.extend((0..=n).map(|k| {
+        let f = k as f64 / n as f64;
+        let yk = edge + (head - edge) * f;
+        [x + w * (1.0 - f) * (phase + yk / (3.0 * w)).sin(), yk]
+    }));
 }
 
 /// How the window of the world maps to pixels: pixel (i, j) has its
@@ -284,8 +307,11 @@ impl Picture {
             self.polyline(view, t, |_| thin, TRACK, false);
         }
         self.polyline(view, &sim.boundary, |_| thin, BOUNDARY, true);
+        let mut stream = Vec::new();
         for t in &sim.tributaries {
-            self.polyline(view, &t.course, |_| thin, WATER, false);
+            upland_course(sim, t, &mut stream);
+            stream.extend_from_slice(&t.course);
+            self.polyline(view, &stream, |_| thin, WATER, false);
         }
         for o in sim.oxbows.iter().filter(|o| o.is_lake()) {
             // Reeds close over the water as the lake fills, which the page
