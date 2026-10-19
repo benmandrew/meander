@@ -4,7 +4,7 @@ edition.workspace = true
 version.workspace = true
 description = "WebAssembly bindings for the meander river simulation"
 repository.workspace = true
-license.workspace = true
+license-file = "LICENCE"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
