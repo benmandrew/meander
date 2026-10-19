@@ -43,6 +43,14 @@ Holdings are the *geodesic Voronoi cells* of farmsteads. Water is a barrier, and
 
 `River` wraps `Sim` with hidden reaches of `UPSTREAM` (60 widths) and `DOWNSTREAM` (20 widths). `sync()` copies geometry into flat `f32` buffers exposed as raw pointers. The `sync_*` calls and the `Vec<f32>` accessors can grow WebAssembly (WASM) memory, so the worker's `pack` calls them all before it reads the buffer. The `*_version` counters tell the renderer when to rebuild.
 
+## Terminal (`tui/`)
+
+`make tui` runs the river in a terminal with *ratatui*. It steps `Sim` natively on the main thread, so it needs no worker or snapshot. The world is 70 channel widths tall, enough for the valley and its walls, and as wide as the terminal's aspect allows. A resize keeps the river and rescales the picture to fit.
+
+Each cell shows two pixels as an upper half block, the top one in its foreground colour and the bottom one in its background. `Picture::paint` samples the ground grids at each pixel's centre: soil, gravel, silt, vegetation, oxbow scars and the holdings' fields and hedges. Field strips run along each holding's axis, `STRIP` widths apart. Water and tracks are stamped over the ground at their width, at least one pixel wide. A lake plugs from its ends and greens towards reeds as it fills. Buildings and working mills take whole cells as glyphs.
+
+On a 50-row terminal a pixel is about 6 world units, and a channel width is 8 units, so the channel is one to three pixels wide. Scroll bars, crowns, furrows and hachures fall below a pixel and are not drawn.
+
 ## Web (`web/`)
 
 ### Worker

@@ -24,9 +24,7 @@ const CONTROLS = [
 // simulated time, and the initial noise, in channel widths.
 const SETTINGS = { warmup: 800, noise: 0.5 };
 
-// Years per unit of simulated time. At this scale the median bank migrates
-// about 1% of a channel width per year and the fastest 10% of the channel
-// 5% or more, within the range measured on real meandering rivers.
+// Years per unit of simulated time; see `YEARS_PER_UNIT` in the core.
 const YEARS_PER_UNIT = 2.5;
 
 // The river holds still while a floodplain redraw has been due for more

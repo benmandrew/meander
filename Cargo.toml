@@ -10,7 +10,7 @@ include = ["src/**", "examples/**", "LICENCE"]
 [dependencies]
 
 [workspace]
-members = ["wasm"]
+members = ["wasm", "tui"]
 resolver = "3"
 
 [workspace.package]

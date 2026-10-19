@@ -330,13 +330,8 @@ impl River {
         let full = (p.vegetation_time + p.forest_time) as f32;
         let field = &self.sim.erodibility;
         self.forest.clear();
-        self.forest.extend(
-            field
-                .cut_at
-                .iter()
-                .zip(&field.growth)
-                .map(|(&cut, &g)| if cut.is_finite() { 0.0 } else { g.min(full) }),
-        );
+        self.forest
+            .extend((0..field.growth.len()).map(|i| field.vegetation(i, full)));
     }
     pub fn forest_ptr(&self) -> *const f32 {
         self.forest.as_ptr()

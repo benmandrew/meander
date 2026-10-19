@@ -65,6 +65,8 @@
                 ./Makefile
                 ./src
                 ./examples
+                # A workspace member, so cargo needs it to read the workspace.
+                ./tui
                 ./wasm
                 ./web
               ];

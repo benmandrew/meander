@@ -236,6 +236,16 @@ impl Erodibility {
         self.growth[self.index(p)] as f64
     }
 
+    /// Vegetation on cell `i` as drawn: its growth, capped at `full`, and 0
+    /// on oxbow ground, where the lake and its clay plug hold no wood.
+    pub fn vegetation(&self, i: usize, full: f32) -> f32 {
+        if self.cut_at[i].is_finite() {
+            0.0
+        } else {
+            self.growth[i].min(full)
+        }
+    }
+
     /// Index of the cell under `p`, clamped to the grid.
     pub fn cell_index(&self, p: P) -> usize {
         self.index(p)

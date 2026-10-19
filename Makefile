@@ -1,4 +1,4 @@
-.PHONY: build test smoke serve fuzz video video-encode
+.PHONY: build test smoke serve fuzz video video-encode tui
 
 build: web/favicon.ico
 	wasm-pack build wasm --release --target web --out-dir ../web/pkg
@@ -35,3 +35,7 @@ video-encode:
 
 serve: build
 	python3 serve.py 8000
+
+# The river in the terminal; SEED=N picks the seed.
+tui:
+	cargo run --release -p meander-tui -- $(SEED)

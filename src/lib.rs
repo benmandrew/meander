@@ -28,6 +28,11 @@ pub use tributary::Tributary;
 use walls::Walls;
 pub use wood::Jam;
 
+/// Years per unit of simulated time. At this scale the median bank migrates
+/// about 1% of a channel width per year and the fastest 10% of the channel
+/// 5% or more, within the range measured on real meandering rivers.
+pub const YEARS_PER_UNIT: f64 = 2.5;
+
 /// Point spacing as a fraction of the channel width.
 pub const SPACING: f64 = 0.5;
 

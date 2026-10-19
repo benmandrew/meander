@@ -1,0 +1,17 @@
+[package]
+name = "meander-tui"
+edition.workspace = true
+version.workspace = true
+description = "Terminal view of the meander river simulation"
+repository.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "meander"
+path = "src/main.rs"
+
+[dependencies]
+meander-core = { path = ".." }
+# Only the crossterm backend: the default features add widgets this does
+# not use.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }

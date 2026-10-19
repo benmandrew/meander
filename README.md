@@ -21,4 +21,5 @@ For development, the dev shell supplies the Rust toolchain, `wasm-pack` and the 
 $ nix develop   # or `direnv allow` once
 $ make serve    # build, then serve web/ at http://localhost:8000
 $ make test     # run the model's validation tests
+$ make tui      # run the river in the terminal
 ```
