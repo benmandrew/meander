@@ -3,6 +3,10 @@
 //! background. Ground is sampled from the core's grids at each pixel's
 //! centre, water and tracks are stamped over it, and buildings and mills
 //! take whole cells as glyphs. Colours follow the page's (`web/main.js`).
+//!
+//! Ground and water are painted `SUPERSAMPLE` times finer along each axis,
+//! and each pixel resolves its samples as an edge between two colours, so
+//! edges are antialiased over less than a pixel.
 
 use meander_core::farm::Kind;
 use meander_core::geom::{P, dist, seg_dist2};
@@ -14,6 +18,18 @@ use ratatui::style::Color;
 use ratatui::widgets::Widget;
 
 type Rgb = [f32; 3];
+
+/// Samples along each axis of a pixel.
+const SUPERSAMPLE: usize = 3;
+/// Factor by which a pixel's share of each colour at an edge is pushed
+/// towards 0 or 1. At 1 an edge ramps over a whole pixel, which reads as
+/// blur at a terminal's pixel size; at 2 it ramps over half of one.
+const SHARPEN: f32 = 2.0;
+/// Width of tracks, streams and the parish boundary, and of hedges, in
+/// pixels. Thinner lines straddling two pixels fade to half strength in
+/// both.
+const LINE: f64 = 1.2;
+const HEDGE_WIDTH: f64 = 1.25;
 
 const SOIL: [Rgb; 4] = [
     [160.0, 158.0, 120.0],
@@ -112,8 +128,9 @@ fn upland_course(sim: &Sim, t: &Tributary, out: &mut Vec<P>) {
     }));
 }
 
-/// How the window of the world maps to pixels: pixel (i, j) has its
-/// centre at `x0 + (i + 0.5) s`, `y0 + (j + 0.5) s`.
+/// How the window of the world maps to pixels, or to the samples of a
+/// finer view: pixel (i, j) has its centre at `x0 + (i + 0.5) s`,
+/// `y0 + (j + 0.5) s`.
 pub struct View {
     x0: f64,
     y0: f64,
@@ -121,6 +138,10 @@ pub struct View {
     s: f64,
     w: usize,
     h: usize,
+    /// Pixels along each axis of a pixel of the picture, and its size in
+    /// world units: 1 and `s` for the picture's own view.
+    k: usize,
+    px: f64,
 }
 
 impl View {
@@ -135,6 +156,19 @@ impl View {
             s,
             w,
             h,
+            k: 1,
+            px: s,
+        }
+    }
+
+    /// The same window with `k` times the pixels along each axis.
+    fn fine(&self, k: usize) -> Self {
+        View {
+            s: self.s / k as f64,
+            w: self.w * k,
+            h: self.h * k,
+            k: self.k * k,
+            ..*self
         }
     }
 
@@ -165,6 +199,9 @@ pub struct Picture {
     w: usize,
     h: usize,
     pixels: Vec<Rgb>,
+    /// Ground and water at `SUPERSAMPLE` samples a pixel along each axis,
+    /// row by row.
+    samples: Vec<Rgb>,
     glyphs: Vec<Option<(char, Rgb)>>,
 }
 
@@ -172,13 +209,57 @@ impl Picture {
     pub fn paint(&mut self, sim: &Sim, view: &View) {
         self.w = view.w;
         self.h = view.h;
-        self.pixels.clear();
-        self.pixels.resize(view.w * view.h, OUTSIDE);
         self.glyphs.clear();
         self.glyphs.resize(view.w * view.h.div_ceil(2), None);
-        self.ground(sim, view);
-        self.water(sim, view);
+        let fine = view.fine(SUPERSAMPLE);
+        self.samples.clear();
+        self.samples.resize(fine.w * fine.h, OUTSIDE);
+        self.ground(sim, &fine);
+        self.water(sim, &fine);
+        self.resolve();
         self.buildings(sim, view);
+    }
+
+    /// Each pixel as an edge between its centre sample's colour and the
+    /// sample's colour farthest from it, mixed by the share of samples
+    /// nearer the centre's, weighted towards the pixel's centre by a tent
+    /// filter. The share is pushed towards 0 or 1 by `SHARPEN`.
+    fn resolve(&mut self) {
+        let k = SUPERSAMPLE;
+        let (w, h, fw) = (self.w, self.h, self.w * k);
+        let weight = |d: usize| (1 + d.min(k - 1 - d)) as f32;
+        let total = (0..k).map(weight).sum::<f32>().powi(2);
+        let dist2 = |a: &Rgb, b: &Rgb| (0..3).map(|q| (a[q] - b[q]).powi(2)).sum::<f32>();
+        let (samples, pixels) = (&self.samples, &mut self.pixels);
+        let at =
+            |i: usize, j: usize, dx: usize, dy: usize| &samples[(j * k + dy) * fw + i * k + dx];
+        pixels.clear();
+        for c in 0..w * h {
+            let (i, j) = (c % w, c / w);
+            let centre = *at(i, j, k / 2, k / 2);
+            let (mut far, mut far_d) = (centre, 0.0);
+            for (dx, dy) in (0..k * k).map(|n| (n % k, n / k)) {
+                let s = at(i, j, dx, dy);
+                let d = dist2(s, &centre);
+                if d > far_d {
+                    (far, far_d) = (*s, d);
+                }
+            }
+            if far_d == 0.0 {
+                pixels.push(centre);
+                continue;
+            }
+            let near: f32 = (0..k * k)
+                .map(|n| (n % k, n / k))
+                .filter(|&(dx, dy)| {
+                    let s = at(i, j, dx, dy);
+                    dist2(s, &centre) <= dist2(s, &far)
+                })
+                .map(|(dx, dy)| weight(dx) * weight(dy))
+                .sum();
+            let share = ((near / total - 0.5) * SHARPEN + 0.5).clamp(0.0, 1.0);
+            pixels.push(mix(far, centre, share as f64));
+        }
     }
 
     fn ground(&mut self, sim: &Sim, view: &View) {
@@ -242,9 +323,10 @@ impl Picture {
                         ARABLE[(pick % 3) as usize]
                     };
                     colour = mix(colour, crop, 0.85 * fade);
-                    // A hedge where the next pixel right or down has
-                    // another owner.
-                    let hedge = [[view.s, 0.0], [0.0, view.s]].iter().any(|d| {
+                    // A hedge where the ground `HEDGE_WIDTH` pixels right
+                    // or down has another owner.
+                    let d = HEDGE_WIDTH * view.px;
+                    let hedge = [[d, 0.0], [0.0, d]].iter().any(|d| {
                         cell_at([q[0] + d[0], q[1] + d[1]]).is_some_and(|k| land.owner[k] != owner)
                     });
                     if hedge {
@@ -264,28 +346,28 @@ impl Picture {
                     colour = mix(colour, UPLAND, 0.4);
                     colour = mix(colour, scarp, tone * on_scarp.max(0.0));
                 }
-                self.pixels[j * view.w + i] = colour;
+                self.samples[j * view.w + i] = colour;
             }
         }
     }
 
-    /// Set every pixel within `r` of segment `a`–`b` to `colour`, or, with
-    /// `dash`, every other one along x.
+    /// Set every sample within `r` of segment `a`–`b` to `colour`, or, with
+    /// `dash`, those in every other pixel of the picture.
     fn stroke(&mut self, view: &View, a: P, b: P, r: f64, colour: Rgb, dash: bool) {
         let xs = view.span(0, a[0].min(b[0]) - r, a[0].max(b[0]) + r);
         let ys = view.span(1, a[1].min(b[1]) - r, a[1].max(b[1]) + r);
         let r2 = r * r;
         for j in ys {
             for i in xs.clone() {
-                if (!dash || (i + j) % 2 == 0) && seg_dist2(view.centre(i, j), a, b) <= r2 {
-                    self.pixels[j * view.w + i] = colour;
+                let on = !dash || (i / view.k + j / view.k).is_multiple_of(2);
+                if on && seg_dist2(view.centre(i, j), a, b) <= r2 {
+                    self.samples[j * view.w + i] = colour;
                 }
             }
         }
     }
 
-    /// Stroke a polyline at radius `r`, or at a radius `r_of` gives for
-    /// each segment index.
+    /// Stroke a polyline at the radius `r` gives for each segment index.
     fn polyline(
         &mut self,
         view: &View,
@@ -301,8 +383,8 @@ impl Picture {
 
     fn water(&mut self, sim: &Sim, view: &View) {
         let w = sim.params.width;
-        // A line at this radius is one pixel wide.
-        let thin = 0.5 * view.s;
+        // A line at this radius is `LINE` pixels of the picture wide.
+        let thin = 0.5 * LINE * view.px;
         for t in &sim.tracks.tracks {
             self.polyline(view, t, |_| thin, TRACK, false);
         }
@@ -326,7 +408,7 @@ impl Picture {
             for (k, seg) in o.points.windows(2).enumerate() {
                 let next = along + dist(seg[0], seg[1]);
                 if along >= plug && next <= o.length - plug {
-                    let rk = (r * o.widths[k]).max(0.45 * view.s);
+                    let rk = (r * o.widths[k]).max(0.45 * view.px);
                     self.stroke(view, seg[0], seg[1], rk, colour, false);
                 }
                 along = next;
