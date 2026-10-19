@@ -16,6 +16,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::widgets::Widget;
+use std::sync::Mutex;
 
 type Rgb = [f32; 3];
 
@@ -30,6 +31,11 @@ const SHARPEN: f32 = 2.0;
 /// both.
 const LINE: f64 = 1.2;
 const HEDGE_WIDTH: f64 = 1.25;
+/// Threads that paint the ground, and the bands of rows they share out. The
+/// threads take bands as they finish, so a thread on a fast core paints more
+/// of them than one on a slow core.
+const THREADS: usize = 4;
+const BANDS: usize = 16;
 
 const SOIL: [Rgb; 4] = [
     [160.0, 158.0, 120.0],
@@ -357,53 +363,70 @@ impl Picture {
         self.floors
             .extend((0..view.w).map(|i| sim.floor(view.centre(i, 0)[0], false)));
         let d = HEDGE_WIDTH * view.px;
-        for j in 0..view.h {
-            for i in 0..view.w {
-                let q = view.centre(i, j);
-                let Some(c) = cell_at(q) else { continue };
-                let (cx, cy) = (c % field.cols, c / field.cols);
-                let cell = &self.cells[(cy - ys.start) * xs.len() + cx - xs.start];
-                let mut colour = cell.colour;
-                if let Some(h) = cell
-                    .holding
-                    .and_then(|o| land.holdings[o as usize].as_ref())
-                {
-                    let across = (q[0] - h.seat[0]) * -h.axis[1] + (q[1] - h.seat[1]) * h.axis[0];
-                    let strip = (across / (STRIP * p.width)).floor() as i64 as u64;
-                    let pick = hash(h.seed as u64, strip);
-                    let crop = if cell.meadow {
-                        MEADOWS[(pick % 2) as usize]
-                    } else {
-                        ARABLE[(pick % 3) as usize]
-                    };
-                    colour = mix(colour, crop, 0.85 * cell.fade);
-                    // A hedge where the ground `HEDGE_WIDTH` pixels right
-                    // or down has another owner.
-                    let owner = land.owner[c];
-                    let hedge = [[d, 0.0], [0.0, d]].iter().any(|d| {
-                        cell_at([q[0] + d[0], q[1] + d[1]]).is_some_and(|k| land.owner[k] != owner)
-                    });
-                    if hedge {
-                        colour = mix(colour, HEDGE, 0.7 * cell.fade);
+        let (cells, floors) = (&self.cells, &self.floors);
+        let band = |j0: usize, out: &mut [Rgb]| {
+            for j in j0..j0 + out.len() / view.w {
+                for i in 0..view.w {
+                    let q = view.centre(i, j);
+                    let Some(c) = cell_at(q) else { continue };
+                    let (cx, cy) = (c % field.cols, c / field.cols);
+                    let cell = &cells[(cy - ys.start) * xs.len() + cx - xs.start];
+                    let mut colour = cell.colour;
+                    if let Some(h) = cell
+                        .holding
+                        .and_then(|o| land.holdings[o as usize].as_ref())
+                    {
+                        let across =
+                            (q[0] - h.seat[0]) * -h.axis[1] + (q[1] - h.seat[1]) * h.axis[0];
+                        let strip = (across / (STRIP * p.width)).floor() as i64 as u64;
+                        let pick = hash(h.seed as u64, strip);
+                        let crop = if cell.meadow {
+                            MEADOWS[(pick % 2) as usize]
+                        } else {
+                            ARABLE[(pick % 3) as usize]
+                        };
+                        colour = mix(colour, crop, 0.85 * cell.fade);
+                        // A hedge where the ground `HEDGE_WIDTH` pixels right
+                        // or down has another owner.
+                        let owner = land.owner[c];
+                        let hedge = [[d, 0.0], [0.0, d]].iter().any(|d| {
+                            cell_at([q[0] + d[0], q[1] + d[1]])
+                                .is_some_and(|k| land.owner[k] != owner)
+                        });
+                        if hedge {
+                            colour = mix(colour, HEDGE, 0.7 * cell.fade);
+                        }
                     }
+                    // Upland beyond the wall feet, with the scarp lit on the
+                    // wall facing the sun and shaded on the other.
+                    let (lo, hi) = floors[i];
+                    let beyond = (lo - q[1]).max(q[1] - hi);
+                    if beyond > 0.0 {
+                        let (scarp, tone) = if q[1] < lo {
+                            (SCARP_SHADE, 0.35)
+                        } else {
+                            (SCARP_LIGHT, 0.3)
+                        };
+                        let on_scarp = 1.0 - beyond / (SCARP * p.width);
+                        colour = mix(colour, UPLAND, 0.4);
+                        colour = mix(colour, scarp, tone * on_scarp.max(0.0));
+                    }
+                    out[(j - j0) * view.w + i] = colour;
                 }
-                // Upland beyond the wall feet, with the scarp lit on the
-                // wall facing the sun and shaded on the other.
-                let (lo, hi) = self.floors[i];
-                let beyond = (lo - q[1]).max(q[1] - hi);
-                if beyond > 0.0 {
-                    let (scarp, tone) = if q[1] < lo {
-                        (SCARP_SHADE, 0.35)
-                    } else {
-                        (SCARP_LIGHT, 0.3)
-                    };
-                    let on_scarp = 1.0 - beyond / (SCARP * p.width);
-                    colour = mix(colour, UPLAND, 0.4);
-                    colour = mix(colour, scarp, tone * on_scarp.max(0.0));
-                }
-                self.samples[j * view.w + i] = colour;
             }
-        }
+        };
+        let rows = view.h.div_ceil(BANDS).max(1);
+        let bands = Mutex::new(self.samples.chunks_mut(rows * view.w).enumerate());
+        let next = || bands.lock().unwrap().next();
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                scope.spawn(|| {
+                    while let Some((k, out)) = next() {
+                        band(k * rows, out);
+                    }
+                });
+            }
+        });
     }
 
     /// Set every sample within `r` of segment `a`–`b` to `colour`, or, with
