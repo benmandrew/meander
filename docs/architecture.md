@@ -63,7 +63,13 @@ The river steps in a dedicated worker (`worker.js`). After each request the work
 
 The channel trails the river by one step, and `tween` interpolates between the last two centrelines. It is drawn at `river.time() + owed - dt`, so the drawn time never goes back. It redraws only once it could have moved `MIN_MOVE` device pixels.
 
-Floodplain layers share `FLOODPLAIN_BUDGET` a frame, or `FLOODPLAIN_IDLE_BUDGET` on an idle frame. When a redraw falls behind by more than `MAX_LAG` or `LAG_SECONDS`, whichever is longer, the river holds. Before that, the river slows to a pace at which every redraw under way finishes inside the limit (`PACE_LAG`, `PACE_SECONDS`). A layer that has just shown a new picture rests for `REDRAW_REST`. Lake rebuilds share `LAKE_BUDGET`. On a pause, a single step or the end of the warm-up, `settle` finishes every redraw in one frame. `<html data-idle>` marks a paused page with nothing left to draw.
+Floodplain layers share `FLOODPLAIN_BUDGET` a frame, or `FLOODPLAIN_IDLE_BUDGET` on an idle frame. When a redraw falls behind by more than `MAX_LAG` or `LAG_SECONDS`, whichever is longer, the river holds. Before that, the river slows to a pace at which every redraw under way finishes inside the limit (`PACE_LAG`, `PACE_SECONDS`). A layer that has just shown a new picture rests for the detail level's `rest`. Lake rebuilds share `LAKE_BUDGET`. On a pause, a single step or the end of the warm-up, `settle` finishes every redraw in one frame. `<html data-idle>` marks a paused page with nothing left to draw.
+
+### Detail levels
+
+The cost of drawing lies mostly in rasterising, which the JS time on the panel does not show. Chrome on Linux rasterises on one thread of the GPU process, and anti-aliased wide strokes and fills are slow there: on an Intel iGPU a full redraw of the old point bars took 100 ms, and frames were held for up to 416 ms. So `ui.js` (`detailControl`) watches the gaps between animation frames while the river runs. A frame is slow when its gap exceeds 1.5 times the display's frame interval. The level steps down when more than 10% of frames over 3 s were slow, and up after 20 s with fewer than 2%. A step up that fails within 30 s doubles the wait for the next, and after three failures the level stays. Each change of level, speed, size or state starts a 1 s quiet period whose frames do not count. The level is kept in `localStorage` for the next visit.
+
+`DETAIL` in `main.js` lists the levels. `setDetail` sets `<html data-detail>`, by which `style.css` draws more layers without anti-aliasing at each lower level, and the level sets how long a floodplain layer rests between redraws. At every level the old point bars, the forest bands and the fields' fills and faint strokes are drawn without anti-aliasing (`ALIASED`), since their edges lie between near-identical tones.
 
 ### Layers (`main.js`)
 

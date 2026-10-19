@@ -66,6 +66,36 @@ const MAX_OWED = 0.04;
 const FRAME_WINDOW = 600;
 const STATS_EVERY = 250;
 
+// The renderer's detail level follows how well the device keeps up. A
+// frame is slow when it comes more than `SLOW_FRAME` times the display's
+// frame interval after the last. That interval is the `FRAME_QUANTILE`
+// quantile of the last `INTERVALS` frames' intervals, which holds while
+// most frames are slow. The JS time the panel shows misses the cost, which
+// lies in rasterising: on an Intel iGPU in Chrome the page's JS took 3 ms
+// a frame while frames were held for up to 416 ms. Only frames while the
+// river runs count.
+const SLOW_FRAME = 1.5;
+const FRAME_QUANTILE = 0.25;
+const INTERVALS = 120;
+// The level steps down when more than `DOWN_SHARE` of the frames over the
+// last `DOWN_SECONDS` were slow, and up when fewer than `UP_SHARE` of those
+// over the last `UP_SECONDS` were. A step up followed by a step down within
+// `BACKOFF_SECONDS` doubles the wait before the next, and after
+// `MAX_FAILURES` of those the level stays. Frames over `QUIET_SECONDS`
+// after any change of level, speed, size or state do not count, since the
+// change repaints whole layers. The level is kept for the next visit under
+// `DETAIL_KEY`, or fixed by `?detail=N`.
+const DOWN_SHARE = 0.1;
+const DOWN_SECONDS = 3;
+const UP_SHARE = 0.02;
+const UP_SECONDS = 20;
+const BACKOFF_SECONDS = 30;
+const MAX_FAILURES = 3;
+const QUIET_SECONDS = 1;
+const DETAIL_KEY = 'meander-detail';
+// Seconds of frame counts kept, more than the longest wait to step up.
+const BUCKETS = 256;
+
 // `renderer` provides draw(river, memory, state), reset(river, bounds, seed),
 // capture(river, line, t, state), which is called with the centreline at
 // time t during warm-up in place of drawing, idle(river, memory, state),
@@ -74,7 +104,8 @@ const STATS_EVERY = 250;
 // settle(river, memory, state), which finishes that work at once when the
 // river stops, before a last draw, and behind(river), the simulated time
 // that work has waited. `river` is a `RiverView` of the worker's last reply,
-// and `memory` its buffers.
+// and `memory` its buffers. `levels` is its number of detail levels, and
+// setDetail(level) sets one, from 0, the lowest.
 // `display` holds the renderer's own settings.
 export async function startApp({ view, renderer, display }) {
   const local = { ...SETTINGS, ...display };
@@ -142,6 +173,7 @@ export async function startApp({ view, renderer, display }) {
   let scheduled = false;
   let lastFrame;
   const $ = (id) => document.getElementById(id);
+  const detail = detailControl(renderer, new URLSearchParams(location.search).get('detail'));
 
   function wake() {
     delete document.documentElement.dataset.idle;
@@ -163,6 +195,7 @@ export async function startApp({ view, renderer, display }) {
     [ready, asked, owed, warming, pace] = [false, null, 0, 0, null];
     replaying = target !== undefined;
     dirty = true;
+    detail.quiet(performance.now());
     request({ reset: { bounds: state.bounds, seed, noise: local.noise } }, () => {
       ready = true;
       dt = river.get_param('dt');
@@ -207,6 +240,7 @@ export async function startApp({ view, renderer, display }) {
         local[s.key] = Number(input.value);
         out.textContent = String(local[s.key]);
         dirty = true;
+        detail.quiet(performance.now());
         wake();
       };
       input.addEventListener('input', apply);
@@ -237,11 +271,14 @@ export async function startApp({ view, renderer, display }) {
   function tick(now) {
     // Real seconds since the last frame, capped so a background tab does
     // not return to a huge backlog.
-    const elapsed = Math.min(0.1, (now - (lastFrame ?? now)) / 1000);
+    const interval = now - (lastFrame ?? now);
+    const elapsed = Math.min(0.1, interval / 1000);
+    const counts = lastFrame !== undefined;
     lastFrame = now;
     // The worker's replies drive the warm-up; the loop runs on so the page
     // is not marked idle.
     if (!ready || warming > 0) return true;
+    if (counts && running && !document.hidden) detail.frame(now, interval);
     const t0 = performance.now();
     const busy = update(elapsed);
     frameTimes[frames++ % FRAME_WINDOW] = performance.now() - t0;
@@ -283,6 +320,7 @@ export async function startApp({ view, renderer, display }) {
     // The draw that follows brings the rest of the view up to date.
     if (settle) {
       settle = false;
+      detail.quiet(performance.now());
       renderer.settle(river, river.memory, state);
       dirty = true;
     }
@@ -324,7 +362,7 @@ export async function startApp({ view, renderer, display }) {
     if (!times.length) return;
     const at = (p) => times[Math.min(times.length - 1, Math.floor(p * times.length))].toFixed(1);
     const mean = times.reduce((a, b) => a + b, 0) / times.length;
-    const text = `ms/frame   mean ${mean.toFixed(1)}   p95 ${at(0.95)}   p99 ${at(0.99)}`;
+    const text = `ms/frame   mean ${mean.toFixed(1)}   p95 ${at(0.95)}   p99 ${at(0.99)}   detail ${detail.level}`;
     if ($('stats').textContent !== text) $('stats').textContent = text;
   }
 
@@ -336,6 +374,7 @@ export async function startApp({ view, renderer, display }) {
 
   function togglePlay() {
     running = !running;
+    detail.quiet(performance.now());
     // The stopped channel shows the river as it stands, so a full step
     // owed starts the trailing channel from there.
     if (running) owed = dt;
@@ -400,6 +439,7 @@ export async function startApp({ view, renderer, display }) {
   });
 
   buildControls();
+  for (const event of ['resize', 'visibilitychange']) addEventListener(event, () => detail.quiet(performance.now()));
   // ?warmup=T overrides the warm-up. ?seed=S&tick=N&view=W, from the Link
   // button, replays seed S to tick N in a view W world units wide, which
   // later resets keep. Without ?seed the river starts from a random seed.
@@ -410,4 +450,89 @@ export async function startApp({ view, renderer, display }) {
   if (params.has('view')) local.view = Number(params.get('view'));
   const target = Math.round(Number(params.get('tick') ?? NaN));
   reset(Number.isFinite(target) && target >= 0 ? target : undefined);
+}
+
+// Pick the renderer's detail level from the frames counted by `frame(now,
+// interval)`, which `quiet(now)` stops counting for a while. `fixed`, from
+// `?detail=N`, fixes the level.
+function detailControl(renderer, fixed) {
+  const top = renderer.levels - 1;
+  const load = () => {
+    try {
+      const v = localStorage.getItem(DETAIL_KEY);
+      return v !== null && Number.isInteger(Number(v)) ? Math.max(0, Math.min(top, Number(v))) : null;
+    } catch {
+      return null;
+    }
+  };
+  fixed = fixed === null || !Number.isInteger(Number(fixed)) ? null : Math.max(0, Math.min(top, Number(fixed)));
+  let level = fixed ?? load() ?? top;
+  renderer.setDetail(level);
+  // Recent intervals, as a ring, and the display's frame interval from them.
+  const recent = new Float64Array(INTERVALS);
+  let intervals = 0, usual = 1000 / 60;
+  // Frames and slow frames in each second, as rings, from second `from`.
+  const frames = new Float64Array(BUCKETS), slow = new Float64Array(BUCKETS);
+  let from = null, second = null, quietUntil = -Infinity;
+  // Seconds to wait to step up, when the level last rose, and the steps up
+  // that failed.
+  let wait = UP_SECONDS, raisedAt = -Infinity, failures = 0;
+
+  function quiet(now) {
+    quietUntil = now + 1000 * QUIET_SECONDS;
+    from = null;
+  }
+
+  function change(to, now) {
+    level = to;
+    renderer.setDetail(level);
+    try {
+      localStorage.setItem(DETAIL_KEY, String(level));
+    } catch {
+      // The level is then found afresh on the next visit.
+    }
+    quiet(now);
+  }
+
+  // Frames and slow frames over the `seconds` whole seconds before `sec`,
+  // and whether all of them were counted.
+  function tally(seconds, sec) {
+    let n = 0, s = 0;
+    for (let k = Math.max(from, sec - seconds); k < sec; k++) [n, s] = [n + frames[k % BUCKETS], s + slow[k % BUCKETS]];
+    return { n, s, full: sec - from >= seconds };
+  }
+
+  // On the first frame of each second, step the level if the seconds
+  // before call for it.
+  function judge(now, sec) {
+    const down = tally(DOWN_SECONDS, sec);
+    if (level > 0 && down.full && down.s > DOWN_SHARE * down.n) {
+      if (now - raisedAt < 1000 * BACKOFF_SECONDS) [failures, wait] = [failures + 1, 2 * wait];
+      change(level - 1, now);
+      return;
+    }
+    const up = tally(wait, sec);
+    if (level < top && failures < MAX_FAILURES && up.full && up.s < UP_SHARE * up.n) {
+      raisedAt = now;
+      change(level + 1, now);
+    }
+  }
+
+  function frame(now, interval) {
+    recent[intervals++ % INTERVALS] = interval;
+    if (intervals % INTERVALS === 0) usual = recent.slice().sort()[Math.floor(FRAME_QUANTILE * INTERVALS)];
+    if (fixed !== null || now < quietUntil) return;
+    const sec = Math.floor(now / 1000);
+    if (from === null) [from, second] = [sec, sec - 1];
+    if (sec !== second) {
+      for (let k = Math.max(second + 1, sec - BUCKETS + 1); k <= sec; k++) frames[k % BUCKETS] = slow[k % BUCKETS] = 0;
+      second = sec;
+      judge(now, sec);
+      if (from === null) return;
+    }
+    frames[sec % BUCKETS]++;
+    if (interval > SLOW_FRAME * usual) slow[sec % BUCKETS]++;
+  }
+
+  return { frame, quiet, get level() { return level; } };
 }

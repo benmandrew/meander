@@ -18,7 +18,7 @@ The pre-commit hook in `.githooks/` checks a copy of the index. Staged Rust gets
 
 ## URL parameters
 
-`?seed=S` sets the seed and `?warmup=T` the warm-up, in simulated units. `?seed=S&tick=N&view=W`, from the panel's Link button, replays to step N and pauses.
+`?seed=S` sets the seed and `?warmup=T` the warm-up, in simulated units. `?seed=S&tick=N&view=W`, from the panel's Link button, replays to step N and pauses. `?detail=N` fixes the detail level (0 is the lowest, 2 the top) and turns off its adjustment; the panel's stats line shows the level in use.
 
 ## Snapshots
 

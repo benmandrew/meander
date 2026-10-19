@@ -67,6 +67,14 @@ html, body {
   will-change: transform;
 }
 
+/* Detail levels below the top (`DETAIL` in main.js) draw the layers whose
+   anti-aliased edges cost the most to rasterise without it: at level 1 the
+   fields, farmsteads, tracks and crowns, and at level 0 every layer. */
+html[data-detail="1"] :is(#fields, #upper, #trees),
+html[data-detail="0"] :is(#bars, #band, #ground, #fields, #lower, #swept, #upper, #trees, #view) {
+  shape-rendering: optimizeSpeed;
+}
+
 #year {
   position: fixed;
   top: 12px;

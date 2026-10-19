@@ -135,10 +135,23 @@ const FLOODPLAIN_IDLE_BUDGET = 10;
 // `REDRAW_GAP` ms from one frame to the next.
 const REDRAW_MEMORY = 0.8;
 // Seconds in real time a floodplain layer rests after showing a new
-// picture before it may start another. Its refreshes are set in simulated
-// time, so at full speed the forest fell due six times a second; resting
-// is not counted as due, so it does not slow the river.
+// picture before it may start another, at the top detail level. Its
+// refreshes are set in simulated time, so at full speed the forest fell
+// due six times a second; resting is not counted as due, so it does not
+// slow the river.
 const REDRAW_REST = 0.5;
+// Detail levels, from the lowest, which `ui.js` picks by how well the
+// device keeps up. Below the top level `style.css` draws layers without
+// anti-aliasing (see `ALIASED`): at level 1 the fields, the farmsteads,
+// tracks and marsh, and the crowns, whose full redraws took about 65 ms of
+// GPU raster less between them, and at level 0 every layer. Each level
+// also sets the seconds a floodplain layer rests between redraws (`rest`),
+// since each redraw repaints the layer whole.
+const DETAIL = [
+  { rest: 2 },
+  { rest: 1 },
+  { rest: REDRAW_REST },
+];
 const REDRAW_SLACK = 100;
 const REDRAW_GAP = 100;
 // Valley sides. Each wall is a scarp from its foot, where the floodplain
@@ -1944,6 +1957,9 @@ class SvgRenderer {
     this.grounds = [band, ground, fields, lower, swept, upper, trees];
     this.layers = [bars, ...this.grounds, svg];
     this.svg = svg;
+    // The detail level, an index into `DETAIL`.
+    this.levels = DETAIL.length;
+    this.setDetail(this.levels - 1);
     for (const s of this.layers) s.setAttribute('preserveAspectRatio', 'xMidYMid meet');
     const round = { fill: 'none', 'stroke-linejoin': 'round', 'stroke-linecap': 'round' };
     // Centrelines turn only a few degrees at each point, where a bevel join
@@ -2800,6 +2816,12 @@ class SvgRenderer {
     }
     for (let i = 0; i < m; i++) if (!taken[i]) order.push(i);
     [this.scars, this.lakes] = [order.map((i) => this.scars[i]), order.map((i) => this.lakes[i])];
+  }
+
+  // Set the detail level, an index into `DETAIL`.
+  setDetail(level) {
+    this.detail = level;
+    document.documentElement.dataset.detail = String(level);
   }
 
   newLake() {
@@ -3691,12 +3713,12 @@ class SvgRenderer {
     ].map((layer, k) => ({ ...layer, due: () => layer.due() && this.rested(k, layer) }));
   }
 
-  // Whether layer `k` may start a redraw: once `REDRAW_REST` has passed in
-  // real time since it last showed a new picture, or at once while its
-  // redraw is under way or the river is settling.
+  // Whether layer `k` may start a redraw: once the detail level's rest has
+  // passed in real time since it last showed a new picture, or at once
+  // while its redraw is under way or the river is settling.
   rested(k, layer) {
     if (this.settling || layer.job?.()) return true;
-    return performance.now() - (this.shownAt[k] ?? -Infinity) >= 1000 * REDRAW_REST;
+    return performance.now() - (this.shownAt[k] ?? -Infinity) >= 1000 * DETAIL[this.detail].rest;
   }
 
   // Refresh the floodplain layers that are due, for `budget` ms a call.
