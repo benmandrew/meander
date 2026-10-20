@@ -144,13 +144,16 @@ const REDRAW_REST = 0.5;
 // device keeps up. Below the top level `style.css` draws layers without
 // anti-aliasing (see `ALIASED`): at level 1 the fields, the farmsteads,
 // tracks and marsh, and the crowns, whose full redraws took about 65 ms of
-// GPU raster less between them, and at level 0 every layer. Each level
-// also sets the seconds a floodplain layer rests between redraws (`rest`),
-// since each redraw repaints the layer whole.
+// GPU raster less between them in Chrome, and at level 0 every layer. Each
+// level also sets the seconds a floodplain layer rests between redraws
+// (`rest`), and the device pixels the channel must have moved for a frame
+// to redraw it (`move`). Firefox rasterises SVG on the CPU and gains little
+// from dropping anti-aliasing, but a fields redraw held its frames for
+// about 50 ms on an Intel iGPU, so there it is the rest that counts.
 const DETAIL = [
-  { rest: 2 },
-  { rest: 1 },
-  { rest: REDRAW_REST },
+  { rest: 4, move: 2 },
+  { rest: 2, move: 1 },
+  { rest: REDRAW_REST, move: 0.5 },
 ];
 const REDRAW_SLACK = 100;
 const REDRAW_GAP = 100;
@@ -262,6 +265,12 @@ const FIELD_REFRESH = 5;
 // redraw moves the fade by about one region, not the fields' whole edge.
 // The fields redraw after them, as which fields the fade reaches changes.
 const FIELD_FADE = 8;
+// The furrows and hedges are drawn in `FIELD_STRIPS` paths, each across a
+// strip of the window, so a field redraw replaces only the strips whose
+// lines changed. Firefox rasterises SVG on the CPU, a changed path's whole
+// box at a time, and the window-wide paths it replaced on every field
+// redraw held frames for 65 ms on an Intel iGPU at 1850 × 966.
+const FIELD_STRIPS = 8;
 // A square larger than any window, for clips that cut holes in the plane.
 const OUTSIDE = 'M-1e6-1e6h2e6v2e6h-2e6z';
 // The opacity that a copy of a fading field adds in region `k` of the
@@ -556,9 +565,6 @@ const CHANNEL_MARGIN = 3;
 // a segment a step, so this spans ten steps at the top speed.
 const FOOT_BACK = 2;
 const FOOT_AHEAD = 8;
-// Device pixels the channel must have moved for a frame to redraw it. At
-// the default speed it moves 0.1–0.3 CSS px a frame on a landscape phone.
-const MIN_MOVE = 0.5;
 // Sine of the turn between the tangents at a segment's ends, about 3°,
 // below which a channel edge is drawn as a straight segment and not a
 // curve. At 3° the curve lies under 0.1 px from the chord, and about three
@@ -2023,17 +2029,18 @@ class SvgRenderer {
     this.parcelSteps = Array.from({ length: FIELD_FADE }, (_, k) =>
       el('g', { 'clip-path': `url(#fade-${k + 1})`, ...ALIASED }, this.fieldLayer));
     // The furrows and hedges of the fields the fade does not reach, and of
-    // those it does, drawn again in each region. The faded copies and the
-    // faint furrows are `ALIASED`; the hedges at full strength are not,
-    // since their jagged edges showed.
+    // those it does, drawn again in each region, each a group of
+    // `FIELD_STRIPS` paths. The faded copies and the faint furrows are
+    // `ALIASED`; the hedges at full strength are not, since their jagged
+    // edges showed.
     const strokes = (name, colour, opacity, aliased) => {
       const style = { fill: 'none', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', stroke: `rgb(${colour})` };
-      const old = el('path', { ...style, 'stroke-opacity': opacity, ...(aliased ? ALIASED : {}) }, this.fieldLayer);
-      const faded = el('path', { ...style, id: `fading-${name}`, ...ALIASED }, defs);
+      const old = el('g', { ...style, 'stroke-opacity': opacity, ...(aliased ? ALIASED : {}) }, this.fieldLayer);
+      const faded = el('g', { ...style, id: `fading-${name}`, ...ALIASED }, defs);
       for (let k = 1; k <= FIELD_FADE; k++) {
         el('use', { href: `#fading-${name}`, 'clip-path': `url(#fade-${k})`, 'stroke-opacity': fadeStep(opacity, k) }, this.fieldLayer);
       }
-      return [old, faded];
+      return [old, faded].map((g) => ({ g, paths: Array.from({ length: FIELD_STRIPS }, () => el('path', {}, g)) }));
     };
     this.furrows = strokes('furrows', FURROW, FURROW_OPACITY, true);
     this.hedges = strokes('hedges', HEDGE, 0.8, false);
@@ -2435,7 +2442,8 @@ class SvgRenderer {
     // The furrows of each arable field: lines along its length at even
     // places across its strip, bent by the strip's wave and the reversed
     // S, kept where they cross the field's own cells.
-    const furrowData = ['', ''];
+    const stripOf = (x) => Math.max(0, Math.min(FIELD_STRIPS - 1, Math.floor(FIELD_STRIPS * (x / cell - c0) / W)));
+    const furrowData = [0, 1].map(() => Array(FIELD_STRIPS).fill(''));
     const [head, step] = [FURROW_HEAD * w, FURROW_STEP * w];
     for (const [n, f] of fields.entries()) {
       if (n % 4 === 0 && due()) yield;
@@ -2460,7 +2468,7 @@ class SvgRenderer {
           if (inside) {
             run.push(x, y);
           } else {
-            if (run.length >= 4) furrowData[+(f.first < FIELD_FADE)] += pointsData(run);
+            if (run.length >= 4) furrowData[+(f.first < FIELD_FADE)][stripOf(run[0])] += pointsData(run);
             run = [];
           }
         }
@@ -2470,7 +2478,7 @@ class SvgRenderer {
     // share it exactly.
     const arcs = yield* boundaryArcs(lab, W, rows, due);
     const outlines = new Map();
-    const hedgeData = ['', ''];
+    const hedgeData = [0, 1].map(() => Array(FIELD_STRIPS).fill(''));
     for (const arc of arcs) {
       if (due()) yield;
       const world = arc.pts.map((v, k) => (k % 2 ? v : c0 + v) * cell);
@@ -2488,7 +2496,7 @@ class SvgRenderer {
       const [fa, fb] = [fields[arc.a - 1], fields[arc.b - 1]];
       const pair = hash01(Math.min(fa.key, fb.key), Math.max(fa.key, fb.key));
       if (pair >= (fa.o === fb.o ? HEDGE_SIDE : HEDGE_EDGE)) continue;
-      hedgeData[+(Math.min(fa.first, fb.first) < FIELD_FADE)] += pointsData(pts);
+      hedgeData[+(Math.min(fa.first, fb.first) < FIELD_FADE)][stripOf(pts[0])] += pointsData(pts);
       for (const n of arc.cells) mask[n] = 0;
     }
     // Chain each field's arcs into rings, end to start.
@@ -2533,8 +2541,8 @@ class SvgRenderer {
         drawn.push([key, k, field.colour, opacity, old?.tagName === 'use' ? old : el('use', { href: `#${id}` })]);
       }
     }
-    const hedges = hedgeData.map((d, k) => twin(this.hedges[k], d));
-    const furrows = furrowData.map((d, k) => twin(this.furrows[k], d));
+    const hedges = hedgeData.map((ds, k) => ds.map((d, s) => twin(this.hedges[k].paths[s], d)));
+    const furrows = furrowData.map((ds, k) => ds.map((d, s) => twin(this.furrows[k].paths[s], d)));
     // The writes alone in the last stage, which a call's chaining would
     // otherwise run into.
     yield;
@@ -2561,10 +2569,14 @@ class SvgRenderer {
     for (const path of this.fieldPaths.values()) path.remove();
     this.meadow = meadowNow;
     this.fieldPaths = kept;
-    swap(this.hedges, hedges);
-    for (const path of this.hedges) set(path, 'stroke-width', dp1(HEDGE_WIDTH * w));
-    swap(this.furrows, furrows);
-    for (const path of this.furrows) set(path, 'stroke-width', dp1(FURROW_WIDTH * w));
+    this.hedges.forEach(({ g, paths }, k) => {
+      swap(paths, hedges[k]);
+      set(g, 'stroke-width', dp1(HEDGE_WIDTH * w));
+    });
+    this.furrows.forEach(({ g, paths }, k) => {
+      swap(paths, furrows[k]);
+      set(g, 'stroke-width', dp1(FURROW_WIDTH * w));
+    });
     if (fade) swap(this.fadeRegions, fade);
     if (unwooded) set(this.scarpClip, 'd', unwooded);
     if (this.fadeNext === fade) this.fadeNext = null;
@@ -3095,8 +3107,9 @@ class SvgRenderer {
   // Draw the channel as it stood at simulated time `at`, between the
   // centrelines of the last two draws. At low speeds the river steps only
   // every few frames, by up to a pixel, so the channel trails it by a step
-  // and moves on every frame that would move it by `MIN_MOVE` device
-  // pixels. Returns whether it drew.
+  // and moves on every frame that would move it by the detail level's
+  // `move` device pixels. At the default speed it moves 0.1–0.3 CSS px a
+  // frame on a landscape phone. Returns whether it drew.
   tween(river, at) {
     const { from, to } = this;
     if (!to) return false;
@@ -3120,7 +3133,7 @@ class SvgRenderer {
     }
     const ahead = f === this.drawnF ? 0 : from === to ? Infinity : f < 1 || to.feet ? Math.abs(f - this.drawnF) * feet(to).move : Infinity;
     const move = this.offset + ahead;
-    if (move === 0 || (move * this.pixels() < MIN_MOVE && at !== Infinity)) return false;
+    if (move === 0 || (move * this.pixels() < DETAIL[this.detail].move && at !== Infinity)) return false;
     [this.offset, this.drawnF] = [0, f];
     const { line, widths } = f < 1 ? between(feet(to), to.line, to.widths, f) : to;
     const frame = channelFrame(line);
